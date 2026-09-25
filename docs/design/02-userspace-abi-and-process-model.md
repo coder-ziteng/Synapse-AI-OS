@@ -120,23 +120,64 @@ pub struct UserMemoryRegion {
 - 指令：`syscall`（需在 Phase 4 配置 `MSR_LSTAR` / `MSR_STAR` / `MSR_FMASK`）。
 - 内核栈切换：通过 `MSR_GS_BASE` + TSS.RSP0 定位当前线程内核栈。
 
-### 4.2 syscall 号分配表（草案）
-| 号 | 名称 | 说明 |
-|----|------|------|
-| 0 | `ipc_send` | 见文档 03 |
-| 1 | `ipc_recv` | |
-| 2 | `ipc_reply` | |
-| 3 | `cap_invoke` | 通用能力调用 |
-| 4 | `yield` | 主动让出 CPU |
-| 5 | `process_spawn` | 见 §5 |
-| 6 | `gettime` | 时钟服务，见 §7 |
-| 7 | `process_freeze` | *(FR10)* 冻结进程（持有 PROCESS_ADMIN capability 才能调用）|
-| 8 | `process_thaw` | *(FR10)* 解冻进程 |
-| … | TBD | |
+### 4.2 syscall 号分配表（PROPOSED）
 
-### 4.3 待决策
-- [ ] 错误码约定（复用 Linux errno 数值？还是自定义）
-- [ ] syscall 是否可重启（被信号/抢占打断后）
+| 号 | 名称 | 参数 | 说明 |
+|----|------|------|------|
+| **IPC** | | | |
+| 0 | `ipc_send` | `ep: CapRef, msg: *const u8, len: usize, caps: *const CapRef, n_caps: usize` | 同步发送（阻塞直到 reply），见 Doc 03 |
+| 1 | `ipc_recv` | `ep: CapRef, buf: *mut u8, cap: *mut CapRef` | 同步接收（阻塞直到消息）|
+| 2 | `ipc_reply` | `ep: CapRef, msg: *const u8, len: usize` | 回复原发送方 |
+| 3 | `ipc_try_send` | `ep: CapRef, msg: *const u8, len: usize` | 非阻塞发送（Doc 03 §9 PROPOSED）|
+| **Notification** | | | |
+| 4 | `notification_signal` | `notif: CapRef, bits: u32` | 发送 Notification 信号（位图 OR）|
+| 5 | `notification_wait` | `notif: CapRef, mask: u32` | 等待 Notification（位图 AND），返回触发位 |
+| **Capability** | | | |
+| 10 | `cap_invoke` | `cap: CapRef, op: u32, args: *const u8` | 通用能力调用（对象特定操作）|
+| 11 | `cap_delegate` | `parent: CapRef, rights: Rights, child: *mut CapRef` | 委托子 capability（Doc 01 §3.3）|
+| 12 | `cap_revoke` | `cap: CapRef` | 撤销 capability（derivation tree 遍历，Doc 01 §3.4）|
+| **Process** | | | |
+| 20 | `process_spawn` | `elf: CapRef, args: *const u8, caps: *const CapRef, n_caps: usize, death_ep: CapRef` | 创建子进程（Doc 02 §5.2）|
+| 21 | `process_exit` | `code: i32` | 当前进程退出 |
+| 22 | `process_reap` | `pid: Pid` | 回收僵尸进程（Doc 02 §5.3）|
+| 23 | `process_freeze` | `pid: Pid` | 冻结进程（Doc 02 §5.4，需 PROCESS_ADMIN cap）|
+| 24 | `process_thaw` | `pid: Pid` | 解冻进程 |
+| 25 | `yield` | | 主动让出 CPU |
+| **Time** | | | |
+| 30 | `gettime` | `clock_id: u32, ts: *mut Timespec` | 获取时间（单调时钟 / 墙钟）|
+| **Memory** | | | |
+| 40 | `mmap` | `addr: *mut u8, len: usize, prot: u32, flags: u32` | 映射内存区域 |
+| 41 | `munmap` | `addr: *mut u8, len: usize` | 解除映射 |
+
+**总计**：首期 17 个 syscall（IPC 4 + Notification 2 + Capability 3 + Process 6 + Time 1 + Memory 2）。
+
+### 4.3 错误码约定（PROPOSED）
+
+**PROPOSED → 自定义错误码（负值返回）**：
+- 不复用 Linux errno（Synapse 是独立内核，不依赖 Linux 语义）；
+- 错误码为负值（`rax < 0` 表示错误），范围 `-1` ~ `-127`；
+- 返回值 ≥ 0 表示成功（具体语义由 syscall 决定）。
+
+| 错误码 | 名称 | 说明 |
+|--------|------|------|
+| -1 | `E_INVALID_CAP` | capability 引用无效（cptr 越界 / 权限不足 / 对象已撤销）|
+| -2 | `E_INVALID_ADDR` | 用户态地址非法（未映射 / 权限不足 / 对齐错误）|
+| -3 | `E_NO_MEMORY` | 内核内存不足（页帧 / CapTable 槽位）|
+| -4 | `E_WOULD_BLOCK` | 非阻塞操作无法立即完成（`ipc_try_send` 队列满）|
+| -5 | `E_NOT_FOUND` | 对象不存在（pid / agent_id / endpoint）|
+| -6 | `E_AGENT_ID_CONFLICT` | agent_id 重复（spawn 时，Doc 02 §5.2）|
+| -7 | `E_PERMISSION` | 权限不足（rights 位不覆盖本次操作）|
+| -8 | `E_FROZEN` | 目标进程已冻结（freeze / thaw / IPC 到冻结进程）|
+| -9 | `E_ZOMBIE` | 目标进程已退出（需先 reap）|
+| -10 | `E_NOT_IMPLEMENTED` | syscall 未实现（预留）|
+
+**设计原则**：
+- 错误码数量控制在 127 以内（7-bit，便于序列化）；
+- 每个错误码对应明确的失败场景，便于用户态处理；
+- 扩展新错误码时，追加到表尾，不修改已有编号。
+
+### 4.4 待决策
+- [ ] syscall 是否可重启（被信号/抢占打断后）—— 需信号模型确认后决策
 
 ---
 
