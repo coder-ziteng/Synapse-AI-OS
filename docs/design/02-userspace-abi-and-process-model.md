@@ -1,6 +1,6 @@
 # 设计文档 02：用户态 ABI 与进程模型
 
-> 状态：DRAFT / 设计细化（含监督树与重启策略）
+> 状态：**PROPOSED 完成**（待确认升级为 DECIDED）
 > 关联需求：FR5 用户态加载、FR10 进程冻结与监督原语
 > 关联里程碑：Phase 4（用户态与 IPC）；监督树由系统服务层 S3 落地
 > 最后更新：2026-09-25
@@ -11,7 +11,20 @@
 
 定义 Synapse 用户态程序的**编译目标、加载方式、syscall 约定、进程/线程模型、地址空间布局**。这是"能加载并运行第一个用户态进程"（FR5）的前置设计，Phase 4 开工前必须收敛。
 
-> ⚠️ 本文档为骨架，各章节列出**待决策问题（TBD）**。
+### PROPOSED 决策汇总
+
+| 决策项 | PROPOSED 方案 | 章节 |
+|--------|--------------|------|
+| initramfs 格式 | cpio (newc) | §6.1 |
+| ELF 加载基址 | 0x400000（Linux 传统值）| §3.1 |
+| PIE 支持 | 首期不支持（固定加载）| §3.1 |
+| 地址空间 | 用户空间 0x0~0x7FFF_FFFF_FFFF，内核映射 0xFFFF_8000_... | §3.1 |
+| spawn 权限 | 仅 init 进程可 spawn | §5.2 |
+| death notification | death endpoint + signal 消息 + reap syscall | §5.3 |
+| syscall 表 | 17 个 syscall（IPC 4 + Notification 2 + Capability 3 + Process 6 + Time 1 + Memory 2）| §4.2 |
+| 错误码 | 自定义负值（-1~-127），10 个核心错误码 | §4.3 |
+
+> ✅ Phase 4 核心设计决策已完成，剩余 TBD 为信号模型/时钟校准相关。
 
 ---
 

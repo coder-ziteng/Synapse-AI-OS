@@ -1,6 +1,6 @@
 # 设计文档 04：外交工具通道架构 (Diplomat Channel Architecture)
 
-> 状态：DRAFT / 设计细化
+> 状态：**PROPOSED 完成**（待确认升级为 DECIDED）
 > 关联需求：原始构想 [`../../原始思路.md`](../../原始思路.md) "外交工具"系列讨论
 > 关联里程碑：Phase 5（外交工具与 Agent 雏形）
 > 前置：[设计文档 01 Capability 模型](01-capability-agent-permission-model.md)、[设计文档 03 IPC](03-ipc-message-and-single-copy-path.md)
@@ -11,6 +11,19 @@
 ## 0. 文档目的
 
 定义外交工具（Diplomat）的**内部架构**：从原始构想的"网络栈最底层的海关"出发，落实为结构化业务通道（Channel）、编解码器（Codec）注册表、入出站安全扫描管道、性能分层处理。本文档回答：
+
+### PROPOSED 决策汇总
+
+| 决策项 | PROPOSED 方案 | 章节 |
+|--------|--------------|------|
+| ChannelRegistry 注册 | 首期仅编译期注册 | §11 |
+| File Channel 扫描失败 | 异步 IPC Notification | §11 |
+| Stream Channel 违规 | 熔断（强安全）| §11 |
+| Security Gateway 失败 | 熔断整个外交工具（强安全）| §11 |
+| 出站脱敏规则集 | 内置 + 用户可配 | §11 |
+| 硬件加速 | 不纳入 Phase 5（软件先行）| §11 |
+| 审计事件流 | 不经过内核（外交工具内部产生）| §11 |
+| AuditEvent.signature | Signature 类型（含算法标识）| §8.1 |
 
 1. 为什么外交工具不能是普通 socket 代理？
 2. 哪些通道必须存在、各自的固定行为是什么？

@@ -1,6 +1,6 @@
 # 设计文档 01：Capability 与 Agent 权限模型
 
-> 状态：DRAFT / 设计细化（含五级权限映射、审计钩子、唯一网络出口不变量）
+> 状态：**PROPOSED 完成**（待确认升级为 DECIDED）
 > 关联需求：NFR3 安全性、IPC `capability_token`、FR6/FR9
 > 关联里程碑：Phase 4（用户态与 IPC）
 > 最后更新：2026-09-25
@@ -11,7 +11,17 @@
 
 定义 Synapse 内核的**能力（Capability）系统**与 **Agent 权限模型**。这是 Synapse "AI 原生 + 安全" 定位的核心卖点，也是与 Linux（DAC/MAC）拉开差距的关键。本文档回答：一个 token 由谁铸造、存在哪里、如何校验、如何委托与撤销。
 
-> ⚠️ 本文档为骨架，各章节列出**待决策问题（TBD）**，需在 Phase 4 开工前填充。
+### PROPOSED 决策汇总
+
+| 决策项 | PROPOSED 方案 | 章节 |
+|--------|--------------|------|
+| 根 capability 铸造 | init 进程全量铸造（与 HAL 分离）| §3.1 |
+| 撤销算法 | derivation tree 遍历（seL4 风格）| §3.4 |
+| 委托语义 | 保留父子链（用于撤销）| §3.3 |
+| 数据结构 | Capability.parent + CapTable 256 槽 + CapRef=u8 | §4 |
+| agent_id 管理 | init 进程统一管理命名空间 | §7 |
+
+> ✅ Phase 4 核心设计决策已完成，剩余 TBD 为安全评审/性能基准相关。
 
 ---
 

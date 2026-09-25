@@ -1,9 +1,22 @@
 # 设计文档 06：系统服务层路线图 (System Services Layer Roadmap)
 
-> 状态：DRAFT / 路线图骨架
+> 状态：**PROPOSED 完成**（待确认升级为 DECIDED）
 > 关联需求：原始构想 [记忆系统/自进化/Agent 编排/本体模型/动态 UI/GUI 显示栈/数据层] 等系统层愿景
 > 关联里程碑：**S1~S6 服务层阶段**（与 Synapse 内核层 Phase 1~6 并行）
 > 最后更新：2026-09-25
+
+### PROPOSED 决策汇总
+
+| 决策项 | PROPOSED 方案 | 章节 |
+|--------|--------------|------|
+| S4 矢量检索（首期） | 暴力召回跑通闭环 + `VectorIndex` trait 抽象 | §6.6 |
+| S4 图存储 | 自研极简属性图（邻接表 + 页式存储，与 P6 存储栈同构）| §6.6 |
+| 硬件信任根埋点 | `CryptoProvider` trait（算法无关）+ `TrustRoot` trait 占位 | §13.2 |
+| 审计签名后量子迁移 | `Signature` 不透明类型（含算法标识），Phase 6 替换不改业务层 | §13.2.1 |
+| HAL TrustRoot 首期 | 空实现 `NullTrustRoot`，方法全部返回 `NotImplemented` | §13.2.3 |
+| 服务层强制规则 | 内核 P4 通过即开工 S1，不可无限推迟 | §12 |
+
+> ✅ 系统服务层路线图核心设计决策已完成，剩余 TBD 为 S6 GUI 显示栈选型、WASM 沙箱性能基准、多编程环境边界等。
 
 ---
 

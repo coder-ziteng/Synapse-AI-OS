@@ -1,9 +1,23 @@
 # 设计文档 05：跨 OS 外交协议 (Inter-OS Diplomacy Protocol)
 
-> 状态：DRAFT / **远期骨架**（Phase 6+，首期仅登记不实现）
+> 状态：**PROPOSED 完成**（待确认升级为 DECIDED）
 > 关联需求：原始构想 "未来的远程访问，本质上就是两个 agent 之间的交互"、"外交工具"系列
 > 关联里程碑：Phase 6+（远期）；与 [设计文档 04](04-diplomat-channel-architecture.md) 共享外交工具实现
 > 最后更新：2026-09-25
+
+### PROPOSED 决策汇总
+
+| 决策项 | PROPOSED 方案 | 章节 |
+|--------|--------------|------|
+| DID 解析机制 | did:web（HTTP-based，最简单）| §2.1 |
+| 信誉模型 | 本地优先（per-DID reputation score）| §5.2 |
+| 协议主协议 | A2A（JSON-RPC 2.0 + SSE）| §3 |
+| 信封版本格式 | diplomat/major.minor（semver）| §11 |
+| 短期凭证 | SD-JWT（任务绑定，会话结束即失效）| §4 |
+| 大对象跨 OS 共享 | 联邦存储（per-session negotiated HTTPS PUT/GET）| §11 |
+| 交互模式 | 分层混合（低风险主动 / 高风险经确认）| §8 |
+
+> ✅ Phase 6+ 远期骨架核心设计决策已完成，剩余 TBD 为分布式基础设施相关（跨 OS CRL 同步、自动仲裁机制、主动/被动分层阈值等）。
 
 ---
 
