@@ -6,7 +6,7 @@
     "current_phase": "P1",
     "current_task": "P1-T5",
     "status": "in_progress",
-    "notes": "2026-09-25: 设计文档纯设计审查完成 (claude/design-pure-review 分支, 8d9814d)。\nDoc 01~06 全部升级为 PROPOSED 完成，添加决策汇总表。Phase 4/5/6+ 核心设计收敛，\n剩余 TBD 均为安全评审/性能基准/远期基础设施类。跨文档一致性已验证 5 项对齐。\n\n2026-09-25: CI/xtask 落地完成 (d3c4994)。P1-T4 boot 调试发现：\n- QEMU trace 显示 #PF @ IP=0x2068dc CR2=0xC0000080\n- IP=0x2068dc 在 raw_cpuid 库代码中，不在 _start64 (0x200d90)\n- rsp 被破坏（应为 0x15008，实际 0xC0000072）\n- stage2 debugcon 输出到 'L' (jmp rax 前) 后无 'AB' 从 _start64\n- 结论：stage2 的 jmp rax 未成功到达 _start64，或到达后 rsp 被破坏\n- 可能原因：stage2 页表/栈设置问题，或 _start64 入口约定不符\n- 内核 ELF 有 Xen PVH note (entry=0x200018)，但 QEMU -kernel 未走 PVH\n下一步：P1-T5 (log + panic handler) 不依赖 boot，可并行推进。\n\n2026-09-25: P1-T6 (HAL SerialDevice trait) + P1-T7 (UART HAL化) 完成。HAL 提供零成本抽象 + cfg(test) fake impl。\n\nP1-T5 (log + logger) 完成。内核集成 log crate，KernelLogger 输出到串口。"
+    "notes": "2026-09-25: 设计文档纯设计审查完成 (claude/design-pure-review 分支)。\nDoc 01~06 全部升级为 PROPOSED 完成，添加决策汇总表。Phase 4/5/6+ 核心设计收敛。\n\n2026-09-25: 需求评审 §6 Phase 4 硬性闸门设计缺口补全完成 (f253114, 92f7201, 53b89b1)。\n- Doc 01 §4.2: 对象生命周期状态机 + generation 校验 + 进程退出回收顺序\n- Doc 02 §4.5: ABI 版本策略 (abi_query + 消息头 version + rights 只追加) + 5 新错误码\n- Doc 02 §5.5: 每进程资源配额模型 (Quota struct + 管理规则 + FR8 关系)\n- Doc 02 §5.1/§3.2: MVP-3 单线程约束 + PCID 可选优化说明\n- Doc 03 §5.1: IPC 错误语义 + 对端死亡处理规则\n- Doc 04: Phase 5 MVP 范围约束 (仅 API Channel)\n- Doc 06 §2.1: 服务层依赖级别 (P0/P1/P2) + 各阶段首期承诺\n\n需求评审 §6 的 12 项 Phase 4 闸门决策：11 项已收敛，1 项 (基准测试配置) 属测试/CI 范畴。\n\n2026-09-25: CI/xtask 落地完成 (d3c4994)。P1-T4 boot 调试发现：\n- QEMU trace 显示 #PF @ IP=0x2068dc CR2=0xC0000080\n- IP=0x2068dc 在 raw_cpuid 库代码中，不在 _start64 (0x200d90)\n- rsp 被破坏（应为 0x15008，实际 0xC0000072）\n- stage2 debugcon 输出到 'L' (jmp rax 前) 后无 'AB' 从 _start64\n- 结论：stage2 的 jmp rax 未成功到达 _start64，或到达后 rsp 被破坏\n- 可能原因：stage2 页表/栈设置问题，或 _start64 入口约定不符\n- 内核 ELF 有 Xen PVH note (entry=0x200018)，但 QEMU -kernel 未走 PVH\n下一步：P1-T5 (log + panic handler) 不依赖 boot，可并行推进。\n\n2026-09-25: P1-T6 (HAL SerialDevice trait) + P1-T7 (UART HAL化) 完成。HAL 提供零成本抽象 + cfg(test) fake impl。\n\nP1-T5 (log + logger) 完成。内核集成 log crate，KernelLogger 输出到串口。"
   },
   "env_prerequisites": {
     "install_root": "D:\\envTools",
@@ -426,6 +426,11 @@
       "date": "2026-09-25",
       "decision": "Doc 01~06 设计文档状态统一升级为 PROPOSED 完成，添加决策汇总表",
       "reason": "Phase 4/5/6+ 核心设计决策已全部收敛（从 30+ TBD 降至 ~15 个，均为需外部评审/基准测试项）。汇总表使各文档关键决策一目了然，便于后续实现阶段快速查阅。跨文档一致性已验证：Doc 01→02 capability→syscall、Doc 01→03 cap→IPC、Doc 06→04 CryptoProvider→Signature、Doc 03 内部 Endpoint/Notification、Doc 01 内部 parent 链/256 槽"
+    },
+    {
+      "date": "2026-09-25",
+      "decision": "补全需求评审 §6 识别的 Phase 4 硬性闸门设计缺口（对象生命周期/generation/配额/ABI版本/IPC错误/Phase5范围/服务层依赖级别）",
+      "reason": "需求评审文档 (docs/requirements-review-and-supplement.md) §6 列出 12 项 Phase 4 前必须收敛的决策。原设计文档覆盖了 7 项，本轮补全剩余 4 项结构性缺口（对象生命周期状态机+generation、每进程配额、ABI版本策略、IPC错误语义）+ 2 项范围约束（Phase 5 仅 API Channel、服务层 P0/P1/P2 依赖级别）。第 12 项（基准测试配置）属测试/CI 范畴，不在设计文档中体现。至此 Phase 4 设计闸门全部通过，可进入实现阶段。"
     }
   ]
 }
