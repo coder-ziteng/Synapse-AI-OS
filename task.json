@@ -6,7 +6,7 @@
     "current_phase": "P1",
     "current_task": "P1-T5",
     "status": "in_progress",
-    "notes": "2026-09-25: CI/xtask 落地完成 (d3c4994)。P1-T4 boot 调试发现：\n- QEMU trace 显示 #PF @ IP=0x2068dc CR2=0xC0000080\n- IP=0x2068dc 在 raw_cpuid 库代码中，不在 _start64 (0x200d90)\n- rsp 被破坏（应为 0x15008，实际 0xC0000072）\n- stage2 debugcon 输出到 'L' (jmp rax 前) 后无 'AB' 从 _start64\n- 结论：stage2 的 jmp rax 未成功到达 _start64，或到达后 rsp 被破坏\n- 可能原因：stage2 页表/栈设置问题，或 _start64 入口约定不符\n- 内核 ELF 有 Xen PVH note (entry=0x200018)，但 QEMU -kernel 未走 PVH\n下一步：P1-T5 (log + panic handler) 不依赖 boot，可并行推进。\n\n2026-09-25: P1-T6 (HAL SerialDevice trait) + P1-T7 (UART HAL化) 完成。HAL 提供零成本抽象 + cfg(test) fake impl。\n\nP1-T5 (log + logger) 完成。内核集成 log crate，KernelLogger 输出到串口。"
+    "notes": "2026-09-25: 设计文档纯设计审查完成 (claude/design-pure-review 分支, 8d9814d)。\nDoc 01~06 全部升级为 PROPOSED 完成，添加决策汇总表。Phase 4/5/6+ 核心设计收敛，\n剩余 TBD 均为安全评审/性能基准/远期基础设施类。跨文档一致性已验证 5 项对齐。\n\n2026-09-25: CI/xtask 落地完成 (d3c4994)。P1-T4 boot 调试发现：\n- QEMU trace 显示 #PF @ IP=0x2068dc CR2=0xC0000080\n- IP=0x2068dc 在 raw_cpuid 库代码中，不在 _start64 (0x200d90)\n- rsp 被破坏（应为 0x15008，实际 0xC0000072）\n- stage2 debugcon 输出到 'L' (jmp rax 前) 后无 'AB' 从 _start64\n- 结论：stage2 的 jmp rax 未成功到达 _start64，或到达后 rsp 被破坏\n- 可能原因：stage2 页表/栈设置问题，或 _start64 入口约定不符\n- 内核 ELF 有 Xen PVH note (entry=0x200018)，但 QEMU -kernel 未走 PVH\n下一步：P1-T5 (log + panic handler) 不依赖 boot，可并行推进。\n\n2026-09-25: P1-T6 (HAL SerialDevice trait) + P1-T7 (UART HAL化) 完成。HAL 提供零成本抽象 + cfg(test) fake impl。\n\nP1-T5 (log + logger) 完成。内核集成 log crate，KernelLogger 输出到串口。"
   },
   "env_prerequisites": {
     "install_root": "D:\\envTools",
@@ -420,6 +420,11 @@
       "date": "2026-09-25",
       "decision": "并行开发协调: 每窗口独立 git branch；task.json + decision_log 作为共享看板",
       "reason": "项目体量大 (内核目标 1 万行 + 系统服务层 S1~S6)，单窗口上下文容量有限；按纵向切片 (boot 调试 / 设计文档 / CI-xtask / 任务跟踪) 分配窗口可减少 git 冲突，看板文件集中变更"
+    },
+    {
+      "date": "2026-09-25",
+      "decision": "Doc 01~06 设计文档状态统一升级为 PROPOSED 完成，添加决策汇总表",
+      "reason": "Phase 4/5/6+ 核心设计决策已全部收敛（从 30+ TBD 降至 ~15 个，均为需外部评审/基准测试项）。汇总表使各文档关键决策一目了然，便于后续实现阶段快速查阅。跨文档一致性已验证：Doc 01→02 capability→syscall、Doc 01→03 cap→IPC、Doc 06→04 CryptoProvider→Signature、Doc 03 内部 Endpoint/Notification、Doc 01 内部 parent 链/256 槽"
     }
   ]
 }
