@@ -105,8 +105,14 @@
 - **stack 起始 = `0x7FFF_FFFF_E000`**，与内核映射区保留 8MB gap（防 stack-heap 碰撞缓冲）。
 
 ### 3.2 内核映射隔离
+
 - 内核高半映射区在用户页表中**标记为不可访问（present=0 或 NX + supervisor）**。
 - 首期**不做 KPTI**（Meltdown 缓解），但在威胁模型中记为已知风险。
+
+> ⚠️ **PCID 可选优化**（对齐 [需求评审 §3.3](../requirements-review-and-supplement.md)）：
+> PCID（Process Context Identifier）可避免进程切换时全量刷 TLB，但**不应成为 Phase 4 的硬前置**。
+> 建议：先实现正确的无 PCID 路径（每次切换刷 TLB），再以可选优化加入 PCID，并分别测量性能。
+> 不能因为 PCID 延迟而阻塞第一个用户态进程。PCID 依赖 CR4/INVPCID、地址空间切换策略和 CPU 能力检测，复杂度不低。
 
 ### 3.3 用户内存区域管理（VMA-like）
 按需分页需要一张"哪些区间合法、权限如何"的表：
@@ -238,9 +244,15 @@ SYS_ABI_QUERY = 18,
 ## 5. 进程 / 线程模型
 
 ### 5.1 定义
+
 - **进程（Process / AddressSpace）** = 一套用户页表 + CapTable + `agent_id`。
 - **线程（Thread）** = 调度实体，隶属于某进程，共享地址空间。
 - 首期：**单进程内可多线程**，进程间强隔离。
+
+> ⚠️ **MVP-3 约束**（对齐 [需求评审 §3.4](../requirements-review-and-supplement.md)）：
+> **首个用户态进程（init）建议先限制为单线程**。待地址空间、syscall、fault、退出回收稳定后，再开放同进程多线程。
+> 理由：进程、线程、地址空间和 death notification 同时引入会产生过多交叉状态，增加调试难度。
+> 多线程支持在 MVP-4 之后开放，不阻塞 Phase 4 退出标准。
 
 ### 5.2 spawn 语义
 - 无 `fork`（不复制地址空间）。只有 `spawn(elf, args, caps_to_grant)`：从 ELF 新建进程。
