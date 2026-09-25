@@ -113,11 +113,19 @@
 
 ```rust
 // kernel/src/cap/types.rs
-#[derive(Clone, Copy)]
+
+/// Capability 引用（指向本进程 CapTable 中的槽位）
+pub type CapRef = u8;  // ★ 8-bit，对齐 §7 PROPOSED：per-process 256 槽上限
+
+/// 能力对象
+#[derive(Clone)]
 pub struct Capability {
-    pub obj: ObjRef,       // 指向内核对象（带引用计数 / slot id）
-    pub rights: Rights,    // bitflags
-    pub badge: u32,        // 可选：用于区分同一 endpoint 的不同调用者
+    pub obj: ObjRef,                     // 指向内核对象（带引用计数 / slot id）
+    pub rights: Rights,                  // bitflags
+    pub badge: u32,                      // 可选：用于区分同一 endpoint 的不同调用者
+    pub parent: Option<CapRef>,          // ★ 父 capability 引用（对齐 §3.3 PROPOSED：保留父子链）
+                                         // None = 根 capability（由 init 铸造）
+                                         // 撤销时沿此字段反向遍历 derivation tree
 }
 
 bitflags! {
@@ -128,16 +136,31 @@ bitflags! {
         const READ  = 1 << 3;
         const WRITE = 1 << 4;
         const EXEC  = 1 << 5;
-        const GRANT = 1 << 6;
+        const GRANT = 1 << 6;           // 是否允许再委托（派生子 capability）
     }
 }
 
-// 每进程一张表
+/// 每进程一张能力表
 pub struct CapTable {
-    slots: Vec<Option<Capability>>,
-    // TBD: 空闲槽位管理（freelist）
+    slots: [Option<Capability>; 256],    // ★ 固定 256 槽（对齐 §7 PROPOSED）
+    free_list: [u8; 256],                // 空闲槽位栈（O(1) 分配 / 释放）
+    free_top: u8,                        // 栈顶指针
+}
+
+impl CapTable {
+    /// 分配新槽位，返回 CapRef（8-bit 索引）
+    pub fn alloc(&mut self) -> Option<CapRef> { /* ... */ }
+    /// 释放槽位
+    pub fn free(&mut self, cap: CapRef) { /* ... */ }
+    /// 按 CapRef 查找 capability（O(1) 数组索引）
+    pub fn get(&self, cap: CapRef) -> Option<&Capability> { /* ... */ }
 }
 ```
+
+> **设计约束**：
+> - `Capability` 必须是 `Clone`（不可 `Copy`）—— 因为 `parent: Option<CapRef>` 字段需要追踪派生关系，拷贝时必须显式处理父子链；
+> - `CapRef = u8`（而非 u16 / u32）—— IPC 消息中 capability 转移仅占 1 byte / cap，对齐 NFR2 微秒级延迟目标；
+> - `CapTable::slots` 固定 256 项 —— 避免动态扩容带来的锁竞争（虽然首期单核，但锁语义按多核就绪）。
 
 ### 4.1 内核对象类型全集
 

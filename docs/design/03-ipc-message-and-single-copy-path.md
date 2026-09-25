@@ -90,21 +90,28 @@ pub struct IpcHeader {
 对比"双拷贝"（发送方→内核 buf→接收方）省掉一次拷贝与一份内核内存。
 
 ### 4.2 拷贝时的地址空间处理
-- 发送方与接收方页表不同，内核需能同时访问两者：
-  - **TBD 方案 A**：临时映射（kmap）发送方物理页到内核窗口后 `memcpy`。
-  - **TBD 方案 B**：在接收方页表中临时映射发送方物理页。
-- 拷贝期间需处理缺页（发送方页可能未驻留）。
+- **PROPOSED → kmap 方案**（对齐 §9）：内核维护一个 per-CPU kmap 窗口（虚拟地址固定，如 `0xFFFF_FF00_0000_0000`），拷贝时：
+  1. 将发送方物理页**临时映射**到 kmap 窗口；
+  2. 在接收方页表中查找目标虚拟页（接收方 buf 地址已知）；
+  3. `memcpy` 从 kmap 窗口到接收方虚拟地址（CPU 硬件自动走接收方页表 → 接收方物理页）；
+  4. 解除 kmap 映射。
+- **理由**：实现简单、对齐 seL4 首期方案、无需修改接收方页表；性能开销可接受（微内核 IPC 频率远低于宏内核，kmap 开销在 TLB 命中时 < 100ns）。
+- **对齐 Doc 01 §4 Capability 数据结构**：拷贝时 capability 校验走 O(1) 数组索引（`CapTable::get(cptr)`），不阻塞 memcpy 路径。
+- **拷贝期间缺页处理**：发送方页未驻留时 → 先触发缺页处理（分配物理页）→ 再执行 kmap memcpy；若接收方页也未驻留 → 同理先分配。**不**允许拷贝路径上的嵌套缺页递归（首期简单起见，拷贝前 prefault 两端页面）。
 
 ### 4.3 寄存器直传（fast path）
-- 极小消息（≤ 4~6 个 word）可直接放在 syscall 寄存器 / 内核栈帧里传递，**完全跳过 memcpy**。
+- **PROPOSED 阈值 = 4 words (32 bytes)**（对齐 §9）：x86_64 syscall 入口寄存器 rdi/rsi/rdx/r10 可承载 4 words payload（扣除 endpoint ID + flags 后），直接在内核栈帧中传递，**完全跳过 memcpy**。
+- 超过 4 words 但 ≤ 4KB → 走 §4.2 kmap 单拷贝路径。
+- 超过 4KB → 走共享内存 grant（仅传描述符）。
 
 ---
 
 ## 5. 能力转移（Cap Transfer）
 
-- `send` 可携带 N 个 capability，内核将它们**安装到接收方 CapTable**（见文档 01 §3.3 委托语义）。
+- `send` 可携带 N 个 capability（每个 CapRef 占 1 byte，对齐 Doc 01 §4 `CapRef = u8`），内核将它们**安装到接收方 CapTable**（见文档 01 §3.3 委托语义）。
 - 转移遵循 attenuation：接收方获得的权限 ≤ 发送方持有的权限。
-- **TBD**：转移失败（接收方 cap table 满）时的回滚策略。
+- **PROPOSED → atomic (all-or-nothing) 回滚**（对齐 §9）：若接收方 CapTable 空间不足（剩余空槽 < N），**整批转移失败**，发送方收到错误码，所有 capability 保持原位；理由：简化内核实现、易于推理；微内核 cap transfer 频率低，partial 收益不抵复杂度。
+- **父子链维护**：转移成功的每个 capability，其在接收方 CapTable 中的新 `parent` 字段指向接收方持有的"来源 capability"（即发送方传递该 cap 时所用的 cptr 在接收方的对应引用）—— 确保撤销链路跨进程可追踪。
 
 ---
 

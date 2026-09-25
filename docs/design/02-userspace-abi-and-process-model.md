@@ -58,24 +58,36 @@
 
 ## 3. 地址空间布局
 
-### 3.1 用户地址空间（示意，TBD 具体数值）
+### 3.1 用户地址空间（PROPOSED 具体数值）
+
 ```
-0x0000_0000_0000_0000  ┌─────────────────┐
-                       │  (保留 / 空指针陷阱)│
-0x0000_0000_0040_0000  ├─────────────────┤  ← 默认代码加载基址
-                       │  .text / .rodata │
-                       ├─────────────────┤
-                       │  .data / .bss    │
-                       ├─────────────────┤
-                       │  heap (向下? TBD) │
-                       │        ↓         │
-                       │        ↑         │
-                       │  stack           │
-0x0000_7FFF_FFFF_F000  ├─────────────────┤
-                       │  (内核映射区，NX，│
-                       │   Ring3 不可访问) │
-0xFFFF_FFFF_FFFF_FFFF  └─────────────────┘
+0x0000_0000_0000_0000  ┌───────────────────────────┐
+                       │  NULL page guard (4KB)     │  ★ 捕获空指针解引用
+0x0000_0000_0000_1000  ├───────────────────────────┤
+                       │  (未映射保留区)              │
+0x0000_0000_0040_0000  ├───────────────────────────┤  ← ★ PROPOSED: ELF 默认加载基址
+                       │  .text / .rodata (RX)      │     对齐 Linux 传统值
+                       ├───────────────────────────┤
+                       │  .data / .bss (RW)         │
+                       ├───────────────────────────┤
+                       │  heap (向上增长)            │  ★ PROPOSED: heap 向上（对齐 Linux brk）
+                       │        ↑                   │
+                       │        ...                 │
+                       │        ↓                   │
+                       │  stack (向下增长)            │  ★ PROPOSED: stack 向下（x86_64 标准）
+0x0000_7FFF_FFFF_E000  ├───────────────────────────┤  ← stack 起始（4KB 对齐）
+                       │  (未映射 gap，8MB)          │  ★ 防 stack-heap 碰撞
+0x0000_8000_0000_0000  ├───────────────────────────┤  ← ★ 内核映射区起点 (canonical hole 上沿)
+                       │  内核映射区 (NX +           │
+                       │   Ring3 不可访问)           │
+0xFFFF_FFFF_FFFF_FFFF  └───────────────────────────┘
 ```
+
+**PROPOSED 决策**：
+- **ELF 加载基址 = `0x400000`**：Linux x86_64 传统默认值，工具链兼容性最佳；
+- **首期不支持 PIE**（Position-Independent Executable）：固定加载地址，砍掉重定位解析开销；Phase 5+ 视 ASLR 需求再引入；
+- **heap 向上增长**（对齐 Linux brk 语义）；**stack 向下增长**（x86_64 标准）；
+- **stack 起始 = `0x7FFF_FFFF_E000`**，与内核映射区保留 8MB gap（防 stack-heap 碰撞缓冲）。
 
 ### 3.2 内核映射隔离
 - 内核高半映射区在用户页表中**标记为不可访问（present=0 或 NX + supervisor）**。
@@ -137,15 +149,28 @@ pub struct UserMemoryRegion {
 
 ### 5.2 spawn 语义
 - 无 `fork`（不复制地址空间）。只有 `spawn(elf, args, caps_to_grant)`：从 ELF 新建进程。
-- **TBD**：spawn 时父进程如何向子进程授予初始能力集？
+- **PROPOSED → 初始能力授予方式**：
+  - `spawn` syscall 签名：`spawn(elf_ref: CapRef, args_ptr: *const u8, caps: &[CapRef]) -> Result<Pid>`；
+  - `caps` 参数是父进程 CapTable 中的 CapRef 数组，内核将这些 capability **委托（delegate）** 给子进程（attenuation-only，子进程获得的权限 ≤ 父进程持有）；
+  - 子进程 CapTable 初始状态：slot 0 = 空（NULL trap），slot 1..N = 父进程授予的初始 caps；
+  - **agent_id 分配**：父进程在 `spawn` 时指定子进程的 `agent_id`（字符串），内核检查唯一性（由 init 进程维护全局 agent_id 命名空间，对齐 Doc 01 §7 PROPOSED）；若重复 → 返回 `E_AGENT_ID_CONFLICT`；
+  - **首期限制**：仅 init 进程可 spawn 其他进程（防止不受控进程树）；后续 Phase 5+ 放开至持有 `PROCESS::SPAWN` capability 的进程。
 
 ### 5.3 进程生命周期与"收尸"
 ```
 Created → Running → (Blocked) → Exited/Faulted → Reaped
 ```
 - 进程崩溃（段错误 / panic / 非法 syscall）→ 内核标记 Faulted。
-- 父进程通过 **death notification**（类似 `waitpid` 或向父的 endpoint 发一条信号）得知子进程终止。
-- **TBD**：僵尸进程回收时机、资源（页帧 / cap）释放顺序。
+- **PROPOSED → death notification 机制**：
+  - 每个进程在 spawn 时注册一个 `death_endpoint: CapRef`（指向父进程持有的 Endpoint）；
+  - 进程进入 Exited / Faulted 状态时，内核向该 endpoint 投递一条 **death signal 消息**：`{ pid: Pid, exit_code: i32, fault_reason: Option<FaultKind> }`；
+  - 父进程通过常规 `recv(death_endpoint)` 获取子进程终止通知（复用 IPC 机制，无需新原语）；
+  - 父进程收到通知后负责回收子进程资源（页帧、CapTable、agent_id 命名空间条目）；
+- **PROPOSED → 僵尸进程回收时机**：
+  - 子进程 Exited 后**不立即释放资源**，进入 Zombie 状态（保留 pid + 退出码，释放页帧和 CapTable）；
+  - 父进程 `recv` death notification 后，通过 `reap(pid)` syscall 彻底释放 zombie（释放 pid + agent_id）；
+  - **孤儿进程处理**：若父进程先于子进程退出 → 子进程被"过继"给 init 进程（init 作为默认收尸人）；
+- **资源释放顺序**：页帧 → CapTable → agent_id → pid（从用户态资源到内核资源，逐步释放）。
 
 ### 5.4 监督树与重启策略 *(原始构想新增)*
 
@@ -221,17 +246,17 @@ bootloader → kernel_main → mm/sched/ipc init
 
 ## 8. 待决策清单（Phase 4 前必须收敛）
 
-- [ ] 用户态 target json 完整字段（与内核 data-layout / features 对齐）
-- [ ] 是否提供 `std` / libc shim
-- [ ] 静态 ELF 加载基址与是否支持 PIE
-- [ ] syscall 号表最终版 + 错误码约定
+- [ ] 用户态 target json 完整字段（与内核 data-layout / features 对齐）—— 需内核 target 稳定后对齐
+- [ ] 是否提供 `std` / libc shim —— 需用户态应用需求明确后决策（首期建议 `no_std`）
+- [x] ~~静态 ELF 加载基址与是否支持 PIE~~ → **PROPOSED：基址 = 0x400000，首期不支持 PIE**，理由见 §3.1
+- [ ] syscall 号表最终版 + 错误码约定 —— 需实现阶段逐步固化
 - [x] ~~initramfs 打包格式~~ → **PROPOSED：cpio (newc)**，理由见 §6.1
-- [ ] spawn 时的初始能力授予方式
-- [ ] 进程崩溃的 death notification 机制
-- [ ] gettime 的时钟源与校准
-- [ ] 监督器自身崩溃的兜底（kernel watchdog 还是递归监督？）
-- [ ] `RestartPolicy` 是否在 spawn syscall 内核入参暴露给进程，还是完全由用户态监督器解析配置
-- [ ] 进程冻结时其持有的 capability 是否同步冻结（防止持有者调用已冻结对象）
+- [x] ~~spawn 时的初始能力授予方式~~ → **PROPOSED：父进程通过 CapRef 数组委托，首期仅 init 可 spawn**，理由见 §5.2
+- [x] ~~进程崩溃的 death notification 机制~~ → **PROPOSED：death endpoint + signal 消息 + reap syscall**，理由见 §5.3
+- [ ] gettime 的时钟源与校准 —— 需内核 Phase 2 定时器实现后决策
+- [ ] 监督器自身崩溃的兜底（kernel watchdog 还是递归监督？）—— 需安全评审
+- [ ] `RestartPolicy` 是否在 spawn syscall 内核入参暴露给进程，还是完全由用户态监督器解析配置 —— 需 API 设计评审
+- [ ] 进程冻结时其持有的 capability 是否同步冻结（防止持有者调用已冻结对象）—— 需 capability 语义评审
 
 ---
 
