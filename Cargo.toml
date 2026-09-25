@@ -4,6 +4,7 @@ members = [
     "kernel",
     "hal",
     "user",
+    "xtask",
 ]
 
 # 共享包元信息（避免每个 crate 重复 license/authors）
