@@ -199,16 +199,16 @@ pub struct IpcHeader {
 
 ## 9. 待决策清单（Phase 4 前必须收敛）
 
-- [ ] 单拷贝的地址空间访问方案（kmap vs 临时映射接收方页表）
-- [ ] payload 内联阈值与最大长度
+- [x] ~~单拷贝的地址空间访问方案（kmap vs 临时映射接收方页表）~~ → **PROPOSED：kmap**（内核临时映射发送方物理页到内核虚拟地址窗口，memcpy 到接收方）；理由：实现简单、对齐 seL4 首期方案、无需修改接收方页表；性能开销可接受（微内核 IPC 频率远低于宏内核）
+- [x] ~~payload 内联阈值与最大长度~~ → **PROPOSED：内联阈值 = 4 words (32 bytes)**（x86_64 syscall 寄存器 rdi/rsi/rdx/r10 可用于 payload，扣除 endpoint ID + flags 后剩余 4 words）；**最大长度 = 4KB (1 页)**，超过则走共享内存 grant
 - [x] ~~中断通知：复用 Endpoint vs 独立 Notification 原语~~ → **已决策：独立异步 Notification 对象（位图语义）**，理由见 §6.2
-- [ ] Notification 是否支持 mask/unmask（选择性忽略某些 IRQ 源）
-- [ ] Notification 是否支持跨进程共享（同一驱动进程同时处理多个设备）
-- [ ] cap transfer 失败回滚
-- [ ] 是否首期就提供 `try_send` / 超时变体
-- [ ] 审计事件批量提交的 N / T 默认值（实时性 vs 吞吐）
-- [ ] 审计服务的独占 capability 由谁铸造（init？外交工具自铸造？）
-- [ ] 审计事件是否需要分类（DEBUG/INFO/WARN/CRITICAL）与持久化分级
+- [ ] Notification 是否支持 mask/unmask（选择性忽略某些 IRQ 源）—— 需驱动模型确认后决策
+- [ ] Notification 是否支持跨进程共享（同一驱动进程同时处理多个设备）—— 需驱动模型确认后决策
+- [x] ~~cap transfer 失败回滚~~ → **PROPOSED：atomic (all-or-nothing)**；理由：简化内核实现、易于推理（要么全部转移成功，要么全部失败回滚）；微内核 cap transfer 频率低，partial 收益不抵复杂度
+- [x] ~~是否首期就提供 `try_send` / 超时变体~~ → **PROPOSED：首期仅提供 `try_send`（非阻塞）**；理由：驱动需要非阻塞发送通知；超时变体推迟至 Phase 5（用户态 RPC 需求明确后再加）
+- [ ] 审计事件批量提交的 N / T 默认值（实时性 vs 吞吐）—— 需性能基准测试后决策
+- [x] ~~审计服务的独占 capability 由谁铸造~~ → **PROPOSED：init 进程铸造**（与根能力铸造策略对齐，见 [Doc 01 §3.1](01-capability-agent-permission-model.md)）；init 启动审计服务时授予 `AuditLog::APPEND_KERNEL_EVENT` 独占 capability
+- [ ] 审计事件是否需要分类（DEBUG/INFO/WARN/CRITICAL）与持久化分级 —— 需审计服务需求确认后决策
 
 ---
 
