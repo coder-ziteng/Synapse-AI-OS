@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "hal",
+    "user",
+]
+
+# 共享包元信息（避免每个 crate 重复 license/authors）
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+# 共享依赖将在 P1-T2 起逐步加入：
+#   bootloader 0.9.x（BIOS 启动链）
+#   x86_64（寄存器/特权级/GDT/TSS 辅助）
+#   log（日志 facade）
+#   uart_16550（仅参考用；HAL 化后不再直接依赖）
+# 此处暂不声明，待具体任务时再加。
+[workspace.dependencies]
+
+# 内核 profile：panic abort（no_std 不支持 unwinding）+ 保留调试符号（栈回转需要）
+[profile.dev]
+panic = "abort"
+debug = true
+opt-level = 0
+
+[profile.release]
+panic = "abort"
+debug = true        # release 镜像也要能栈回转
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# 用户态 profile（Phase 4 起用）
+[profile.user]
+inherits = "release"
+panic = "abort"

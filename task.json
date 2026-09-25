@@ -1,0 +1,403 @@
+{
+  "project": "synapse-ai-os",
+  "schema_version": "1",
+  "last_update": "2026-09-25",
+  "session": {
+    "current_phase": "P1",
+    "current_task": "P1-T2",
+    "status": "in_progress",
+    "notes": "2026-09-25: P0 (env) 全部完成; P1-T1 (workspace) 完成; workspace 三个成员 (kernel/hal/user) cargo check 通过。下一步: P1-T2 bootloader 0.9.x 集成。"
+  },
+  "env_prerequisites": {
+    "install_root": "D:\\envTools",
+    "layout": {
+      "rustup_home": "D:\\envTools\\rustup",
+      "cargo_home": "D:\\envTools\\cargo",
+      "qemu_dir": "D:\\envTools\\qemu"
+    },
+    "rust_toolchain": {
+      "status": "installed",
+      "required": [
+        "rustup (latest stable installer)",
+        "nightly toolchain (date-pinned in rust-toolchain.toml; choose date when implementing P1-T1)",
+        "rust-src component (no_std build)",
+        "llvm-tools-preview (for bootimage)"
+      ],
+      "host_target": "x86_64-pc-windows-msvc",
+      "installed": {
+        "rustup_version": "1.29.1",
+        "rustc": "1.100.0-nightly (6eeff9a52 2026-09-23)",
+        "cargo": "1.100.0-nightly (98a09e7e7 2026-09-21)",
+        "components": [
+          "rust-src",
+          "llvm-tools-preview"
+        ],
+        "host_target": "x86_64-pc-windows-msvc"
+      }
+    },
+    "bootimage": {
+      "status": "installed",
+      "install": "cargo install bootimage --locked",
+      "installed": {
+        "version": "0.10.5"
+      }
+    },
+    "qemu": {
+      "status": "installed",
+      "required_version": ">= 7.0",
+      "binary": "qemu-system-x86_64",
+      "install_hint_windows": "下载 qemu-weilnetz.de w64 portable，解压到 D:\\envTools\\qemu",
+      "installed": {
+        "version": "11.1.0",
+        "binary": "D:\\\\envTools\\\\qemu\\\\qemu-system-x86_64.exe"
+      }
+    },
+    "git": {
+      "status": "unknown",
+      "check_command": "git --version"
+    }
+  },
+  "plan": [
+    {
+      "phase": "P0",
+      "name": "环境与基线",
+      "exit_criteria": [
+        "rustup + nightly + rust-src + llvm-tools-preview 已安装并验证",
+        "QEMU 可启动空镜像",
+        "bootimage 已安装",
+        "task.json / readme.md / .gitignore 已建立"
+      ],
+      "tasks": [
+        {
+          "id": "P0-T0",
+          "name": "建立 task.json 与 readme.md 长记忆",
+          "status": "completed",
+          "estimate": "30 min",
+          "deliverables": [
+            "task.json",
+            "readme.md",
+            ".gitignore"
+          ],
+          "verify": [
+            "文件存在 + JSON 合法"
+          ]
+        },
+        {
+          "id": "P0-T1",
+          "name": "安装 Rust nightly + 组件",
+          "status": "completed",
+          "estimate": "20 min",
+          "deliverables": [
+            "rustup default nightly",
+            "rustup component add rust-src llvm-tools-preview"
+          ],
+          "verify": [
+            "rustc + nightly 显示日期版本",
+            "cargo --version"
+          ]
+        },
+        {
+          "id": "P0-T2",
+          "name": "安装 bootimage 与 QEMU",
+          "status": "completed",
+          "estimate": "20 min",
+          "deliverables": [
+            "cargo install bootimage --locked",
+            "qemu-system-x86_64 --version"
+          ],
+          "verify": [
+            "bootimage --help 可执行",
+            "QEMU 启动打印 QEMU 版本"
+          ]
+        },
+        {
+          "id": "P0-T3",
+          "name": "安装 bootimage 与 rust-src/llvm-tools 组件",
+          "status": "completed",
+          "estimate": "5-10 min",
+          "deliverables": [
+            "cargo install bootimage --locked",
+            "rustup component add rust-src llvm-tools-preview"
+          ],
+          "verify": [
+            "bootimage --version == 0.10.5",
+            "rust-src 目录存在",
+            "llvm-tools 包含 llvm-objcopy"
+          ]
+        },
+        {
+          "id": "P0-T4",
+          "name": "持久化环境变量 (User scope)",
+          "status": "completed",
+          "estimate": "5 min",
+          "deliverables": [
+            "RUSTUP_HOME = D:\\\\envTools\\\\rustup",
+            "CARGO_HOME = D:\\\\envTools\\\\cargo",
+            "PATH 追加 cargo\\bin + qemu"
+          ],
+          "verify": [
+            "新 PowerShell 读到 RUSTUP_HOME / CARGO_HOME",
+            "Get-Command 找到全部 4 个二进制"
+          ]
+        },
+        {
+          "id": "P0-T5",
+          "name": "工具链与项目基线验证",
+          "status": "in_progress",
+          "estimate": "5 min",
+          "deliverables": [
+            "verify-all.ps1 一键验证脚本"
+          ],
+          "verify": [
+            "脚本在全新 PowerShell 中跑通并打印 4 个版本号"
+          ]
+        }
+      ]
+    },
+    {
+      "phase": "P1",
+      "name": "裸机点亮与工程基建",
+      "ref": "需求目标 §三 Phase 1",
+      "exit_criteria": [
+        "QEMU 启动后通过 UART 输出 'Hello, Synapse!'",
+        "panic 触发栈回转打印寄存器快照",
+        "cargo test 触发 test_framework 在 QEMU 内运行",
+        "GitHub Actions CI 每次提交绿灯"
+      ],
+      "tasks": [
+        {
+          "id": "P1-T1",
+          "name": "cargo workspace 脚手架",
+          "status": "completed",
+          "estimate": "30 min",
+          "deliverables": [
+            "Cargo.toml (workspace = kernel/hal/user/xtask)",
+            "kernel/Cargo.toml",
+            "hal/Cargo.toml",
+            "user/Cargo.toml (空骨架)",
+            "xtask/Cargo.toml",
+            "rust-toolchain.toml (nightly 日期锁定)"
+          ],
+          "verify": [
+            "cargo metadata --no-deps 成功",
+            "workspace 结构对齐需求目标 §5"
+          ]
+        },
+        {
+          "id": "P1-T2",
+          "name": "kernel 最小骨架 + bootloader 集成",
+          "status": "pending",
+          "estimate": "1 h",
+          "deliverables": [
+            "kernel/src/main.rs (entry _start)",
+            "kernel/src/serial.rs (UART 16550 直接驱动，本期不走 HAL trait)",
+            "kernel/Cargo.toml 加 bootloader 0.9.x 依赖 + 默认 features = []"
+          ],
+          "verify": [
+            "cargo build -p synapse-kernel 成功",
+            "产生 kernel.elf"
+          ]
+        },
+        {
+          "id": "P1-T3",
+          "name": "bootimage 产出可引导镜像",
+          "status": "pending",
+          "estimate": "30 min",
+          "deliverables": [
+            "kernel/.cargo/config.toml (bootloader target)",
+            "kernel/src/panic_handler.rs (基础)"
+          ],
+          "verify": [
+            "cargo bootimage --bin synapse-kernel 产生 bootimage-synapse.bin"
+          ]
+        },
+        {
+          "id": "P1-T4",
+          "name": "QEMU 启动 + Hello Synapse!",
+          "status": "pending",
+          "estimate": "30 min",
+          "deliverables": [
+            "xtask/src/main.rs (qemu 子命令)",
+            "Makefile / xtask run 文档"
+          ],
+          "verify": [
+            "QEMU 串口输出 'Hello, Synapse!'",
+            "退出码 0"
+          ]
+        },
+        {
+          "id": "P1-T5",
+          "name": "log 宏 + panic_handler 完整版",
+          "status": "pending",
+          "estimate": "1 h",
+          "deliverables": [
+            "kernel/src/log.rs (log facade 实现，输出到 UART)",
+            "kernel/src/panic_handler.rs (栈回转 + force-frame-pointers)"
+          ],
+          "verify": [
+            "故意触发 panic 后看到函数名+行号",
+            ".cargo/config.toml 设置 -C force-frame-pointers=yes"
+          ]
+        },
+        {
+          "id": "P1-T6",
+          "name": "HAL Trait 骨架 + cfg(test) fake",
+          "status": "pending",
+          "estimate": "1.5 h",
+          "deliverables": [
+            "hal/src/lib.rs",
+            "hal/src/mmu.rs (trait Mmu)",
+            "hal/src/interrupt.rs (trait InterruptController)",
+            "hal/src/timer.rs (trait Timer)",
+            "hal/src/context.rs (trait ContextSwitch)",
+            "hal/src/fake.rs (cfg(test) fake impl)"
+          ],
+          "verify": [
+            "cargo test -p synapse-hal 跑通 fake impl 单测"
+          ]
+        },
+        {
+          "id": "P1-T7",
+          "name": "UART 16550 重写为 HAL::SerialDevice",
+          "status": "pending",
+          "estimate": "1 h",
+          "deliverables": [
+            "hal/src/arch/x86_64/serial.rs",
+            "kernel 切到 hal::arch::serial"
+          ],
+          "verify": [
+            "QEMU 输出不变",
+            "P1-T4 退出标准仍成立"
+          ]
+        },
+        {
+          "id": "P1-T8",
+          "name": "test_framework 集成",
+          "status": "pending",
+          "estimate": "1 h",
+          "deliverables": [
+            "kernel/tests/basic_boot.rs (bootloader test_framework)",
+            "kernel/src/main.rs 支持 #[cfg(test)]"
+          ],
+          "verify": [
+            "cargo test -p synapse-kernel 在 QEMU 内运行并通过"
+          ]
+        },
+        {
+          "id": "P1-T9",
+          "name": "GitHub Actions CI",
+          "status": "pending",
+          "estimate": "30 min",
+          "deliverables": [
+            ".github/workflows/ci.yml",
+            "rustfmt + clippy 配置"
+          ],
+          "verify": [
+            "本地 act 或 GitHub 推送验证 (no-reboot panic 即停判红)"
+          ]
+        },
+        {
+          "id": "P1-T10",
+          "name": "README + 文档链接补全",
+          "status": "pending",
+          "estimate": "20 min",
+          "deliverables": [
+            "readme.md (项目概述 + 路线图链接 + 构建/运行命令)",
+            "docs/README.md (设计文档索引)"
+          ],
+          "verify": [
+            "readme 包含 hello_synapse 演示命令"
+          ]
+        }
+      ]
+    },
+    {
+      "phase": "P2",
+      "name": "内存、中断与异常框架",
+      "ref": "需求目标 §三 Phase 2",
+      "exit_criteria": [
+        "内存映射表解析",
+        "物理页帧分配器",
+        "内核堆分配器",
+        "GDT/TSS 初始化",
+        "IDT + page fault / double fault 处理"
+      ],
+      "tasks": [
+        {
+          "id": "P2-T1",
+          "name": "Memory Map 解析",
+          "status": "pending"
+        },
+        {
+          "id": "P2-T2",
+          "name": "物理页帧分配器",
+          "status": "pending"
+        },
+        {
+          "id": "P2-T3",
+          "name": "内核堆 (中断安全)",
+          "status": "pending"
+        },
+        {
+          "id": "P2-T4",
+          "name": "GDT/TSS (IST)",
+          "status": "pending"
+        },
+        {
+          "id": "P2-T5",
+          "name": "IDT + 异常处理",
+          "status": "pending"
+        },
+        {
+          "id": "P2-T6",
+          "name": "PIC + PIT 中断控制器 (HAL)",
+          "status": "pending"
+        },
+        {
+          "id": "P2-T7",
+          "name": "定时器频率校准",
+          "status": "pending"
+        }
+      ]
+    }
+  ],
+  "global_risks": [
+    {
+      "id": "ENV-1",
+      "name": "Windows 主机编译 nightly + 跑 QEMU 的稳定性",
+      "mitigation": "使用 rustup 官方安装器；QEMU 走官方 installer；如遇 PAT/AV 拦截 bootimage 镜像，需将 target 目录加入白名单"
+    },
+    {
+      "id": "ENV-2",
+      "name": "bootloader 0.9.x 与 nightly 日期的兼容性窗口",
+      "mitigation": "rust-toolchain.toml 锁定 bootloader 发布时的稳定 nightly 日期；不盲目追新 nightly"
+    }
+  ],
+  "decision_log": [
+    {
+      "date": "2026-09-25",
+      "decision": "Phase 1 工具链安装由用户侧执行 (Windows 主机)，不在 Claude 工具中下载安装包",
+      "reason": "download_external_resources 可能被拒绝；且安装路径选择涉及用户偏好 (PATH、磁盘位置)"
+    },
+    {
+      "date": "2026-09-25",
+      "decision": "用户指定工具链全部装在 D:\\\\envTools\\\\ (rustup home, cargo home, QEMU)",
+      "reason": "用户显式要求 C 盘只读/不安装第三方; layout 已写入 env_prerequisites.layout"
+    },
+    {
+      "date": "2026-09-25",
+      "decision": "QEMU installer 通过用户手动下载, 路径 D:\\\\envTools\\\\qemu\\\\qemu-w64-setup-20260811.exe; 安装时移至 D:\\\\envTools\\\\tmp\\\\ 避免自覆盖",
+      "reason": "本机网络下载偶发 SSL reset (errno 10054); 用户侧下载稳定"
+    },
+    {
+      "date": "2026-09-25",
+      "decision": "QEMU 静默安装通过 cmd.exe /S /D=..., 而不是 Git Bash 直接 exec (后者 Permission denied)",
+      "reason": "Git Bash (MSYS) 不能直接 exec Windows GUI installer; 用 cmd.exe 调用 NSIS /S /D=path 即可"
+    },
+    {
+      "date": "2026-09-25",
+      "decision": "rust-toolchain.toml 锁定 nightly-2026-09-23; components = rust-src + llvm-tools-preview + rustfmt + clippy",
+      "reason": "与已装工具链对齐 (rustc 1.100.0-nightly); 升级策略见 task.json 工具链字段说明"
+    }
+  ]
+}

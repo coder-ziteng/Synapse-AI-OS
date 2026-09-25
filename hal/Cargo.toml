@@ -1,0 +1,25 @@
+[package]
+name        = "synapse-hal"
+version     = "0.1.0"
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace      = true
+description = "Synapse 硬件抽象层（HAL）：跨架构 trait + per-arch 实现"
+publish     = false
+
+[lib]
+path = "src/lib.rs"
+
+# Phase 1 不引入任何 arch crate；P1-T6 加入按架构静态分发的实现
+# [target.'cfg(target_arch = "x86_64")'.dependencies]
+# x86_64 = "..."
+# uart_16550 = "..."
+
+[features]
+default = []
+# 预留：未来可加 "test-fake" feature 提供宿主单测用 fake impl
+# test-fake = []
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

@@ -1,0 +1,6 @@
+# 锁定 nightly 日期：与本机已装工具链对齐（rustup show 默认值）。
+# 升级策略：每季度评估一次；改动前在 task.json decision_log 登记。
+[toolchain]
+channel = "nightly-2026-09-23"
+components = ["rust-src", "llvm-tools-preview", "rustfmt", "clippy"]
+profile = "minimal"

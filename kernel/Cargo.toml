@@ -1,0 +1,32 @@
+[package]
+name        = "synapse-kernel"
+version     = "0.1.0"
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace      = true
+description = "Synapse 微内核（Phase 1 占位）"
+publish     = false
+
+# 仅作为二进制存在；Phase 4 起可能拆出 lib.rs 供用户态服务复用
+[[bin]]
+name = "synapse-kernel"
+path = "src/main.rs"
+
+[dependencies]
+# HAL 依赖；P1-T7 后 UART 16550 走 HAL::SerialDevice trait 而非直接 uart_16550 crate
+synapse-hal = { path = "../hal" }
+
+# x86_64 寄存器/特权级辅助（ADR 00 §2 允许）
+# features = instructions 用于 hlt() / interrupts::without_interrupts
+x86_64 = { version = "0.15", features = ["instructions"] }
+
+# 直接 UART 16550 驱动（P1-T2 占位；P1-T7 后改为 HAL 化路径）
+uart_16550 = "0.3"
+
+# P1-T2-bis 引入（multiboot2 头常量 + BIOS stage）：
+# multiboot2 = "0.21"
+
+[lints.rust]
+# 内核 entry / 内联汇编 / 中断处理需 unsafe；HAL 化后 unsafe 集中在 hal::arch 子模块
+unsafe_code = "allow"
+missing_docs = "warn"     # 核心 API 鼓励文档注释（rule 6）

@@ -1,0 +1,31 @@
+# Rust / Cargo
+target/
+**/*.rs.bk
+Cargo.lock
+# (workspace 内 kernel / xtask 等应用允许多二进制，此处不忽略)
+
+# 引导产物
+**/*.bin
+**/*.img
+
+# QEMU
+**/*.log
+qemu-monitor.sock
+
+# 编辑器 / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Python venv（避免污染项目根）
+.venv/
+__pycache__/
+
+# 临时
+tmp/
+.cache/
+debugcon.log

@@ -1,0 +1,18 @@
+[package]
+name        = "synapse-user"
+version     = "0.1.0"
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace      = true
+description = "Synapse 用户态库（initramfs 程序的运行时基础；Phase 1 占位）"
+publish     = false
+
+[lib]
+path = "src/lib.rs"
+
+# Phase 4 起加入用户态 syscall ABI；P1-T1 仅占位
+# [dependencies]
+
+[lints.rust]
+unsafe_code = "deny"      # 用户态 syscall 包装需例外
+missing_docs = "warn"
