@@ -119,11 +119,15 @@ pub struct IpcHeader {
 用户态驱动收中断的路径：
 ```
 硬件 IRQ → 内核 IDT → 在独立内核栈快速收 IRQ
-        → 内核向"绑定该 IRQ 的 Notification/Endpoint"投递一条消息
+        → 内核向"绑定该 IRQ 的 Notification"投递一次异步通知（位图 or）
         → EOI
-        → 用户态驱动 recv 到通知，处理，再 ack
+        → 用户态驱动 recv-Notification 到事件，处理，再 ack
 ```
-- **TBD**：中断通知用同步 Endpoint 还是异步 Notification 原语（seL4 用独立 Notification 对象）？建议引入轻量异步 Notification。
+- **决策**：采用 seL4 式的**独立异步 Notification 对象**（位图语义，O(1) signal/wait），不复用同步 Endpoint。理由：
+  - 同步 Endpoint 语义（阻塞 send/recv/rpc）与 IRQ 的"一次性通知"语义不匹配；
+  - 多驱动共享同一 Endpoint 会引入消费竞争，而 Notification 的位图 OR 天然支持多 IRQ 源聚合到同一对象；
+  - 异步信号不会把"驱动未就绪"阻塞到内核栈上，避免中断路径上的阻塞风险。
+- **TBD**：Notification 是否支持 mask/unmask（选择性忽略某些 IRQ 源）；是否支持跨进程共享（同一驱动进程同时处理多个设备）。
 
 ### 6.3 审计事件流 *(原始构想新增)*
 
@@ -197,7 +201,9 @@ pub struct IpcHeader {
 
 - [ ] 单拷贝的地址空间访问方案（kmap vs 临时映射接收方页表）
 - [ ] payload 内联阈值与最大长度
-- [ ] 中断通知：复用 Endpoint vs 独立 Notification 原语
+- [x] ~~中断通知：复用 Endpoint vs 独立 Notification 原语~~ → **已决策：独立异步 Notification 对象（位图语义）**，理由见 §6.2
+- [ ] Notification 是否支持 mask/unmask（选择性忽略某些 IRQ 源）
+- [ ] Notification 是否支持跨进程共享（同一驱动进程同时处理多个设备）
 - [ ] cap transfer 失败回滚
 - [ ] 是否首期就提供 `try_send` / 超时变体
 - [ ] 审计事件批量提交的 N / T 默认值（实时性 vs 吞吐）
