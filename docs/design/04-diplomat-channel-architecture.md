@@ -24,6 +24,12 @@
 | 硬件加速 | 不纳入 Phase 5（软件先行）| §11 |
 | 审计事件流 | 不经过内核（外交工具内部产生）| §11 |
 | AuditEvent.signature | Signature 类型（含算法标识）| §8.1 |
+| **Phase 5 范围** | **仅 API Channel 最小子集**（其余 4 类仅接口草案）| §5 |
+
+> ⚠️ **Phase 5 MVP 范围约束**（对齐 [需求评审 §2.11](../requirements-review-and-supplement.md)）：
+> Phase 5 **只实现 API Channel** 的最小子集（HTTPS 出站、固定域名白名单、请求/响应 schema、超时、限流、审计摘要）。
+> File / Web / Stream / Realtime 四类通道**仅保留接口草案和威胁模型**，不进入 Phase 5 退出标准。
+> 这是为了防止"远程 API 代理"膨胀为通用网络平台（见需求评审 R14）。
 
 1. 为什么外交工具不能是普通 socket 代理？
 2. 哪些通道必须存在、各自的固定行为是什么？
