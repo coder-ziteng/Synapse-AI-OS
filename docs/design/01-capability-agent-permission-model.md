@@ -78,11 +78,25 @@
 
 ### 3.3 委托（Delegate）
 - 语义：派生一个**权限子集**（attenuation-only，不可放大）。
-- **TBD**：委托是否记录父子关系（用于撤销时级联）？
+- **PROPOSED → 保留父子关系**（用于撤销时级联）：
+  - 每个 capability 对象额外维护 `parent: Option<CapRef>` 字段，指向铸造它的父 capability；
+  - 根 capability（由 init 铸造）的 `parent = None`；
+  - 开销：每个 capability 多一个 pointer（O(1) 空间），可接受；
+  - **必要性**：撤销算法（§3.4）需要从被撤销的 capability 出发，遍历所有派生副本——若无父子链，则无法实现级联撤销。
 
 ### 3.4 撤销（Revoke）
-- **TBD**：撤销算法（候选：seL4 式 derivation tree 遍历 / epoch-based reclamation / 版本号失效）。
+- **PROPOSED → derivation tree 遍历**（seL4 式）：
+  - 撤销某 capability 时，从该 capability 出发，沿 `parent` 反向遍历其所有派生副本，逐一失效；
+  - 复杂度：O(n)，n = 该 capability 的派生树节点数（通常很小，因为微内核 capability 数量受控）；
+  - 与 §3.3 父子链配合，实现级联撤销。
+  - **候选算法比较**：
+    | 算法 | 优势 | 劣势 | 决策 |
+    |------|------|------|------|
+    | **derivation tree 遍历** | 简单、即时失效、与 seL4 对齐 | O(n) 遍历（n 小则无碍）| ✅ PROPOSED |
+    | epoch-based reclamation | 适合高并发、无锁 | 复杂、撤销有延迟、微内核不需要 | ❌ |
+    | 版本号失效 | 极简 | 撤销有延迟（旧 cap 在版本号更新前仍可用）、不符合"即时撤销"语义 | ❌ |
 - 与 IPC 在途消息的交互：撤销时已发出但未接收的消息如何处理？
+  - **PROPOSED → 消息级 cap 校验**：消息到达接收方时，接收方内核再次校验消息中携带的 capability 是否仍有效——若已撤销，则消息丢弃 + 审计事件。
 
 ### 3.5 审计钩子（Audit Hook） *(原始构想新增)*
 - 内核在以下**事件点**产生 append-only 审计事件（推送到独立审计服务，详见 [设计文档 03 §6.3 审计事件流](03-ipc-message-and-single-copy-path.md)）：
@@ -206,16 +220,16 @@ pub struct CapTable {
 
 ## 7. 待决策清单（Phase 4 前必须收敛）
 
-- [x] ~~根能力铸造策略（init 全量 vs HAL 分散）~~ → **PROPOSED：init 进程全量铸造**，理由见 §3.1；待用户确认后升级为 DECIDED
-- [ ] token 熵源与不可猜测性强度
-- [ ] 撤销算法选型（derivation tree vs epoch vs version）
-- [ ] 委托是否保留父子链
-- [ ] cap table 上限与增长策略
-- [ ] 是否支持 capability 随 IPC 消息转移（cap transfer）
-- [ ] `agent_id` 分配与管理（谁负责命名空间）
-- [ ] 审计事件的批量策略（每事件 IPC vs 批量提交，对热路径影响）
+- [x] ~~根能力铸造策略（init 全量 vs HAL 分散）~~ → **PROPOSED：init 进程全量铸造**，理由见 §3.1
+- [ ] token 熵源与不可猜测性强度（需安全评审，保留 TBD）
+- [x] ~~撤销算法选型（derivation tree vs epoch vs version）~~ → **PROPOSED：derivation tree 遍历**，理由见 §3.4
+- [x] ~~委托是否保留父子链~~ → **PROPOSED：保留**（撤销级联的必要前提），理由见 §3.3
+- [x] ~~cap table 上限与增长策略~~ → **PROPOSED：per-process 上限 256 槽位**（8-bit cptr 索引），线性扫描空闲槽；微内核单进程 cap 数量受控，256 足够
+- [x] ~~是否支持 capability 随 IPC 消息转移（cap transfer）~~ → **PROPOSED：支持**（seL4 风格，send 携带 N 个 cptr，内核安装到接收方 CapTable）
+- [x] ~~`agent_id` 分配与管理（谁负责命名空间）~~ → **PROPOSED：init 进程统一管理**（与根能力铸造策略对齐：init 在 spawn 子进程时分配 agent_id，写入进程结构体，内核盖章到 IPC 消息头）
+- [ ] 审计事件的批量策略（每事件 IPC vs 批量提交，对热路径影响）—— 需性能基准测试后决策
 - [ ] L4 / L5 操作的用户确认通道分阶段预案（§5.1）：串口确认的超时值、白名单配置格式；GUI 弹窗形态在 S6 落地
-- [ ] 唯一网络出口的白名单策略：DNS / NTP 等系统级服务的白名单由谁维护（外交工具自维护 vs 内核静态配置）|
+- [ ] 唯一网络出口的白名单策略：DNS / NTP 等系统级服务的白名单由谁维护（外交工具自维护 vs 内核静态配置）
 
 ---
 

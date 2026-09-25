@@ -189,9 +189,19 @@ Created → Running → (Blocked) → Exited/Faulted → Reaped
 ## 6. initramfs 与启动流程
 
 ### 6.1 initramfs 格式
-- **TBD**：cpio（newc）vs ustar tar vs 自定义扁平格式。
-- 由 bootloader 或内核早期加载到内存，作为一个 MemoryRegion 暴露。
-- 内核启动 → 挂载 initramfs → 加载 `/init`（外交工具根进程）→ 移交控制权。
+- **PROPOSED → cpio (newc)**：
+  - **理由**：
+    - **Linux 标准格式**：内核原生支持解析（参考 Linux initramfs），成熟稳定；
+    - **极简**：无专利、跨平台、纯文本 header + 数据流；
+    - **Rust 生态支持**：`cpio` crate 可直接使用；
+    - **对齐 seL4 / Redox**：两者均用 cpio 或类似扁平格式。
+  - **候选格式比较**：
+    | 格式 | 优势 | 劣势 | 决策 |
+    |------|------|------|------|
+    | **cpio (newc)** | 标准、极简、Rust crate 可用 | 无压缩（但 initramfs 本身不大）| ✅ PROPOSED |
+    | ustar tar | 广泛支持 | 512-byte 块对齐浪费空间、略复杂 | ❌ |
+    | 自定义扁平格式 | 完全可控 | 无生态、重复造轮子、与 NFR1 极简原则冲突 | ❌ |
+  - **加载方式**：由 bootloader 或内核早期加载到内存，作为一个 MemoryRegion 暴露给内核；内核解析 cpio header，提取 `/init`（外交工具根进程）→ spawn → 移交控制权。
 
 ### 6.2 启动链
 ```
@@ -215,7 +225,7 @@ bootloader → kernel_main → mm/sched/ipc init
 - [ ] 是否提供 `std` / libc shim
 - [ ] 静态 ELF 加载基址与是否支持 PIE
 - [ ] syscall 号表最终版 + 错误码约定
-- [ ] initramfs 打包格式
+- [x] ~~initramfs 打包格式~~ → **PROPOSED：cpio (newc)**，理由见 §6.1
 - [ ] spawn 时的初始能力授予方式
 - [ ] 进程崩溃的 death notification 机制
 - [ ] gettime 的时钟源与校准
