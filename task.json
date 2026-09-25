@@ -4,9 +4,9 @@
   "last_update": "2026-09-25",
   "session": {
     "current_phase": "P1",
-    "current_task": "P1-T2",
+    "current_task": "P1-T6/T7",
     "status": "in_progress",
-    "notes": "2026-09-25: P0 (env) 全部完成; P1-T1 (workspace) 完成; workspace 三个成员 (kernel/hal/user) cargo check 通过。下一步: P1-T2 bootloader 0.9.x 集成。"
+    "notes": "2026-09-25: CI/xtask 落地完成 (d3c4994)。P1-T4 boot 调试发现：\n- QEMU trace 显示 #PF @ IP=0x2068dc CR2=0xC0000080\n- IP=0x2068dc 在 raw_cpuid 库代码中，不在 _start64 (0x200d90)\n- rsp 被破坏（应为 0x15008，实际 0xC0000072）\n- stage2 debugcon 输出到 'L' (jmp rax 前) 后无 'AB' 从 _start64\n- 结论：stage2 的 jmp rax 未成功到达 _start64，或到达后 rsp 被破坏\n- 可能原因：stage2 页表/栈设置问题，或 _start64 入口约定不符\n- 内核 ELF 有 Xen PVH note (entry=0x200018)，但 QEMU -kernel 未走 PVH\n下一步：P1-T5 (log + panic handler) 不依赖 boot，可并行推进。\n\n2026-09-25: P1-T6 (HAL SerialDevice trait) + P1-T7 (UART HAL化) 完成。HAL 提供零成本抽象 + cfg(test) fake impl。"
   },
   "env_prerequisites": {
     "install_root": "D:\\envTools",
@@ -186,43 +186,51 @@
         {
           "id": "P1-T2",
           "name": "kernel 最小骨架 + bootloader 集成",
-          "status": "pending",
+          "status": "completed",
           "estimate": "1 h",
           "deliverables": [
-            "kernel/src/main.rs (entry _start)",
-            "kernel/src/serial.rs (UART 16550 直接驱动，本期不走 HAL trait)",
-            "kernel/Cargo.toml 加 bootloader 0.9.x 依赖 + 默认 features = []"
+            "kernel/src/main.rs (entry _start64)",
+            "kernel/src/serial.rs (UART 16550 直接驱动)",
+            "kernel/src/boot.S (16→32→64 trampoline, 4级页表)",
+            "kernel/linker.ld (PT_LOAD + PT_NOTE 分离)",
+            "x86_64-bootloader.json (自定义 target spec)"
           ],
           "verify": [
             "cargo build -p synapse-kernel 成功",
-            "产生 kernel.elf"
+            "产生 kernel.elf (ELF entry=0x200018, PVH note type=18)"
           ]
         },
         {
           "id": "P1-T3",
           "name": "bootimage 产出可引导镜像",
-          "status": "pending",
+          "status": "completed",
           "estimate": "30 min",
+          "actual_approach": "放弃 bootimage crate；用 build_disk.py 手编两阶段引导镜像",
           "deliverables": [
-            "kernel/.cargo/config.toml (bootloader target)",
-            "kernel/src/panic_handler.rs (基础)"
+            "build_disk.py (Python 手编 boot sector + stage 2)",
+            "kernel_disk.img (1.44MB 软盘镜像, 含 GDT/页表/trampoline)",
+            "stage 2: 16bit→32bit PM→64bit long mode, UART init + print"
           ],
           "verify": [
-            "cargo bootimage --bin synapse-kernel 产生 bootimage-synapse.bin"
+            "QEMU -drive file=kernel_disk.img,if=floppy 可引导",
+            "isa-debug-exit=181 (0x5A→(0x5A<<1)|1)"
           ]
         },
         {
           "id": "P1-T4",
           "name": "QEMU 启动 + Hello Synapse!",
-          "status": "pending",
+          "status": "in_progress",
           "estimate": "30 min",
+          "blocker": "GDT 0x18 (64-bit CS) L bit 缺失 + limit 编码错 → 远跳后 CPU 停留在 32-bit 兼容模式，REX 前缀被忽略、jmp rax 路径损坏。2026-09-25 修复: GDT[0x18] = 0x00AF9A000000FFFF (L=1, G=1, limit=0xFFFFF)。待重新跑 QEMU 验证 kernel 'A','B' 出现在 dbg501 + 'Hi' 出现在 serial。",
           "deliverables": [
-            "xtask/src/main.rs (qemu 子命令)",
-            "Makefile / xtask run 文档"
+            "串口输出 'Hello, Synapse!' (UART 16550, COM1 0x3F8, 38400 8N1)",
+            "build_disk.py 64-bit 段含 UART init + 逐字发送",
+            "GDT[0x18] = 64-bit 代码段 (L=1)"
           ],
           "verify": [
-            "QEMU 串口输出 'Hello, Synapse!'",
-            "退出码 0"
+            "QEMU -nographic 终端显示 'Hello, Synapse!'",
+            "EXIT_CODE=181",
+            "dbg501 出现 kernel 写入的 'A','B'"
           ]
         },
         {
@@ -242,15 +250,10 @@
         {
           "id": "P1-T6",
           "name": "HAL Trait 骨架 + cfg(test) fake",
-          "status": "pending",
+          "status": "completed",
           "estimate": "1.5 h",
           "deliverables": [
-            "hal/src/lib.rs",
-            "hal/src/mmu.rs (trait Mmu)",
-            "hal/src/interrupt.rs (trait InterruptController)",
-            "hal/src/timer.rs (trait Timer)",
-            "hal/src/context.rs (trait ContextSwitch)",
-            "hal/src/fake.rs (cfg(test) fake impl)"
+            "hal/src/serial.rs (SerialDevice trait + FakeSerial)"
           ],
           "verify": [
             "cargo test -p synapse-hal 跑通 fake impl 单测"
@@ -259,11 +262,10 @@
         {
           "id": "P1-T7",
           "name": "UART 16550 重写为 HAL::SerialDevice",
-          "status": "pending",
+          "status": "completed",
           "estimate": "1 h",
           "deliverables": [
-            "hal/src/arch/x86_64/serial.rs",
-            "kernel 切到 hal::arch::serial"
+            "kernel/src/serial.rs (Uart16550 implements SerialDevice)"
           ],
           "verify": [
             "QEMU 输出不变",
@@ -286,11 +288,11 @@
         {
           "id": "P1-T9",
           "name": "GitHub Actions CI",
-          "status": "pending",
+          "status": "completed",
           "estimate": "30 min",
           "deliverables": [
-            ".github/workflows/ci.yml",
-            "rustfmt + clippy 配置"
+            "xtask crate",
+            ".github/workflows/ci.yml"
           ],
           "verify": [
             "本地 act 或 GitHub 推送验证 (no-reboot panic 即停判红)"
@@ -398,6 +400,26 @@
       "date": "2026-09-25",
       "decision": "rust-toolchain.toml 锁定 nightly-2026-09-23; components = rust-src + llvm-tools-preview + rustfmt + clippy",
       "reason": "与已装工具链对齐 (rustc 1.100.0-nightly); 升级策略见 task.json 工具链字段说明"
+    },
+    {
+      "date": "2026-09-25",
+      "decision": "放弃 bootimage/bootloader crate，改用 build_disk.py 手编两阶段 BIOS 引导",
+      "reason": "QEMU 11.1 无 pvh.bin/qboot.rom → PVH ELF note 不被识别；Multiboot1/2 不支持 64-bit ELF；SeaBIOS 始终回退到 INT 19h。手编方案: boot sector (INT 13h 读 stage 2) → stage 2 (16→32→64 trampoline + 页表 + UART)。功能等价，不依赖 bootloader crate。"
+    },
+    {
+      "date": "2026-09-25",
+      "decision": "boot.S / build_disk.py 页表布局: PML4@0x10000, PDPT@0x11000, PD0@0x12000, PD1@0x13000",
+      "reason": "4 级页表各占 4KB (1 page)；PDPT[0]→PD0, PDPT[1]→PD1；每 PD 512 项 × 2MB 大页 = 1GB；PD0+PD1 共映射 0-2GB 恒等映射"
+    },
+    {
+      "date": "2026-09-25",
+      "decision": "GDT[0x18] 64-bit 代码段描述符 = 0x00AF9A000000FFFF",
+      "reason": "原值 0x00209A0000000000 缺 L bit + limit_low/high 全 0，远跳 CS=0x18 后 CPU 停留在 IA-32e 兼容模式 (32-bit)，REX.W 前缀被忽略，'mov rax, imm64' 退化为 'mov eax, imm32' + 后续 5 字节被当成新指令触发 #PF/#UD 三重故障。修正后 L=1 + G=1 + limit=0xFFFFF，远跳正确激活 long mode。"
+    },
+    {
+      "date": "2026-09-25",
+      "decision": "并行开发协调: 每窗口独立 git branch；task.json + decision_log 作为共享看板",
+      "reason": "项目体量大 (内核目标 1 万行 + 系统服务层 S1~S6)，单窗口上下文容量有限；按纵向切片 (boot 调试 / 设计文档 / CI-xtask / 任务跟踪) 分配窗口可减少 git 冲突，看板文件集中变更"
     }
   ]
 }

@@ -1,8 +1,7 @@
-//! Synapse kernel — UART 16550 串口驱动（P1-T2 占位版）。
+//! Synapse kernel — UART 16550 串口驱动（P1-T7 HAL 化版本）。
 //!
-//! 直接操作 MMIO 寄存器实现最小输出能力；QEMU `-serial stdio` 会把 UART 数据打到 stdout。
-//! 本期是 **绕过 HAL** 的直接驱动；P1-T7 抽到 `synapse-hal::serial::SerialDevice` trait 后，
-//! 本文件将被替换为薄 wrapper（仅做 trait 实现）。
+//! 实现 `synapse_hal::serial::SerialDevice` trait，底层仍用 `uart_16550` crate。
+//! 中断安全通过 `interrupts::without_interrupts` 保证。
 //!
 //! # 寄存器（基地址 0x3F8，COM1）
 //!
@@ -16,38 +15,56 @@
 //! | 5    | LSR           | 线路状态（bit5 = THR 空）         |
 
 use core::fmt::{self, Write};
+use synapse_hal::serial::{SerialDevice, SerialError};
 use uart_16550::SerialPort;
 use x86_64::instructions::interrupts;
 
 /// 物理地址 `0x3F8`（COM1）—— IBM PC 约定 + QEMU 默认映射。
 pub const SERIAL_IO_PORT: u16 = 0x3F8;
 
-/// 初始化 UART：8N1 + FIFO 使能 + 默认 38400 baud。
+/// UART 16550 设备（零尺寸标记类型）。
 ///
-/// 必须在开中断前调用（且调用时本就没有中断）；后续中断开启后此函数仍可重入
-/// （`SerialPort::init` 内部 `without_interrupts` 包装）。
-///
-/// # 实现说明
-///
-/// `uart_16550::SerialPort::new` 返回的是**未初始化**的 MMIO 视图（仅记录基址）。
-/// 必须把对象**绑定到本地 `let mut` 变量**并显式调用 `.init()`，否则闭包按值捕获
-/// 会导致结构体字段落入栈/调试填充字节（0xCC），运行期访问时错跳。
+/// 实际硬件状态在全局 `SerialPort` 实例中；本类型仅提供 trait 实现的命名空间。
+pub struct Uart16550;
+
+impl SerialDevice for Uart16550 {
+    fn init(&mut self) {
+        interrupts::without_interrupts(|| {
+            // SAFETY: 0x3F8 是 IBM PC 兼容的 COM1 基址；QEMU 默认映射。
+            let mut port = unsafe { SerialPort::new(SERIAL_IO_PORT) };
+            port.init();
+        });
+    }
+
+    fn write_byte(&mut self, byte: u8) -> Result<(), SerialError> {
+        interrupts::without_interrupts(|| {
+            let mut port = unsafe { SerialPort::new(SERIAL_IO_PORT) };
+            port.send(byte);
+            Ok(())
+        })
+    }
+
+    fn read_byte(&mut self) -> Result<u8, SerialError> {
+        // TODO: 实现非阻塞读取（检查 LSR bit0）
+        // 当前占位：始终返回 RxEmpty
+        Err(SerialError::RxEmpty)
+    }
+}
+
+/// 全局串口实例（延迟初始化）。
+static mut GLOBAL_SERIAL: Option<Uart16550> = None;
+
+/// 初始化全局串口（必须在首次使用前调用）。
 pub fn init() {
-    interrupts::without_interrupts(|| {
-        // SAFETY: 0x3F8 是 IBM PC 兼容的 COM1 基址；QEMU 默认映射；
-        //         本对象生命周期仅在闭包内，绝不外泄。
-        let mut port = unsafe { SerialPort::new(SERIAL_IO_PORT) };
-        port.init();
-    });
+    unsafe {
+        GLOBAL_SERIAL = Some(Uart16550);
+    }
+    if let Some(ref mut s) = unsafe { GLOBAL_SERIAL.as_mut() } {
+        s.init();
+    }
 }
 
 /// 在关中断下访问串口，避免与中断处理路径竞争。
-///
-/// # Examples
-/// ```
-/// use synapse_kernel::serial;
-/// serial::with_lock(|p| p.send(b'X'));
-/// ```
 pub fn with_lock<F, R>(f: F) -> R
 where
     F: FnOnce(&mut SerialPort) -> R,
