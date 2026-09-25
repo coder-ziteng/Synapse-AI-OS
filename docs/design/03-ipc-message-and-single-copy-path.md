@@ -20,6 +20,7 @@
 | 最大消息长度 | 4KB (1 页) | §4.3 |
 | 中断通知 | 独立异步 Notification 对象（位图语义）| §6.2 |
 | cap transfer | atomic all-or-nothing 回滚 | §5 |
+| IPC 错误语义 | 复用 Doc 02 错误码 + 对端死亡唤醒规则 | §5.1 |
 | 非阻塞变体 | 首期提供 try_send | §9 |
 | 审计服务 capability | init 铸造 | §9 |
 
@@ -124,6 +125,30 @@ pub struct IpcHeader {
 - 转移遵循 attenuation：接收方获得的权限 ≤ 发送方持有的权限。
 - **PROPOSED → atomic (all-or-nothing) 回滚**（对齐 §9）：若接收方 CapTable 空间不足（剩余空槽 < N），**整批转移失败**，发送方收到错误码，所有 capability 保持原位；理由：简化内核实现、易于推理；微内核 cap transfer 频率低，partial 收益不抵复杂度。
 - **父子链维护**：转移成功的每个 capability，其在接收方 CapTable 中的新 `parent` 字段指向接收方持有的"来源 capability"（即发送方传递该 cap 时所用的 cptr 在接收方的对应引用）—— 确保撤销链路跨进程可追踪。
+
+### 5.1 IPC 错误语义 *(评审补充，对齐 [需求评审 §2.7](../requirements-review-and-supplement.md))*
+
+IPC 操作（`send` / `recv` / `reply` / `try_send`）的错误码复用 [Doc 02 §4.3](02-userspace-abi-and-process-model.md) 的统一错误码表，IPC 特定语义如下：
+
+| 错误码 | IPC 场景 | 说明 |
+|--------|---------|------|
+| `E_INVALID_CAP` (-1) | endpoint cptr 无效 / 权限不足（缺 SEND/RECV/REPLY）| capability 校验失败 |
+| `E_INVALID_ADDR` (-2) | 用户态 msg buffer 地址非法 / 未映射 / 跨页未授权 | 拷贝前校验 |
+| `E_NO_MEMORY` (-3) | 内核无法分配 IPC 临时结构（罕见）| 资源耗尽 |
+| `E_WOULD_BLOCK` (-4) | `try_send` 时接收方未就绪 / 队列满 | 非阻塞操作失败 |
+| `E_PERMISSION` (-7) | cap transfer 时接收方 CapTable 满（atomic 回滚）| 对齐 §5 |
+| `E_OBJECT_RETIRED` (-12) | endpoint 已撤销（generation 不匹配）| 对齐 Doc 01 §4.2 |
+| `E_QUOTA_EXCEEDED` (-13) | 发送方未完成 IPC 数超配额 | 对齐 Doc 02 §5.5 |
+| `E_PEER_DIED` (-14) | `recv` 等待期间发送方进程退出 / `reply` 时原发送方已死 | 对端死亡 |
+
+**对端死亡处理规则**（对齐 [需求评审 §5 跨模块契约](../requirements-review-and-supplement.md)）：
+
+- 发送方阻塞在 `send` → 接收方退出 → 发送方被唤醒，返回 `E_PEER_DIED`；
+- 接收方阻塞在 `recv` → 所有潜在发送方退出 → 继续阻塞（等待新发送方），**不返回错误**；
+- 接收方处理中 → 发送方退出 → `reply` 返回 `E_PEER_DIED`，接收方可忽略（消息已处理）；
+- 进程退出时，内核**必须**唤醒所有阻塞在该进程相关 Endpoint 上的线程（对齐 Doc 01 §4.2 回收顺序）。
+
+**设计原则**：IPC 错误**不通过 panic 表达**，必须映射为稳定错误码返回用户态。
 
 ---
 

@@ -19,6 +19,7 @@
 | 撤销算法 | derivation tree 遍历（seL4 风格）| §3.4 |
 | 委托语义 | 保留父子链（用于撤销）| §3.3 |
 | 数据结构 | Capability.parent + CapTable 256 槽 + CapRef=u8 | §4 |
+| 对象生命周期 | Live→Revoking→Retired→Freed 状态机 + generation 校验 | §4.2 |
 | agent_id 管理 | init 进程统一管理命名空间 | §7 |
 
 > ✅ Phase 4 核心设计决策已完成，剩余 TBD 为安全评审/性能基准相关。
@@ -185,6 +186,57 @@ impl CapTable {
 | `Process`（管理面）| `ADMIN`（freeze/thaw/kill）| 监督树 / 行为围栏 | Phase 4 |
 
 > **原则**：内核只认识"对象 + 权限位"，不认识"L1~L5"或"业务通道"——后者是用户态策略（见 §5）。
+
+### 4.2 内核对象生命周期与 Generation *(评审补充，对齐 [需求评审 §2.3](../requirements-review-and-supplement.md))*
+
+**问题**：Capability 指向对象槽位（slot），若 slot 被释放后复用，旧 capability 可能"复活"指向新对象（use-after-free 变体）。
+
+**PROPOSED → 统一对象状态机 + generation 校验**：
+
+```text
+Live ──► Revoking ──► Retired ──► Freed
+  │          │            │
+  │          │            └─ 对象已不可用，等待引用计数归零后释放内存
+  │          └─ 正在撤销派生 capability，新 invoke 返回 EOBJECT_RETIRED
+  └─ 正常可用状态
+```
+
+**ObjRef 带 generation**：
+
+```rust
+/// 对象引用 = slot index + generation（防 slot 复用攻击）
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ObjRef {
+    pub index: u32,       // 内核对象表索引
+    pub generation: u32,  // ★ 每次 slot 复用时递增
+}
+
+/// 对象状态
+pub enum ObjState {
+    Live,
+    Revoking,    // 撤销进行中（§3.4 derivation tree 遍历）
+    Retired,     // 已撤销，不可 invoke
+    Freed,       // 内存已释放（不应被引用）
+}
+```
+
+**校验规则**：
+
+- `CapTable::get(cptr)` 返回 capability 后，内核**必须**校验 `cap.obj.generation == obj_table[cap.obj.index].generation`；
+- generation 不匹配 → 返回 `EOBJECT_RETIRED`（-10），**不 panic**；
+- slot 复用时 generation 必须递增（wrap-around 用 u32 足够，2^32 次复用不现实）；
+- 对象进入 `Revoking` 状态后，所有新 invoke 立即返回错误，**不等待遍历完成**（避免阻塞热路径）。
+
+**进程退出时的对象回收顺序**（对齐 [需求评审 §5 跨模块契约](../requirements-review-and-supplement.md)）：
+
+1. 标记进程为 `Exiting`，拒绝新 syscall；
+2. 撤销该进程持有的所有 capability（进入 `Revoking`）；
+3. 唤醒所有阻塞在该进程相关 Endpoint/Notification 上的线程（`PeerDied` 错误）；
+4. 回收地址空间（页表 + 物理页）；
+5. 回收内核对象（TCB、CapTable 等）；
+6. 发送 death notification 给父进程（若已注册）。
+
+> **设计约束**：generation 校验是 O(1) 比较，不影响 NFR2 微秒级目标。
 
 ---
 

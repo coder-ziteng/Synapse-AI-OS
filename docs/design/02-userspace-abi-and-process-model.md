@@ -21,8 +21,10 @@
 | 地址空间 | 用户空间 0x0~0x7FFF_FFFF_FFFF，内核映射 0xFFFF_8000_... | §3.1 |
 | spawn 权限 | 仅 init 进程可 spawn | §5.2 |
 | death notification | death endpoint + signal 消息 + reap syscall | §5.3 |
-| syscall 表 | 17 个 syscall（IPC 4 + Notification 2 + Capability 3 + Process 6 + Time 1 + Memory 2）| §4.2 |
-| 错误码 | 自定义负值（-1~-127），10 个核心错误码 | §4.3 |
+| syscall 表 | 18 个 syscall（IPC 4 + Notification 2 + Capability 3 + Process 6 + Time 1 + Memory 2 + ABI 1）| §4.2 |
+| 错误码 | 自定义负值（-1~-127），15 个核心错误码 | §4.3 |
+| ABI 版本策略 | abi_query syscall + 消息头 version + rights 只追加 | §4.5 |
+| 每进程配额 | Quota struct（pages/threads/caps/endpoints/msg/pending/grants）| §5.5 |
 
 > ✅ Phase 4 核心设计决策已完成，剩余 TBD 为信号模型/时钟校准相关。
 
@@ -190,7 +192,46 @@ pub struct UserMemoryRegion {
 - 扩展新错误码时，追加到表尾，不修改已有编号。
 
 ### 4.4 待决策
+
 - [ ] syscall 是否可重启（被信号/抢占打断后）—— 需信号模型确认后决策
+
+### 4.5 ABI 版本策略 *(评审补充，对齐 [需求评审 §2.5](../requirements-review-and-supplement.md))*
+
+**问题**：syscall 号表、消息头、Capability 权限位均为草案。若无版本策略，用户态程序一旦编译即与内核强绑定，无法独立演进。
+
+**PROPOSED → 三层版本控制**：
+
+| 层级 | 版本载体 | 兼容规则 |
+|------|---------|---------|
+| **syscall ABI** | `abi_query` syscall 返回 `{major, minor}` | major 不兼容变更（删除/重解释 syscall）；minor 向后兼容新增 |
+| **IPC 消息头** | `IpcHeader.version: u8` + `header_len: u16` | 接收方按 `header_len` 跳过未知尾部字段；version 不匹配 → `E_ABI_MISMATCH` |
+| **Capability rights** | 权限位只允许追加（bit 7~31 保留） | 删除或重解释权限位 → ABI major 版本提升 |
+
+**abi_query syscall**（新增，编号 18）：
+
+```rust
+/// 查询内核支持的 ABI 版本
+/// 返回：(major << 16) | minor
+/// 用户态启动时调用，版本不匹配则拒绝运行
+SYS_ABI_QUERY = 18,
+```
+
+**结构体布局约束**：
+
+- 所有跨边界结构体必须 `#[repr(C)]`，明确字节序（little-endian）、对齐、大小；
+- 禁止直接把 Rust 私有布局当 ABI（如 `#[repr(Rust)]` 的结构体不得跨越 syscall 边界）；
+- 新增字段只能追加到结构体尾部，且 `header_len` / `size` 字段必须同步更新；
+- 错误码采用固定负数枚举（§4.3），不复用宿主 OS 的未承诺扩展。
+
+**新增错误码**：
+
+| 错误码 | 名称 | 说明 |
+|--------|------|------|
+| -11 | `E_ABI_MISMATCH` | 用户态与内核 ABI 版本不兼容 |
+| -12 | `E_OBJECT_RETIRED` | 对象已撤销/退休（generation 不匹配，对齐 Doc 01 §4.2）|
+| -13 | `E_QUOTA_EXCEEDED` | 进程资源配额耗尽（对齐 §5.5）|
+| -14 | `E_PEER_DIED` | IPC 对端进程已退出 |
+| -15 | `E_TIMEOUT` | 操作超时（预留，首期仅 `try_send` 非阻塞）|
 
 ---
 
@@ -262,6 +303,58 @@ Created → Running → (Blocked) → Exited/Faulted → Reaped
 - 监督树是**用户态**模型，内核不强制（避免内核被绑死策略）；但内核保证原语可用。
 - 自进化系统（系统服务层 S4）复用此监督树 + `preserve_state` 机制作为"策略回滚"的载体。
 - **TBD**：监督器自身崩溃如何处理？候选：每个监督器被更高层监督器看管（递归）；或 kernel watchdog 监督 init。
+
+### 5.5 每进程资源配额 (Per-Process Quota) *(评审补充，对齐 [需求评审 §2.4](../requirements-review-and-supplement.md))*
+
+**问题**：Capability 模型解决"能不能做"，但未解决"能做多少"。恶意或失控 Agent 可耗尽页帧、cap 槽位、Endpoint 队列、线程数等资源，导致内核或其他进程不可用。
+
+**PROPOSED → 最小配额模型（Phase 4 引入）**：
+
+```rust
+/// 每进程资源配额
+pub struct Quota {
+    pub max_pages: u32,           // 物理页帧上限（含内核映射）
+    pub max_threads: u16,         // 线程数上限
+    pub max_caps: u16,            // CapTable 槽位上限（≤ 256）
+    pub max_endpoints: u16,       // 持有的 Endpoint 对象数上限
+    pub max_msg_size: u32,        // 单条 IPC 消息最大字节数（≤ 4KB）
+    pub max_pending_ipc: u16,     // 未完成 IPC 请求数上限
+    pub max_grants: u16,          // 共享内存 grant 数上限
+}
+
+/// 默认配额（init 进程授予子进程时的初始值）
+pub const DEFAULT_QUOTA: Quota = Quota {
+    max_pages: 4096,              // 16 MB
+    max_threads: 16,
+    max_caps: 64,                 // 保守值，远低于 256 上限
+    max_endpoints: 8,
+    max_msg_size: 4096,           // 4 KB
+    max_pending_ipc: 32,
+    max_grants: 8,
+};
+```
+
+**配额管理规则**：
+
+| 规则 | 说明 |
+|------|------|
+| **授予** | `spawn` 时父进程从自身配额中划拨子进程配额（不可超过父进程剩余）|
+| **超限** | 返回 `E_QUOTA_EXCEEDED`（-13），**不阻塞、不 panic** |
+| **调整** | 持有 `Process::ADMIN` capability 的进程可调整子进程配额（如监督树降级）|
+| **init 预算** | init 进程拥有全局初始预算（内核启动时设定），不可被其他进程修改 |
+| **回收** | 进程退出时配额归还父进程（或全局池，若父进程已退出）|
+
+**与 FR8 资源核算的关系**：
+
+- FR8 提供**计数器**（per-thread CPU 时间、per-process 内存页数）；
+- 本节提供**配额上限**（enforcement）；
+- 计数器 ≤ 配额 → 允许；计数器 > 配额 → 拒绝新分配 + 审计事件。
+
+**首期裁剪**：
+
+- 不做 CPU 时间配额（依赖 PIT 校准，推迟至 Phase 3 完成后）；
+- 不做网络请求配额（外交工具用户态策略，非内核职责）；
+- 配额检查在分配路径上，O(1) 比较，不影响 NFR2。
 
 ---
 
