@@ -317,6 +317,71 @@ P6 存储栈 + virtio-gpu → S6 本体 + 动态 UI（demo：意图 → 实时 U
 - **审计事件的签名字段预留算法标识**（如 `sig_alg: u8`），避免后期迁移时改变事件格式。
 - **HAL 预留 `TrustRoot` trait**（可为空实现），不实现任何方法，仅占位——防止 Phase 6 时侵入式修改核心层。
 
+#### 13.2.1 `CryptoProvider` trait 接口草案 *(本窗口新增)*
+
+```rust
+// user/diplomat/src/crypto/provider.rs (概念设计)
+pub trait CryptoProvider: Send + Sync {
+    /// 签名（算法作为参数，支持后量子迁移不破坏业务层）
+    fn sign(&self, alg: SigAlgorithm, msg: &[u8]) -> Result<Signature, CryptoError>;
+    fn verify(&self, alg: SigAlgorithm, msg: &[u8], sig: &Signature) -> Result<bool, CryptoError>;
+
+    /// 密钥交换（ephemeral 模式，每次会话重新协商）
+    fn kx_ephemeral(&self, alg: KxAlgorithm) -> Result<(KxPublic, KxPrivate), CryptoError>;
+    fn kx_derive(&self, alg: KxAlgorithm, priv: &KxPrivate, peer_pub: &KxPublic)
+        -> Result<SharedSecret, CryptoError>;
+
+    /// 哈希（审计事件指纹 / 内容去重）
+    fn hash(&self, alg: HashAlgorithm, data: &[u8]) -> Digest;
+}
+
+// 算法标识枚举（首期只实现第一项，预留后量子位）
+pub enum SigAlgorithm { Ed25519,        /* Phase 6: */ MlDsa65, SlhDsaSha2Small }
+pub enum KxAlgorithm { X25519,         /* Phase 6: */ MlKem768, MlKem1024 }
+pub enum HashAlgorithm { Sha256,       /* Phase 6: */ Sha3_256, Blake3 }
+
+// 签名不透明封装 —— 业务层只能"持有 + 序列化"，不解释字节内容
+pub struct Signature { alg: SigAlgorithm, bytes: Vec<u8> }
+```
+
+**关键设计约束**：
+- `Signature` 是不透明类型：业务层不得解析内部字节，避免算法迁移时业务层代码扩散改动
+- `CryptoProvider` 以 `Arc<dyn CryptoProvider>` 单例注入，首期注入 Ed25519 实现，Phase 6 替换 ML-DSA 实现**不改业务层**
+- 审计事件签名字段使用 `Signature`（见 §13.2.2），与外交工具跨层解耦
+
+#### 13.2.2 审计事件 `sig_alg` 字段 *(跨文档对齐 Doc 04 §8.1)*
+
+将 Doc 04 §8.1 的 `signature: [u8;64]` 升级为 `signature: Signature`（包含算法标识），Phase 6 后量子迁移**不破坏审计事件格式**。详见 Doc 04 §8.1 同步修订。
+
+#### 13.2.3 HAL `TrustRoot` trait 占位 *(本窗口新增)*
+
+```rust
+// kernel/src/hal/trust_root.rs (概念设计，首期全部为空实现)
+pub trait TrustRoot: Send + Sync {
+    /// TPM PCR 扩展（Phase 6+）
+    fn extend_pcr(&self, _pcr: u32, _digest: &[u8; 32]) -> Result<(), HalError> {
+        Err(HalError::NotImplemented)
+    }
+    /// TPM 密封（Phase 6+）
+    fn seal(&self, _data: &[u8], _policy: &SealPolicy) -> Result<Vec<u8>, HalError> {
+        Err(HalError::NotImplemented)
+    }
+    /// TPM 解封（Phase 6+）
+    fn unseal(&self, _sealed: &[u8]) -> Result<Vec<u8>, HalError> {
+        Err(HalError::NotImplemented)
+    }
+}
+
+// 首期默认实现：无 TPM/TEE 环境
+pub struct NullTrustRoot;
+impl TrustRoot for NullTrustRoot {}
+```
+
+**设计原则**：
+- trait 方法签名按 Phase 6 TPM 2.0 规范设计，首期**全部返回 `NotImplemented`**
+- 任何代码路径**不得假设 TrustRoot 可用**——必须先查询 trait 能力（`if trust_root.extend_pcr(...).is_ok()`）
+- Phase 6 集成真实 TPM 时，只需实现新 struct（如 `Tpm2TrustRoot`），不改 trait 接口
+
 ### 13.3 明确不做（首期）
 
 - 不集成 TPM / TEE（QEMU 软件模拟无意义，且会污染内核复杂度）。

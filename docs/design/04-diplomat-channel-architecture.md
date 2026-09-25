@@ -250,9 +250,12 @@ pub struct AuditEvent {
     pub action: AuditAction,          // Send / Recv / Scan / Persist / Reject
     pub decision: Decision,           // Allow | Deny(reason) | Quarantine
     pub content_hash: Option<[u8;32]>,// 内容指纹（不存原文）
-    pub signature: [u8;64],           // 外交工具密钥签名（仅业务层事件）
+    pub signature: Signature,         // ★ 不透明签名（含算法标识，对齐 [Doc 06 §13.2.2](06-system-services-roadmap.md)）
+                                      // 业务层事件用外交工具密钥签名；内核事件由审计服务签名
 }
 ```
+
+> **注**：旧版 `signature: [u8;64]` 升级为 `Signature` 类型（算法标识 + 字节序列），Phase 6 后量子密码迁移（ML-DSA / SLH-DSA）**不破坏审计事件格式**。`Signature` 类型定义见 [Doc 06 §13.2.1](06-system-services-roadmap.md)。
 
 ### 8.2 不可篡改保证
 

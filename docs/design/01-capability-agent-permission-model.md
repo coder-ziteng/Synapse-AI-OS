@@ -59,7 +59,16 @@
 ```
 
 ### 3.1 铸造（Mint）
-- 谁有权铸造根能力？**TBD**（候选：内核启动时为 init 进程铸造全部根能力；或每个设备在 HAL 注册时铸造）。
+- 谁有权铸造根能力？**PROPOSED → init 进程全量铸造**（候选之二：HAL 分散铸造）。
+  - **理由**：
+    - **单一责任源**：所有能力均从 init 的根能力派生，撤销链路 / 委托链可全局追踪；
+    - **对齐 seL4 模型**：seL4 用 root task（即 init 进程）持有全部根能力，再由 root task 通过 spawn + delegate 分配给其他用户态服务——经过形式化验证的设计；
+    - **避免 HAL 分散铸造的复杂度**：HAL 分散铸造引入"多源能力管理"问题（哪个设备铸造了哪些能力、跨设备能力的依赖关系），对微内核收益不抵成本。
+  - **init 进程职责**：
+    1. 内核启动时，内核**仅为 init 进程**铸造"根 CapTable"（包含所有内核对象的根引用 + 全权限位）；
+    2. init 进程通过 `spawn` 系统调用创建其他进程时，按需 `delegate` 子集能力给新进程（attenuation-only，不可放大）；
+    3. NIC 等独占资源：init 启动外交工具时，**仅**向外交工具 cast NIC capability（见 §6.1 唯一网络出口不变量）。
+  - **与 HAL 的关系**：HAL 仍负责注册设备对象（设备枚举、MMIO 地址、IRQ 号），但**设备对象本身由内核统一持有**；init 进程在启动期通过特殊 syscall（`root_cap_enumerate_devices`）一次性获取所有设备的 capability 引用——HAL 不直接铸造 capability。
 - token 熵源：capability 的不可猜测性依赖随机位。**TBD**：是否引入 RDRAND / 启动期熵池？
 
 ### 3.2 校验（Invoke / Verify）
@@ -197,7 +206,7 @@ pub struct CapTable {
 
 ## 7. 待决策清单（Phase 4 前必须收敛）
 
-- [ ] 根能力铸造策略（init 全量 vs HAL 分散）
+- [x] ~~根能力铸造策略（init 全量 vs HAL 分散）~~ → **PROPOSED：init 进程全量铸造**，理由见 §3.1；待用户确认后升级为 DECIDED
 - [ ] token 熵源与不可猜测性强度
 - [ ] 撤销算法选型（derivation tree vs epoch vs version）
 - [ ] 委托是否保留父子链
