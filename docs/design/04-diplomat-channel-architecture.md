@@ -294,14 +294,14 @@ pub struct AuditEvent {
 
 ## 11. 待决策清单（Phase 5 前必须收敛）
 
-- [ ] ChannelRegistry 是否允许运行期注册（受信签名 manifest）
-- [ ] File Channel 的"扫描不通过 → 通知发起方"的协议（异步 IPC？）
-- [ ] Stream Channel 违规时的处置策略（截断 / 打码 / 熔断）
-- [ ] Security Gateway 失败是否熔断整个外交工具（强安全 vs 高可用）
-- [ ] 出站文件脱敏的规则集来源（内置 / 用户可配 / Agent 自描述）
-- [ ] 硬件加速是否纳入 Phase 5（首期建议软件实现，性能不达标再升级）
-- [ ] 跨 AI OS 编解码器标准化（Phase 6+）
-- [ ] 审计事件流是否经过内核（性能考量）vs 仅外交工具内部产生
+- [x] ~~ChannelRegistry 是否允许运行期注册（受信签名 manifest）~~ → **PROPOSED：首期仅编译期注册**；理由：减少攻击面（运行期注册引入动态代码加载风险）；Phase 6+ 再考虑受信签名 manifest
+- [x] ~~File Channel 的"扫描不通过 → 通知发起方"的协议~~ → **PROPOSED：异步 IPC Notification**；理由：扫描可能耗时（大文件），阻塞发起方不划算；发起方通过 Notification 异步接收扫描结果
+- [x] ~~Stream Channel 违规时的处置策略（截断 / 打码 / 熔断）~~ → **PROPOSED：熔断**（切断连接 + 冻结相关 Agent + 审计事件）；理由：流媒体违规（如敏感画面）风险高，截断 / 打码可能遗漏，熔断最安全
+- [x] ~~Security Gateway 失败是否熔断整个外交工具（强安全 vs 高可用）~~ → **PROPOSED：熔断整个外交工具**（强安全）；理由：安全网关是外交工具的核心不变量（"无外交即无网络"），网关失败意味着安全策略失效，必须熔断
+- [x] ~~出站文件脱敏的规则集来源（内置 / 用户可配 / Agent 自描述）~~ → **PROPOSED：首期内置 + 用户可配**；理由：内置覆盖常见 PII（身份证 / 手机号 / 邮箱），用户可配扩展自定义规则；Agent 自描述推迟至 Phase 6（需信任模型成熟）
+- [x] ~~硬件加速是否纳入 Phase 5~~ → **PROPOSED：不纳入**；理由：首期软件实现，性能基准测试后若 P99 > 10ms 再升级硬件加速（TLS offload / IPSec offload）
+- [ ] 跨 AI OS 编解码器标准化（Phase 6+）—— 远期，Phase 5 不决策
+- [x] ~~审计事件流是否经过内核（性能考量）vs 仅外交工具内部产生~~ → **PROPOSED：不经过内核**；理由：审计事件由外交工具内部产生（业务层事件），直接推送到审计服务（用户态进程），避免内核中转开销；内核事件（cap 校验 / IPC 元信息）由内核直接推送到审计服务（见 [Doc 03 §6.3](03-ipc-message-and-single-copy-path.md)），两条路径分离
 
 ---
 
