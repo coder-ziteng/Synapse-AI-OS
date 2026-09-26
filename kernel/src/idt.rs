@@ -208,9 +208,15 @@ extern "C" fn page_fault_inner(ip: u64, error_code: u64) -> ! {
 // 硬件中断处理器
 // ============================================================================
 
+/// IRQ0 定时器：tick 计数 → **EOI 先行** → 中断返回边界调度检查点（P3-T6）。
+///
+/// EOI 必须先于 `on_timer_irq`：检查点可能把本线程切走（xv6 同模型，详见
+/// kthread.rs P3-T6 模块头）——若切换发生在 EOI 之前，PIC 仍处于 IRQ0 屏蔽
+/// 状态，接管线程将永远收不到下一次定时器中断（调度死锁）。
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::pit::timer_interrupt_handler();
     unsafe {
         crate::pic::send_eoi(0);
     }
+    crate::kthread::on_timer_irq();
 }
