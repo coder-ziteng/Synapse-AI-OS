@@ -38,14 +38,15 @@
 │  cap/   Capability 表 · 对象表 · 委托/撤销级联             │
 │  ipc/   Endpoint(同步) · Notification(异步) · 单拷贝路径    │
 │  proc/  进程表 · Agent 注册表 · spawn/exit/reap            │
+│  sched/ TCB 状态机 · RR/优先级 runqueue · sleep 队列        │
 │  kernel/ 引导链 · 页帧/堆 · GDT/TSS/IDT · PIC/PIT · TSC 时钟│
 │  hal/   硬件抽象 Trait (Mmu/Interrupt/Timer/Serial)        │
 │  audit/ 审计事件流（骨架）                                 │
 └─────────────────────────────────────────────────────────┘
 ```
 
-`cap/`、`ipc/`、`proc/` 为零依赖纯逻辑 crate（`#![deny(unsafe_code)]`），
-宿主端 115 个单元测试全绿；内核集成层用 IRQ-safe SpinLock 包装后已在
+`cap/`、`ipc/`、`proc/`、`sched/` 为零依赖纯逻辑 crate（`#![deny(unsafe_code)]`），
+宿主端 152 个单元测试全绿；内核集成层用 IRQ-safe SpinLock 包装后已在
 QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit → reap）。
 
 ## 3. 进度（详细状态见 [task.json](task.json)）
@@ -55,7 +56,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 | P0 | 环境与基线（nightly-2026-09-23 锁定 + QEMU + 工具链验证） | ✅ 完成 |
 | P1 | 裸机点亮与工程基建（三级 boot 链 · UART · log/panic 回溯 · CI · 测试框架） | ✅ 完成 (11/11) |
 | P2 | 内存 / 中断 / 异常（E820 · 页帧分配器 · 内核堆 · GDT/TSS/IST · IDT · PIC/PIT · TSC 校准） | ✅ 完成 (7/7) |
-| P3 | 多任务与调度（sched/ 纯逻辑 crate · switch_to 汇编 · 抢占模型 · Mutex · FR8/FR10 原语） | 🔄 已拆解 P3-T1~T8，待开工 |
+| P3 | 多任务与调度（sched/ 纯逻辑 crate · switch_to 汇编 · 抢占模型 · Mutex · FR8/FR10 原语） | 🔄 进行中 (1/8)：T1 sched crate ✅ 37 测试全绿 |
 | P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 未开始 |
 | P4.5 | PCI 枚举与中断用户态化 | 未开始 |
 | P5 | 外交工具与 Agent 雏形 | 未开始 |
@@ -95,7 +96,7 @@ python kernel/tests/run_tests.py      # QEMU 测试套件
 | 路径 | 说明 |
 | --- | --- |
 | `kernel/` | 内核本体（引导链 boot.S、内存、中断、异常、集成层、smoke） |
-| `cap/` `ipc/` `proc/` | 纯逻辑 crate：Capability / IPC / 进程（零 unsafe，宿主可测） |
+| `cap/` `ipc/` `proc/` `sched/` | 纯逻辑 crate：Capability / IPC / 进程 / 调度（零 unsafe，宿主可测） |
 | `hal/` | 硬件抽象 Trait + `cfg(test)` fake 实现 |
 | `abi/` | 用户态 ABI（syscall 号表，18 个，设计文档 02 §4.2） |
 | `audit/` | 审计事件流（骨架） |
