@@ -46,7 +46,7 @@
 ```
 
 `cap/`、`ipc/`、`proc/`、`sched/` 为零依赖纯逻辑 crate（`#![deny(unsafe_code)]`），
-宿主端 171 个单元测试全绿；内核集成层用 IRQ-safe SpinLock 包装后已在
+宿主端 188 个单元测试全绿；内核集成层用 IRQ-safe SpinLock 包装后已在
 QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit → reap）。
 
 ## 3. 进度（详细状态见 [task.json](task.json)）
@@ -61,6 +61,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 | P4.5 | PCI 枚举与中断用户态化 | 未开始 |
 | P5 | 外交工具与 Agent 雏形 | 未开始 |
 | P6 | SMP / 存储栈 / IOMMU / 本地推理 / 跨 OS 外交 | 远期 |
+| S6 预研 | 显示栈 PoC（tiny-skia 渲染管线 · 混合模式场景图 · 2D 虚拟人表情状态机，Doc 07） | ✅ PoC 完成 (S6-T0)：19 tests 绿 · 1080p 整帧 93ms |
 
 ## 4. 快速开始
 
@@ -101,6 +102,7 @@ python kernel/tests/run_tests.py      # QEMU 测试套件
 | `abi/` | 用户态 ABI（syscall 号表，18 个，设计文档 02 §4.2） |
 | `audit/` | 审计事件流（骨架） |
 | `user/` | 用户态程序（Phase 4 启用） |
+| `display/` | S6 显示栈预研（synapse-display：tiny-skia 渲染管线 + 混合模式场景图 + 2D 虚拟人，`renderer` feature 门控） |
 | `xtask/` | 构建 / 运行 / CI 任务封装 |
 | `docs/design/` | 设计文档 00~07 + rule.md 开发规则 |
 | `scripts/` `build_disk.py` `verify-all.ps1` | 辅助脚本 |

@@ -12,6 +12,7 @@ members = [
     "user",
     "kint",
     "xtask",
+    "display",
 ]
 
 # 共享包元信息（避免每个 crate 重复 license/authors）
