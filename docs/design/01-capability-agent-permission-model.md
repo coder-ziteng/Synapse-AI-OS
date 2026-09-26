@@ -155,7 +155,7 @@ bitflags! {
 pub struct CapTable {
     slots: [Option<Capability>; 256],    // ★ 固定 256 槽（对齐 §7 PROPOSED）
     free_list: [u8; 256],                // 空闲槽位栈（O(1) 分配 / 释放）
-    free_top: u8,                        // 栈顶指针
+    free_top: u16,                       // 栈中空闲槽数量（0..=256，u8 无法表达 256，故用 u16）
 }
 
 impl CapTable {
@@ -197,7 +197,7 @@ impl CapTable {
 Live ──► Revoking ──► Retired ──► Freed
   │          │            │
   │          │            └─ 对象已不可用，等待引用计数归零后释放内存
-  │          └─ 正在撤销派生 capability，新 invoke 返回 EOBJECT_RETIRED
+  │          └─ 正在撤销派生 capability，新 invoke 返回 E_OBJECT_RETIRED
   └─ 正常可用状态
 ```
 
@@ -223,7 +223,7 @@ pub enum ObjState {
 **校验规则**：
 
 - `CapTable::get(cptr)` 返回 capability 后，内核**必须**校验 `cap.obj.generation == obj_table[cap.obj.index].generation`；
-- generation 不匹配 → 返回 `EOBJECT_RETIRED`（-10），**不 panic**；
+- generation 不匹配 → 返回 `E_OBJECT_RETIRED`（-12，对齐 [Doc 02 §4.5](02-userspace-abi-and-process-model.md) 错误码表），**不 panic**；
 - slot 复用时 generation 必须递增（wrap-around 用 u32 足够，2^32 次复用不现实）；
 - 对象进入 `Revoking` 状态后，所有新 invoke 立即返回错误，**不等待遍历完成**（避免阻塞热路径）。
 

@@ -1,0 +1,18 @@
+[package]
+name        = "synapse-cap"
+version     = "0.1.0"
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace      = true
+description = "Synapse capability 核心数据结构：CapTable / ObjRef generation / 生命周期状态机 / 配额 / 原子转移（架构无关，宿主可测）"
+publish     = false
+
+[lib]
+path = "src/lib.rs"
+
+# 零依赖：纯 no_std，固定数组实现（不使用 alloc），保证宿主测试与内核集成一致
+[dependencies]
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

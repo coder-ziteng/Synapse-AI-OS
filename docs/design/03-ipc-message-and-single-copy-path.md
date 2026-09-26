@@ -134,9 +134,9 @@ IPC 操作（`send` / `recv` / `reply` / `try_send`）的错误码复用 [Doc 02
 |--------|---------|------|
 | `E_INVALID_CAP` (-1) | endpoint cptr 无效 / 权限不足（缺 SEND/RECV/REPLY）| capability 校验失败 |
 | `E_INVALID_ADDR` (-2) | 用户态 msg buffer 地址非法 / 未映射 / 跨页未授权 | 拷贝前校验 |
-| `E_NO_MEMORY` (-3) | 内核无法分配 IPC 临时结构（罕见）| 资源耗尽 |
+| `E_NO_MEMORY` (-3) | 内核无法分配 IPC 临时结构 / cap transfer 时接收方 CapTable 槽位不足（atomic 回滚，对齐 §5）| 资源耗尽 |
 | `E_WOULD_BLOCK` (-4) | `try_send` 时接收方未就绪 / 队列满 | 非阻塞操作失败 |
-| `E_PERMISSION` (-7) | cap transfer 时接收方 CapTable 满（atomic 回滚）| 对齐 §5 |
+| `E_PERMISSION` (-7) | 发送方缺少 SEND 权限 / 转移的 capability 缺 GRANT 位 | 权限不足 |
 | `E_OBJECT_RETIRED` (-12) | endpoint 已撤销（generation 不匹配）| 对齐 Doc 01 §4.2 |
 | `E_QUOTA_EXCEEDED` (-13) | 发送方未完成 IPC 数超配额 | 对齐 Doc 02 §5.5 |
 | `E_PEER_DIED` (-14) | `recv` 等待期间发送方进程退出 / `reply` 时原发送方已死 | 对端死亡 |
