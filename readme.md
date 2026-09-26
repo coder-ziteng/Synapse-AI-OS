@@ -57,7 +57,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 | P1 | 裸机点亮与工程基建（三级 boot 链 · UART · log/panic 回溯 · CI · 测试框架） | ✅ 完成 (11/11) |
 | P2 | 内存 / 中断 / 异常（E820 · 页帧分配器 · 内核堆 · GDT/TSS/IST · IDT · PIC/PIT · TSC 校准） | ✅ 完成 (7/7) |
 | P3 | 多任务与调度（sched/ 纯逻辑 crate · switch_to 汇编 · 抢占模型 · Mutex · FR8/FR10 原语） | 🔄 进行中 (5/8)：T1 sched crate ✅ · T2 FR8 核算 ✅ · T3 FR10 频率计数 ✅ · T4 kthread 基建 ✅ 真机 27/27 · T5 switch_to 汇编 ✅ 真机双线程往返 9/9 |
-| P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 未开始 |
+| P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 🔄 进行中 (1/12)：已分解 12 任务（T1 target+ELF → T12 PCID+收尾）· T1 ✅ 用户态 target json + 基址 0x400000 链接脚本 + 第一个静态 ELF（xtask user + ELF 头断言）（独立 worktree d:/ai-os-p4，分支 claude/p4-userspace） |
 | P4.5 | PCI 枚举与中断用户态化 | 未开始 |
 | P5 | 外交工具与 Agent 雏形 | 未开始 |
 | P6 | SMP / 存储栈 / IOMMU / 本地推理 / 跨 OS 外交 | 远期 |
@@ -88,6 +88,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 ```bash
 cargo run -p synapse-xtask -- build   # 构建磁盘镜像
 cargo run -p synapse-xtask -- run     # QEMU 运行（exit 1 属正常，看 logs\ 判定）
+cargo run -p synapse-xtask -- user    # 构建用户态 ELF（user/hello）+ ELF 头断言（P4-T1）
 cargo test --workspace --exclude synapse-kernel   # 宿主单元测试
 python kernel/tests/run_tests.py      # QEMU 测试套件
 ```
@@ -101,7 +102,7 @@ python kernel/tests/run_tests.py      # QEMU 测试套件
 | `hal/` | 硬件抽象 Trait + `cfg(test)` fake 实现 |
 | `abi/` | 用户态 ABI（syscall 号表，18 个，设计文档 02 §4.2） |
 | `audit/` | 审计事件流（骨架） |
-| `user/` | 用户态程序（Phase 4 启用） |
+| `user/` | 用户态程序（P4-T1 起启用：`synapse-user` 运行时 + `user/hello` 第一个静态 ELF，构建入口 `xtask user`） |
 | `display/` | S6 显示栈预研（synapse-display：tiny-skia 渲染管线 + 混合模式场景图 + 2D 虚拟人，`renderer` feature 门控） |
 | `xtask/` | 构建 / 运行 / CI 任务封装 |
 | `docs/design/` | 设计文档 00~07 + rule.md 开发规则 |

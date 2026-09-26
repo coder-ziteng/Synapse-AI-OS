@@ -597,6 +597,244 @@
           "actual_approach": "宿主 std 预研先行、不依赖内核进度：以最小 PoC 验证 Doc 07 DECIDED 选型（tiny-skia + 自研矢量场景图）。关键发现：① tiny-skia 0.11.4 API 陷阱——PathBuilder::from_rect 直返 Path 而 from_circle/from_oval 返 Option<Path>、无 push_rounded_rect（手写四角 cubic bezier 圆角矩形，k=r*0.5522848）；② renderer feature 门控——deps optional + example required-features，否则 workspace 裸 cargo test 因 example 编译失败；③ 面板内容行宽必须乘投影 scale 并 clamp 到卡宽内，否则远距离（z=600, s≈0.67）文字行溢出卡片。性能基线：1080p 整帧 93ms（release），瓶颈为背景 4px 网格逐格 fill_path，S6.1 改单次渐变 shader + 脏矩形增量后预算余量明确。测试 19 项（types 5 + camera 5 + scene 2 + avatar 5 + poc 集成 2）全绿。"
         }
       ]
+    },
+    {
+      "phase": "P4",
+      "name": "用户态与 IPC",
+      "ref": "需求目标 §三 Phase 4 + docs/design/01/02/03",
+      "exit_criteria": [
+        "用户态自定义 target（x86_64-synapse-user.json）+ 链接脚本，产出第一个静态用户态 ELF（基址 0x400000，无 PIE）",
+        "用户地址空间管理：VMA 式内存区域表 + 按需分页缺页路径 + 非法访问杀进程（PCID 为可选优化不阻塞，Doc 02 §3.2）",
+        "Ring0↔Ring3 切换：TSS.RSP0 per-thread + syscall/sysret MSR（STAR/LSTAR/FMASK）配置 + iret 首次进入",
+        "极简静态 ELF 解析器（ET_EXEC/PT_LOAD，砍动态链接）+ initramfs（cpio newc）加载",
+        "19 个 syscall 按 Doc 02 §4.2 ABI 接线；agent_id 由内核盖章；错误码按 §4.3 负值约定",
+        "IPC send/recv/reply 单拷贝路径（Doc 03 §4）+ 能力校验 + cap transfer；Notification 异步原语",
+        "process_spawn（仅 init 可 spawn）+ 崩溃处理（fault 标记 + death notification + reap + FR8 回收）",
+        "用户态 init 进程经 IPC 请求服务 + gettime 时钟服务（消费 P2-T7 TSC 校准）",
+        "FR9：capability 校验 / IPC / 进程生命周期事件点 → append-only 审计事件流",
+        "真机 QEMU 三重判定全绿：exit=363 + 无 PANIC + N/N smoke；宿主测试全绿"
+      ],
+      "tasks": [
+        {
+          "id": "P4-T1",
+          "name": "用户态编译 target + 第一个静态 ELF",
+          "status": "done",
+          "deliverables": [
+            "x86_64-synapse-user.json：对齐内核 target 的 data-layout/features，panic=abort、disable-redzone、relocation-model=static、ld.lld（Doc 02 §1.1）",
+            "用户态链接脚本：基址 0x400000（Doc 02 §3.1 PROPOSED），.text/.rodata RX + .data/.bss RW 分段",
+            "user/ 下第一个 bin（no_std _start：abi_query 占位 + exit 占位 + 死循环兜底），复用既有 synapse-user/synapse-abi crate",
+            "xtask 增加 user build 子命令（build-std=core,alloc）+ ELF 产物校验",
+            "关闭 Doc 02 §8 待决策项'target json 完整字段'"
+          ],
+          "verify": [
+            "宿主校验：ELF 头断言（e_type=ET_EXEC、e_entry 落在 0x400000 基址区、PT_LOAD 段 flags RX/RW 正确、无 PT_DYNAMIC）",
+            "cargo test 全 workspace 绿（新 target 不破坏宿主构建）"
+          ],
+          "deps": [],
+          "estimate": "1 窗口",
+          "actual_approach": "独立 worktree d:/ai-os-p4（分支 claude/p4-userspace）。交付：① x86_64-synapse-user.json——llvm-target/data-layout/features 与内核 x86_64-bootloader.json 逐字段一致（防 ABI 漂移），panic=abort、disable-redzone、relocation-model=static、ld.lld；② user/hello/linker.ld——基址 0x400000，text RX(5) + data RW(6) 双 PT_LOAD（W^X），ENTRY(_start)+KEEP(.text._start) 抗 --gc-sections；③ user/hello/（synapse-hello bin crate）——no_std _start 三段式：abi_query 占位（返回值仅记录不断言，内核接线在 T6）+ process_exit 占位 + hlt 死循环兜底（ring3 hlt→#GP 为期望 fault 路径）；不入根 workspace（exclude + 自带空 [workspace]，防宿主 cargo test 链接 #![no_main] bin）；④ user/src/runtime.rs——cfg(target_os=none) 门控的 memset/memcpy/memmove/memcmp/strlen（compiler_builtins 在 os=none 上是 thin wrapper 不提供，与内核 main.rs 同款坑；宿主构建走 libc 必须cfg 掉防符号冲突）；⑤ xtask user 子命令——cargo build --manifest-path user/hello --target user.json -Zbuild-std=core,alloc + 宿主侧 ELF64 断言器（ET_EXEC、e_machine=x86-64、e_entry∈[0x400000,0x800000)、PT_LOAD flags RX/RW、W^X、vaddr≥基址防 NULL guard 区、无 PT_DYNAMIC、entry 必落可执行段）。实测坑：lld --script= 相对包根（非 cargo cwd）解析→脚本放 user/hello/ 内；Windows 上根 workspace exclude 路径归一化不可靠→包内加空 [workspace] 双保险。验证：xtask 宿主 测试 8/8 绿（含畸形输入拒绝路径）；ELF 产物 verify 通过（ET_EXEC entry=0x400000，1 PT_LOAD RX）；全 workspace 宿主测试绿（新 target 不破坏宿主构建）。关闭 Doc 02 §8 'target json 完整字段' 待决策项。"
+        },
+        {
+          "id": "P4-T2",
+          "name": "内核 4KB 页表模块 + 地址空间抽象",
+          "status": "pending",
+          "deliverables": [
+            "kernel/src/paging：4 级 4KB 页表（PML4/PDPT/PD/PT）map/unmap/权限位（U/S、NX、R/W）",
+            "AddressSpace 抽象：每进程一个 PML4（CR3），内核区映射策略按 Doc 02 §3.2（用户页表中内核区 supervisor-only，首期不做 KPTI，记入威胁模型）",
+            "现 boot.S 2MB 大页恒等映射保留为内核直接映射区，新页表模块与其共存"
+          ],
+          "verify": [
+            "真机 smoke：新建 AddressSpace → CR3 切换 → 内核继续运行 → 映射用户页读写 → 未映射访问触发 #PF"
+          ],
+          "deps": [
+            "P2-T2"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P4-T3",
+          "name": "VMA 区域表 + 按需分页缺页路径",
+          "status": "pending",
+          "deliverables": [
+            "UserMemoryRegion 表（start/end/flags[R/W/X/GROWABLE]/kind[Code/Data/Stack/Heap/Mapped]，Doc 02 §3.3）——纯逻辑部分宿主可测",
+            "#PF handler 接 VMA 查表（读 CR2）：命中合法 region → page_frame 分配 + 映射 + 清零；未命中 → 进程 fault（杀进程路径骨架）",
+            "NULL page guard（0x0..0x1000 永不映射，Doc 02 §3.1）"
+          ],
+          "verify": [
+            "宿主：VMA 表插入/查找/重叠拒绝单测",
+            "真机：首次访问未映射合法地址 → 按需分页成功；NULL 解引用 / 未登记区域 → #PF → fault 路径留证"
+          ],
+          "deps": [
+            "P4-T2"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P4-T4",
+          "name": "Ring3 切换：iret 首次进入 + syscall/sysret",
+          "status": "pending",
+          "deliverables": [
+            "GDT ring3 代码/数据段启用（P2-T4 已预留）+ TSS.RSP0 per-thread 写入（切线程/进用户态前更新）",
+            "MSR_STAR/LSTAR/FMASK 配置 + syscall 入口汇编：swapgs → 切内核栈 → 保存用户态寄存器帧 → dispatch 骨架 → sysret 返回",
+            "iretq 首次进入用户态：构造 ring3 入口帧（ss/rsp/rflags/rcx(rip)/cs）",
+            "swapgs 纪律与嵌套中断策略写入 decision_log（对照 AMD64 Manual Vol.2 syscall/sysret 章节审查）"
+          ],
+          "verify": [
+            "真机 smoke：用户态 _start 跑起来 → syscall 往返 ≥1 次 → 返回用户态继续 → CPL 断言（用户态读 CS.RPL==3）",
+            "用户态非法指令/越权访问 → #GP/#PF → 进程 fault 不伤内核"
+          ],
+          "deps": [
+            "P4-T1",
+            "P4-T2"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P4-T5",
+          "name": "静态 ELF 加载器 + initramfs（cpio newc）",
+          "status": "pending",
+          "deliverables": [
+            "ELF 解析器（纯逻辑 crate 宿主可测）：ET_EXEC 校验、PT_LOAD 解析、段越界/权限错误路径（Doc 02 §2）；不做 PIE/动态链接",
+            "cpio newc 解析器（纯逻辑，宿主可测）：header 校验 + 文件提取",
+            "构建管线：xtask/build_disk.py 打包 initramfs 进磁盘镜像，内核 boot 早期读入并暴露为 MemoryRegion"
+          ],
+          "verify": [
+            "宿主：ELF/cpio 单测（含畸形输入拒绝）",
+            "真机：从 initramfs 提取 P4-T1 ELF → 装入用户地址空间 → iret 进入执行"
+          ],
+          "deps": [
+            "P4-T3",
+            "P4-T4"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P4-T6",
+          "name": "syscall 分发 + 基础调用（abi_query/gettime/yield/exit/mmap/munmap）",
+          "status": "pending",
+          "deliverables": [
+            "synapse_abi::decode 接入 syscall 入口：未知号/参数越界 → IllegalSyscall fault（不静默截断，Doc abi/lib.rs 原则）",
+            "错误码 15 个（Doc 02 §4.3）内核侧统一返回路径",
+            "gettime：接 clock.rs TSC 校准单调时钟（关闭 Doc 02 §7 TBD：墙钟 RTC 延后、用户态 rdtsc 首期不暴露）",
+            "mmap/munmap 接 VMA 表；yield/exit 接 sched（依赖 P3-T6 抢占模型接线）",
+            "abi_query 返回 (ABI_MAJOR<<16)|ABI_MINOR"
+          ],
+          "verify": [
+            "真机：用户态逐一调用 6 个 syscall 成功路径 + 每个错误路径（负错误码断言）",
+            "宿主：abi decode/encode 对称测试全绿（既有）"
+          ],
+          "deps": [
+            "P4-T4",
+            "P3-T6"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P4-T7",
+          "name": "IPC 内核接线：send/recv/reply 单拷贝 + cap transfer",
+          "status": "pending",
+          "deliverables": [
+            "ipc crate Endpoint 内核集成：阻塞线程挂 sleepq（消费 P3-T7 Mutex/sleep_until 基建），唤醒走调度",
+            "单拷贝路径（Doc 03 §4）：消息帧内核直拷 + 大对象 grant 共享内存映射",
+            "cap transfer：随消息迁移 CapRef（Doc 01 §3.3 委托语义）+ 校验点埋审计钩子（事件源留给 T11）",
+            "ipc_try_send 非阻塞路径（E_WOULD_BLOCK）"
+          ],
+          "verify": [
+            "真机：两用户态进程 send/recv/reply 往返；接收方阻塞→发送方到达→唤醒时序断言；权限拒绝 → E_INVALID_CAP/E_PERMISSION"
+          ],
+          "deps": [
+            "P4-T6",
+            "P3-T7"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P4-T8",
+          "name": "Notification 异步原语（signal/wait）",
+          "status": "pending",
+          "deliverables": [
+            "notification_signal（位图 OR）/ notification_wait（位图 AND，返回触发位）syscall 接线",
+            "为 Phase 4.5 IRQ→用户态转发预留内核侧 fast path 接口"
+          ],
+          "verify": [
+            "真机：两进程 signal/wait 往返 + 多位 mask 组合断言"
+          ],
+          "deps": [
+            "P4-T7"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P4-T9",
+          "name": "process_spawn + 崩溃处理",
+          "status": "pending",
+          "deliverables": [
+            "process_spawn：仅 init 可 spawn（Doc 02 §5.2）；CapRef 数组委托初始能力；agent_id 内核盖章（E_AGENT_ID_CONFLICT）",
+            "崩溃处理：fault 标记（#PF/#GP/IllegalSyscall 归因 FaultKind）+ death endpoint 通知父进程 + process_reap 回收（FR8 页账本/线程/能力表清算）",
+            "每进程 Quota（Doc 02 §5.5 最小配额模型）在 spawn/mmap 路径 enforce"
+          ],
+          "verify": [
+            "真机：init spawn 子进程 → 子进程非法访问崩溃 → death notification 到达 → reap 后资源账本归零断言"
+          ],
+          "deps": [
+            "P4-T5",
+            "P4-T7"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P4-T10",
+          "name": "用户态 init 进程 + gettime 服务端到端",
+          "status": "pending",
+          "deliverables": [
+            "user/init bin：abi_query 版本协商（major 不匹配拒绝运行）→ IPC 请求服务 → gettime 打印时间戳",
+            "启动链收口（Doc 02 §6.2）：kernel_main → 解析 initramfs → spawn init(Root Agent) → 移交控制权"
+          ],
+          "verify": [
+            "真机：开机直达 init 输出单调时间戳；三重判定全绿（exit=363 + 无 PANIC + N/N）"
+          ],
+          "deps": [
+            "P4-T9"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P4-T11",
+          "name": "FR9 审计事件流内核接线",
+          "status": "pending",
+          "deliverables": [
+            "audit crate 内核集成：capability 校验、IPC send/recv/reply、进程生命周期（spawn/exit/fault/reap）事件点 → append-only 环形缓冲",
+            "查询接口（内核侧 QUERY 能力，Doc 01 AuditLog 行）；溢出策略（覆盖最旧 + 计数）写入 decision_log"
+          ],
+          "verify": [
+            "真机：init 全流程跑完后按序取出审计事件断言（种类/顺序/pid）",
+            "宿主：audit 单测全绿"
+          ],
+          "deps": [
+            "P4-T7",
+            "P4-T9"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P4-T12",
+          "name": "PCID 可选优化 + Phase 4 集成收尾",
+          "status": "pending",
+          "deliverables": [
+            "无 PCID 正确性基线（地址空间切换全量刷 TLB）→ PCID 启用（CR4.PCIDE + INVPCID + CPUID 能力检测），分别测量切换耗时（Doc 02 §3.2：不被 PCID 阻塞第一个用户态进程）",
+            "Doc 02 §8 剩余待决策项全部关闭或显式移交 Phase 5",
+            "全量回归：QEMU 测试套件 + 全部真机 smoke + 宿主测试；README §2/§3 同步"
+          ],
+          "verify": [
+            "真机：三重判定全绿 + PCID 前后性能对比数据写入 task.json actual_approach"
+          ],
+          "deps": [
+            "P4-T10",
+            "P4-T11"
+          ],
+          "estimate": "1 窗口"
+        }
+      ]
     }
   ],
   "global_risks": [
@@ -867,6 +1105,11 @@
         "display/src/renderer.rs (TinySkiaRenderer + rounded_rect)",
         "output/poc_*.png (四表情目视)"
       ]
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "Phase 4 任务分解登记（claude/p4-userspace 分支，独立 worktree d:/ai-os-p4）",
+      "decision": "P4 分解为 12 任务（T1 target+ELF / T2 4KB 页表 / T3 VMA+按需分页 / T4 Ring3+syscall / T5 ELF+initramfs / T6 基础 syscall / T7 IPC / T8 Notification / T9 spawn+崩溃 / T10 init 端到端 / T11 FR9 审计 / T12 PCID+收尾）。关键决策：① T1 无前置可立即开工（与并行窗口 P3-T6~T8 零文件冲突：新 target json/链接脚本/user bin，不碰 kernel/）；② PCID 遵循 Doc 02 §3.2 定为 T12 可选优化，不阻塞首个用户态进程；③ gettime 时钟源定案：消费 P2-T7 TSC↔PIT 校准单调时钟，RTC 墙钟延后、用户态 rdtsc 首期不暴露（关闭 Doc 02 §7 TBD）；④ T6/T7 分别依赖 P3-T6（yield/exit 接抢占模型）与 P3-T7（IPC 阻塞挂 sleepq 依赖睡眠锁），跨窗口依赖在 deps 显式登记；⑤ abi/user/kint crate 骨架已在 P1 就绪（19 syscall 枚举+encode/decode 宿主 171 测全绿），T1 直接复用不重建。"
     }
   ],
   "current_task": "P3-T6",
