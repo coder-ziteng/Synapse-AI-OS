@@ -43,3 +43,7 @@ path = "../ipc"
 
 [dependencies.synapse-proc]
 path = "../proc"
+
+# ===== P3-T4 (2026-09-26): 调度纯逻辑 crate 接入（kthread 基建）=====
+[dependencies.synapse-sched]
+path = "../sched"

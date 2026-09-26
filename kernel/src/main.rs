@@ -31,6 +31,7 @@ pub mod idt;
 pub mod pic;
 pub mod pit;
 pub mod clock;
+pub mod kthread;
 pub mod bootstrap;
 pub mod smoke;
 
@@ -227,6 +228,11 @@ pub extern "C" fn _start64() -> ! {
 
     smoke::run_integration_smoke(&refs);
     boot_marker(b'I');
+
+    // P3-T4 内核线程基建 smoke：boot 线程收编 + kthread 创建只入队不切换 + 栈对齐断言
+    boot_marker(b'a');
+    kthread::kthread_smoke();
+    boot_marker(b'b');
 
     // 通过 isa-debug-exit (iobase=0x502) 退出 QEMU。
     // QEMU isa-debug-exit 实现为 exit((val << 1) | 1)（无掩码），

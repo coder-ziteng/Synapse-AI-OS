@@ -164,10 +164,15 @@ impl PageFrameAllocator {
     /// 释放 `count` 个连续物理页帧（从 `addr` 开始）。
     ///
     /// 必须与 `alloc_contiguous_frames` 配对使用。
+    ///
+    /// 注意：`free_frame` 的参数是**字节地址**而非帧号——历史上此处误传
+    /// `(start_frame + i)`（帧号当地址，二次除法全部坍缩到帧 0），导致
+    /// ① used 计数只减 1（其余命中"已空闲 no-op"分支）② 帧 0 位图被
+    /// 错误标记为空闲。P3-T4 kthread 栈释放路径首次真机走到这里而暴露。
     pub fn free_contiguous_frames(&mut self, addr: PhysicalAddr, count: usize) {
         let start_frame = addr as usize / FRAME_SIZE;
         for i in 0..count {
-            self.free_frame((start_frame + i) as PhysicalAddr);
+            self.free_frame(((start_frame + i) * FRAME_SIZE) as PhysicalAddr);
         }
     }
 
@@ -354,6 +359,23 @@ mod tests {
 
         let f1 = a.alloc_frame().unwrap();
         assert_eq!(f1, 0x1000);
+    }
+
+    #[test]
+    fn free_contiguous_restores_used_and_frees_all() {
+        // P3-T4 回归：帧号误当地址传的 bug 会让 used 只减 1 且帧 0 被污染。
+        let mut a = PageFrameAllocator::new();
+        a.mark_range_usable(0, 64 * FRAME_SIZE as u64); // 64 帧全可用
+        let base = a.alloc_contiguous_frames(5).unwrap();
+        assert_eq!(a.used_frames(), 5);
+        a.free_contiguous_frames(base, 5);
+        assert_eq!(a.used_frames(), 0); // 全部归还（bug 时 = 4）
+        assert_eq!(a.free_frames(), 64);
+        // 释放的每一帧都可再分配（bug 时只有坍缩到的帧 0 可分配）
+        for _ in 0..5 {
+            assert!(a.alloc_frame().is_some());
+        }
+        assert_eq!(a.used_frames(), 5);
     }
 
     #[test]
