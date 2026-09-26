@@ -8,7 +8,7 @@
 //!      由 ld.lld 相对 cargo cwd 解析。）
 //! 2. 宿主侧 ELF 头断言（task.json P4-T1 verify）：
 //!    * `e_type == ET_EXEC`（非 PIE，Doc 02 §2.1）
-//!    * `e_entry` 落在 0x400000 基址区（Doc 02 §3.1）
+//!    * `e_entry` 落在 1GB 基址区 [0x4000_0000, 0x8000_0000)（Doc 02 §3.1 UPDATE(P4-T2)）
 //!    * PT_LOAD flags：text=RX(5)、data=RW(6)，W^X 分段
 //!    * 无 PT_DYNAMIC（砍动态链接）
 //!
@@ -86,10 +86,13 @@ const FLAGS_RX: u32 = PF_R | PF_X;
 /// 期望 data 段 flags：R+W（W^X：可写段不得可执行）。
 const FLAGS_RW: u32 = PF_R | PF_W;
 
-/// 用户态基址（Doc 02 §3.1 PROPOSED：0x400000）。
-pub const USER_BASE: u64 = 0x40_0000;
-/// 用户 text 基址区上限（断言 e_entry 落在 [USER_BASE, USER_ENTRY_LIMIT)）。
-pub const USER_ENTRY_LIMIT: u64 = 0x80_0000;
+/// 用户态基址（Doc 02 §3.1 UPDATE(P4-T2)：1GB。原 PROPOSED 0x400000 与
+/// 内核 2MB 大页恒等映射的自身物理页 [0x200000,0x4cb000) 同 VA 冲突而废弃；
+/// 1GB 处 PA 1-2GB 无物理内存，每地址空间独立 PD 与内核映射零重叠）。
+pub const USER_BASE: u64 = 0x4000_0000;
+/// 用户 text 基址区上限（断言 e_entry 落在 [USER_BASE, USER_ENTRY_LIMIT)，
+/// 即 PDPT[0] entry 1 所辖的 1GB VA 区内）。
+pub const USER_ENTRY_LIMIT: u64 = 0x8000_0000;
 
 fn u16le(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])

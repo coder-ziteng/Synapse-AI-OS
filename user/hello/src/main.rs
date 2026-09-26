@@ -2,7 +2,8 @@
 //!
 //! 目标不是功能，而是**打通用户态工具链**：
 //! no_std + 自定义 target（`x86_64-synapse-user.json`）+ 专用链接脚本
-//! （`user/linker.ld`，基址 0x400000）→ 产出可被 P4-T5 内核 ELF 加载器
+//! （`user/hello/linker.ld`，基址 0x4000_0000 = 1GB，见脚本头注释的
+//! 基址改址原因）→ 产出可被 P4-T5 内核 ELF 加载器
 //! 消费的 ET_EXEC 产物（xtask user 子命令做 ELF 头断言）。
 //!
 //! 三段式主体（对齐 task.json P4-T1 deliverables）：

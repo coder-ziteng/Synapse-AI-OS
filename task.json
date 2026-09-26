@@ -603,7 +603,7 @@
       "name": "用户态与 IPC",
       "ref": "需求目标 §三 Phase 4 + docs/design/01/02/03",
       "exit_criteria": [
-        "用户态自定义 target（x86_64-synapse-user.json）+ 链接脚本，产出第一个静态用户态 ELF（基址 0x400000，无 PIE）",
+        "用户态自定义 target（x86_64-synapse-user.json）+ 链接脚本，产出第一个静态用户态 ELF（基址 0x4000_0000=1GB，无 PIE；原 Doc 02 §3.1 PROPOSED 0x400000 因与内核恒等映射同 VA 冲突废弃，见 decision_log 2026-09-27 改址条目）",
         "用户地址空间管理：VMA 式内存区域表 + 按需分页缺页路径 + 非法访问杀进程（PCID 为可选优化不阻塞，Doc 02 §3.2）",
         "Ring0↔Ring3 切换：TSS.RSP0 per-thread + syscall/sysret MSR（STAR/LSTAR/FMASK）配置 + iret 首次进入",
         "极简静态 ELF 解析器（ET_EXEC/PT_LOAD，砍动态链接）+ initramfs（cpio newc）加载",
@@ -1110,6 +1110,11 @@
       "date": "2026-09-27",
       "scope": "Phase 4 任务分解登记（claude/p4-userspace 分支，独立 worktree d:/ai-os-p4）",
       "decision": "P4 分解为 12 任务（T1 target+ELF / T2 4KB 页表 / T3 VMA+按需分页 / T4 Ring3+syscall / T5 ELF+initramfs / T6 基础 syscall / T7 IPC / T8 Notification / T9 spawn+崩溃 / T10 init 端到端 / T11 FR9 审计 / T12 PCID+收尾）。关键决策：① T1 无前置可立即开工（与并行窗口 P3-T6~T8 零文件冲突：新 target json/链接脚本/user bin，不碰 kernel/）；② PCID 遵循 Doc 02 §3.2 定为 T12 可选优化，不阻塞首个用户态进程；③ gettime 时钟源定案：消费 P2-T7 TSC↔PIT 校准单调时钟，RTC 墙钟延后、用户态 rdtsc 首期不暴露（关闭 Doc 02 §7 TBD）；④ T6/T7 分别依赖 P3-T6（yield/exit 接抢占模型）与 P3-T7（IPC 阻塞挂 sleepq 依赖睡眠锁），跨窗口依赖在 deps 显式登记；⑤ abi/user/kint crate 骨架已在 P1 就绪（19 syscall 枚举+encode/decode 宿主 171 测全绿），T1 直接复用不重建。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "用户态 ELF 加载基址改址（P4-T1 产物修订 + P4-T2 设计输入，claude/p4-userspace）",
+      "decision": "用户基址 0x400000 → 0x4000_0000（1GB），DECIDED。冲突根因：boot.S 以 2MB 大页恒等映射 0-4GB（supervisor-only），内核镜像占 PA [0x200000,0x4cb000)——用户 VA 0x400000 与内核自身 .data/.bss/page_tables 的 VA 完全重叠，同一地址空间内同一 VA 不能两者兼是，PD 大页拆分亦无解（2MB 粒度下内核镜像横跨 entry 1-2）。新基址选 1GB：① PDPT[0] entry 1 粒度整区独占——每地址空间为该 entry 挂独立清零 PD，与共享的内核 0-1GB 恒等映射（entry 0→boot PD0）零重叠、零大页拆分；② PA 1-2GB 无物理内存（E820 usable 上限 ~128MB），不遮蔽任何真实页帧；③ 用户 VA 区 [1GB,2GB) 足够 MVP（text/data/heap/stack）。已同步：user/hello/linker.ld、xtask ELF 断言器（USER_BASE/USER_ENTRY_LIMIT + 8/8 单测）、Doc 02 §3.1 UPDATE 块 + §8 条目、README。内核高半迁移（Doc 02 §3.1 图中 0x8000_0000_0000 区）维持远期方向，届时用户区可回迁低址。"
     }
   ],
   "current_task": "P3-T6",

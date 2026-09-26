@@ -98,8 +98,17 @@
 0xFFFF_FFFF_FFFF_FFFF  └───────────────────────────┘
 ```
 
+> **UPDATE（P4-T2, 2026-09-27，DECIDED）：ELF 加载基址改为 `0x4000_0000`（1GB）**。
+> 原 PROPOSED `0x400000` 与现状冲突：内核经 boot.S 以 2MB 大页**恒等映射** 0-4GB，
+> 镜像占 PA `[0x200000, 0x4cb000)`——用户 VA 0x400000 与内核自身代码/数据的 VA
+> 完全重叠（同一地址空间内同一 VA 不能两者兼是）。1GB 基址落在 PDPT[0] entry 1
+> 所辖 VA 区，其 PA 1-2GB 无物理内存（RAM ~128MB），每地址空间为该 entry 挂独立
+> 清零 PD 即可与共享的内核 0-1GB 恒等映射（entry 0）零重叠、零大页拆分。
+> 上方图中 `0x40_0000` 行以此更新为准；内核高半迁移（图中 0x8000_0000_0000 区）
+> 维持远期方向不变。
+
 **PROPOSED 决策**：
-- **ELF 加载基址 = `0x400000`**：Linux x86_64 传统默认值，工具链兼容性最佳；
+- ~~**ELF 加载基址 = `0x400000`**：Linux x86_64 传统默认值，工具链兼容性最佳；~~（已被上方 UPDATE 取代：基址 = `0x4000_0000`）
 - **首期不支持 PIE**（Position-Independent Executable）：固定加载地址，砍掉重定位解析开销；Phase 5+ 视 ASLR 需求再引入；
 - **heap 向上增长**（对齐 Linux brk 语义）；**stack 向下增长**（x86_64 标准）；
 - **stack 起始 = `0x7FFF_FFFF_E000`**，与内核映射区保留 8MB gap（防 stack-heap 碰撞缓冲）。
@@ -405,7 +414,7 @@ bootloader → kernel_main → mm/sched/ipc init
 
 ## 8. 待决策清单（Phase 4 前必须收敛）
 
-- [x] ~~用户态 target json 完整字段~~ → **DECIDED（P4-T1, 2026-09-27）：`x86_64-synapse-user.json`，llvm-target / data-layout / features 与内核 `x86_64-bootloader.json` 逐字段一致（避免 ABI 漂移）；panic=abort · disable-redzone · relocation-model=static · ld.lld + `user/hello/linker.ld`（基址 0x400000，text RX / data RW 双 PT_LOAD，W^X）。构建入口 `xtask user`：`--manifest-path user/hello` + `-Zbuild-std=core,alloc`，产物过 ELF 头断言（ET_EXEC / entry∈基址区 / 无 PT_DYNAMIC）。实测坑：lld 的 `--script=` 相对包根解析；compiler_builtins 在 os=none 上不提供 memset（`user/src/runtime.rs` cfg 门控补齐，与内核 main.rs 同款）**
+- [x] ~~用户态 target json 完整字段~~ → **DECIDED（P4-T1, 2026-09-27）：`x86_64-synapse-user.json`，llvm-target / data-layout / features 与内核 `x86_64-bootloader.json` 逐字段一致（避免 ABI 漂移）；panic=abort · disable-redzone · relocation-model=static · ld.lld + `user/hello/linker.ld`（基址 0x4000_0000 = 1GB——原 0x400000 因与内核恒等映射同 VA 冲突废弃，见 §3.1 UPDATE；text RX / data RW 双 PT_LOAD，W^X）。构建入口 `xtask user`：`--manifest-path user/hello` + `-Zbuild-std=core,alloc`，产物过 ELF 头断言（ET_EXEC / entry∈基址区 / 无 PT_DYNAMIC）。实测坑：lld 的 `--script=` 相对包根解析；compiler_builtins 在 os=none 上不提供 memset（`user/src/runtime.rs` cfg 门控补齐，与内核 main.rs 同款）**
 - [ ] 是否提供 `std` / libc shim —— 需用户态应用需求明确后决策（首期建议 `no_std`）
 - [x] ~~静态 ELF 加载基址与是否支持 PIE~~ → **PROPOSED：基址 = 0x400000，首期不支持 PIE**，理由见 §3.1
 - [ ] syscall 号表最终版 + 错误码约定 —— 需实现阶段逐步固化

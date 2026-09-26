@@ -57,7 +57,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 | P1 | 裸机点亮与工程基建（三级 boot 链 · UART · log/panic 回溯 · CI · 测试框架） | ✅ 完成 (11/11) |
 | P2 | 内存 / 中断 / 异常（E820 · 页帧分配器 · 内核堆 · GDT/TSS/IST · IDT · PIC/PIT · TSC 校准） | ✅ 完成 (7/7) |
 | P3 | 多任务与调度（sched/ 纯逻辑 crate · switch_to 汇编 · 抢占模型 · Mutex · FR8/FR10 原语） | 🔄 进行中 (5/8)：T1 sched crate ✅ · T2 FR8 核算 ✅ · T3 FR10 频率计数 ✅ · T4 kthread 基建 ✅ 真机 27/27 · T5 switch_to 汇编 ✅ 真机双线程往返 9/9 |
-| P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 🔄 进行中 (1/12)：已分解 12 任务（T1 target+ELF → T12 PCID+收尾）· T1 ✅ 用户态 target json + 基址 0x400000 链接脚本 + 第一个静态 ELF（xtask user + ELF 头断言）（独立 worktree d:/ai-os-p4，分支 claude/p4-userspace） |
+| P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 🔄 进行中 (1/12)：已分解 12 任务（T1 target+ELF → T12 PCID+收尾）· T1 ✅ 用户态 target json + 基址 1GB 链接脚本 + 第一个静态 ELF（xtask user + ELF 头断言；原 0x400000 与内核恒等映射冲突改址，见 Doc 02 §3.1 UPDATE）（独立 worktree d:/ai-os-p4，分支 claude/p4-userspace） |
 | P4.5 | PCI 枚举与中断用户态化 | 未开始 |
 | P5 | 外交工具与 Agent 雏形 | 未开始 |
 | P6 | SMP / 存储栈 / IOMMU / 本地推理 / 跨 OS 外交 | 远期 |
