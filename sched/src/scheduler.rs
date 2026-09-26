@@ -9,6 +9,7 @@
 //! - 高优先级线程入队（spawn/unblock/wake）会置位 `need_resched`，
 //!   当前线程在下一个检查点被抢占——单核 MVP 下这是唯一的抢占触发源。
 
+use crate::accounting::PageLedger;
 use crate::runqueue::RunQueue;
 use crate::sleepq::SleepQueue;
 use crate::tcb::ThreadTable;
@@ -22,8 +23,13 @@ pub const DEFAULT_TIME_SLICE: u64 = 2;
 pub enum SwitchDecision {
     /// 无需切换：继续运行当前线程（无就绪线程或当前仍是最优）。
     KeepCurrent,
-    /// 切换到 `next`。`prev` 为被换出的线程（None = 首次调度/无当前线程）。
-    Switch { prev: Option<ThreadId>, next: ThreadId },
+    /// 切换到 `next`。
+    Switch {
+        /// 被换出的线程（None = 首次调度/无当前线程）。
+        prev: Option<ThreadId>,
+        /// 换入的目标线程（schedule 时刻的队首）。
+        next: ThreadId,
+    },
     /// 无当前线程且无就绪线程：内核应 idle（hlt 等待下一个中断）。
     Idle,
 }
@@ -41,6 +47,10 @@ pub struct Scheduler {
     time_slice: u64,
     /// 总切换次数（smoke/FR8 观测用）。
     switch_count: u64,
+    /// 全系统累计 CPU 时间（FR8 守恒校验：= Σ 各线程 cpu_time）。
+    total_cpu: u64,
+    /// per-process 内存页账本（FR8 内存维度）。
+    ledger: PageLedger,
 }
 
 impl Scheduler {
@@ -60,6 +70,8 @@ impl Scheduler {
             slice_deadline: 0,
             time_slice: time_slice.max(1),
             switch_count: 0,
+            total_cpu: 0,
+            ledger: PageLedger::new(),
         }
     }
 
@@ -329,6 +341,41 @@ impl Scheduler {
     }
 
     // ====================================================================
+    // 资源核算（FR8）
+    // ====================================================================
+
+    /// CPU 时间记账：为线程 `id` 累加 `delta`（内核在上下文切换时注入
+    /// TSC/tick 增量）。饱和累加防溢出；无效 ID 返回 `NotFound` 且不计数
+    /// （守恒不变量：`total_cpu == Σ 各存活线程 cpu_time + 已 reap 线程历史`）。
+    pub fn account_cpu(&mut self, id: ThreadId, delta: u64) -> Result<(), SchedError> {
+        let t = self.threads.get_mut(id)?;
+        t.cpu_time = t.cpu_time.saturating_add(delta);
+        self.total_cpu = self.total_cpu.saturating_add(delta);
+        Ok(())
+    }
+
+    /// 查询线程累计 CPU 时间。
+    pub fn cpu_time_of(&self, id: ThreadId) -> Result<u64, SchedError> {
+        Ok(self.threads.get(id)?.cpu_time)
+    }
+
+    /// 全系统累计 CPU 时间（所有 `account_cpu` 增量之和）。
+    pub fn total_cpu(&self) -> u64 {
+        self.total_cpu
+    }
+
+    /// 页账本只读访问（`pages_of` / `total` / `live_count`）。
+    pub fn ledger(&self) -> &PageLedger {
+        &self.ledger
+    }
+
+    /// 页账本可写访问（内核页帧分配器 alloc/free 时记账；
+    /// 进程 exit 路径调用 `drain` 取泄漏数供审计）。
+    pub fn ledger_mut(&mut self) -> &mut PageLedger {
+        &mut self.ledger
+    }
+
+    // ====================================================================
     // 内部
     // ====================================================================
 
@@ -534,6 +581,62 @@ mod tests {
         s.reap(a).unwrap();
         assert_eq!(s.unblock(a), Err(SchedError::NotFound));
         assert_eq!(s.freeze(a), Err(SchedError::NotFound));
+    }
+
+    #[test]
+    fn cpu_accounting_conservation() {
+        let mut s = Scheduler::with_time_slice(2);
+        let a = s.spawn(1, 5).unwrap();
+        let b = s.spawn(1, 5).unwrap();
+        let c = s.spawn(1, 7).unwrap();
+        run_schedule(&mut s, 0); // a running
+        // 模拟内核在每次切换时注入运行区间的 TSC/tick 增量
+        s.account_cpu(a, 100).unwrap();
+        s.tick(2, &mut []);
+        run_schedule(&mut s, 2); // → b
+        s.account_cpu(b, 250).unwrap();
+        s.tick(4, &mut []);
+        run_schedule(&mut s, 4); // → c
+        s.account_cpu(c, 7).unwrap();
+        // 守恒：总账 = 各线程之和
+        assert_eq!(s.total_cpu(), 357);
+        assert_eq!(s.cpu_time_of(a).unwrap(), 100);
+        assert_eq!(s.cpu_time_of(b).unwrap(), 250);
+        assert_eq!(s.cpu_time_of(c).unwrap(), 7);
+        let sum: u64 = [a, b, c].iter().map(|&id| s.cpu_time_of(id).unwrap()).sum();
+        assert_eq!(sum, s.total_cpu());
+        // 无效 ID：NotFound 且不计数
+        assert_eq!(s.account_cpu(ThreadId(0xDEAD_BEEF), 50), Err(SchedError::NotFound));
+        assert_eq!(s.total_cpu(), 357);
+    }
+
+    #[test]
+    fn cpu_accounting_survives_reap_and_saturates() {
+        let mut s = Scheduler::new();
+        let a = s.spawn(1, 0).unwrap();
+        run_schedule(&mut s, 0);
+        s.account_cpu(a, u64::MAX).unwrap();
+        s.account_cpu(a, 1).unwrap(); // 饱和：不 panic 不回绕
+        assert_eq!(s.cpu_time_of(a).unwrap(), u64::MAX);
+        assert_eq!(s.total_cpu(), u64::MAX);
+        s.exit(a).unwrap();
+        s.reap(a).unwrap();
+        // reap 后旧 ID 不可记账（total 保留历史累计，供审计对账）
+        assert_eq!(s.account_cpu(a, 1), Err(SchedError::NotFound));
+    }
+
+    #[test]
+    fn page_ledger_passthrough() {
+        let mut s = Scheduler::new();
+        let _a = s.spawn(1, 3).unwrap(); // owner_pid=3
+        s.ledger_mut().alloc(3, 16).unwrap();
+        s.ledger_mut().alloc(0, 4).unwrap(); // 内核自身
+        assert_eq!(s.ledger().pages_of(3), 16);
+        assert_eq!(s.ledger().total(), 20);
+        s.ledger_mut().free(3, 16).unwrap();
+        // 进程 3 退出清算：泄漏 0
+        assert_eq!(s.ledger_mut().drain(3), Ok(0));
+        assert_eq!(s.ledger().total(), 4);
     }
 
     #[test]

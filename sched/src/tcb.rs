@@ -24,8 +24,11 @@ pub struct Tcb {
     pub ctx: ContextSlot,
     /// 睡眠 deadline（仅 Sleeping 状态有意义；tick 时间基）。
     pub deadline: u64,
-    /// 所属进程 PID 透传槽（FR8 per-process 记账用，P3-T2 消费；0 = 内核线程）。
+    /// 所属进程 PID 透传槽（FR8 per-process 记账用；0 = 内核线程）。
     pub owner_pid: u32,
+    /// 累计 CPU 时间（FR8）。单位由内核注入方约定（TSC cycles 或 tick），
+    /// 本 crate 只做饱和累加不解释；切换时经 `Scheduler::account_cpu` 记账。
+    pub cpu_time: u64,
 }
 
 /// 槽位占用标记：空槽 gen 从 0 起，分配时 +1 → 有效 gen ≥ 1，
@@ -48,6 +51,7 @@ impl Slot {
             ctx: ContextSlot::zeroed(),
             deadline: 0,
             owner_pid: 0,
+            cpu_time: 0,
         },
     };
 }
@@ -100,6 +104,7 @@ impl ThreadTable {
             ctx: ContextSlot::zeroed(),
             deadline: 0,
             owner_pid,
+            cpu_time: 0,
         };
         self.live += 1;
         Ok(slot.tcb.id)
