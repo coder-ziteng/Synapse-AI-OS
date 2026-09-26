@@ -212,7 +212,7 @@ pub static PAGE_FRAMES: SpinLock<Option<PageFrameAllocator>> = SpinLock::new(Non
 
 const UNINIT: &str = "PAGE_FRAMES accessed before init_page_frame_allocator()";
 
-/// 链接器符号：内核结束地址（`linker.ld` 末尾 `PROVIDE(_kernel_end = .)`）。
+// 链接器符号：内核结束地址（`linker.ld` 末尾 `PROVIDE(_kernel_end = .)`）。
 extern "C" {
     static _kernel_end: u8;
 }

@@ -12,6 +12,9 @@
 //! - 100 Hz: divider = 11932 (~10ms 时间片)
 //! - 1000 Hz: divider = 1193 (~1ms 高精度)
 
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use x86_64::instructions::port::Port;
 
 /// PIT I/O 端口
@@ -40,8 +43,8 @@ impl Pit {
     /// 创建 PIT 实例
     pub const fn new() -> Self {
         Pit {
-            channel0_data: unsafe { Port::new(PIT_CHANNEL0_DATA) },
-            command: unsafe { Port::new(PIT_COMMAND) },
+            channel0_data: Port::new(PIT_CHANNEL0_DATA),
+            command: Port::new(PIT_COMMAND),
             frequency: 0,
         }
     }
@@ -82,51 +85,59 @@ impl Pit {
     }
 }
 
-/// 全局 PIT 实例
-static mut PIT: Pit = Pit::new();
+/// 全局 PIT 实例（`UnsafeCell` 包装，避免 `static mut` 引用导致的 UB 警告）。
+///
+/// 单核 MVP 下：`init()`/`read_counter()` 在中断关闭时调用；不与其他访问并发。
+struct PitCell(UnsafeCell<Pit>);
+unsafe impl Sync for PitCell {}
+
+static PIT: PitCell = PitCell(UnsafeCell::new(Pit::new()));
 
 /// 初始化 PIT
 pub unsafe fn init(frequency: u32) {
-    PIT.init(frequency);
+    (*PIT.0.get()).init(frequency);
     log::info!("[pit] PIT initialized: target frequency={} Hz, base={} Hz",
                frequency, PIT_FREQUENCY);
 }
 
 /// 获取当前频率
-pub fn frequency() -> u32 {
-    unsafe { PIT.frequency() }
+pub unsafe fn frequency() -> u32 {
+    (*PIT.0.get()).frequency()
 }
 
 /// 读取当前计数器值
 pub unsafe fn read_counter() -> u16 {
-    PIT.read_counter()
+    (*PIT.0.get()).read_counter()
 }
 
-/// IRQ 0 计数器 (每 10ms +1)
-static mut TICK_COUNT: u64 = 0;
+/// IRQ 0 计数器 (每 10ms +1)。
+///
+/// 使用 `AtomicU64` 而非 `static mut`：中断上下文中 `+= 1`（fetch_add）与
+/// 主线程读取（load）之间不存在数据竞争（Relaxed 足够，仅需原子性，不需排序保证）。
+static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// 时钟中断处理器 (由 IDT 调用)
-pub unsafe fn timer_interrupt_handler() {
-    TICK_COUNT += 1;
+pub fn timer_interrupt_handler() {
+    TICK_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // 未来：在这里调用调度器检查是否需要切换任务
     // scheduler::timer_tick();
 }
 
 /// 获取 tick 计数
-pub unsafe fn tick_count() -> u64 {
-    TICK_COUNT
+pub fn tick_count() -> u64 {
+    TICK_COUNT.load(Ordering::Relaxed)
 }
 
 /// 获取自启动以来的毫秒数
-pub unsafe fn milliseconds() -> u64 {
-    let ticks = TICK_COUNT;
+pub fn milliseconds() -> u64 {
+    let ticks = tick_count();
     let ms_per_tick = 1000 / DEFAULT_FREQUENCY;
     ticks * ms_per_tick as u64
 }
 
 /// 忙等待指定毫秒
-pub unsafe fn busy_wait_ms(ms: u64) {
+pub fn busy_wait_ms(ms: u64) {
     let start = milliseconds();
     let target = start + ms;
 

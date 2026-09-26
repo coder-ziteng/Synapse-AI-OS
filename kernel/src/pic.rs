@@ -34,7 +34,6 @@ pub const IRQ_OFFSET: u8 = 32;
 
 /// PIC 控制器
 pub struct Pic {
-    offset: u8,
     command: Port<u8>,
     data: Port<u8>,
 }
@@ -164,27 +163,33 @@ impl DualPic {
     }
 }
 
-/// 全局 PIC 实例
-static mut PIC: DualPic = DualPic::new();
+/// 全局 PIC 实例（`UnsafeCell` 包装，避免 `static mut` 引用导致的 UB 警告）。
+///
+/// 单核 MVP 下：`init()` 在开中断前调用一次；之后 `send_eoi`/`enable_irq`/`disable_irq`
+/// 只在中断关闭或中断上下文（EOI）中调用，不存在真正的并发数据竞争。
+struct PicCell(UnsafeCell<DualPic>);
+unsafe impl Sync for PicCell {}
+
+static PIC: PicCell = PicCell(UnsafeCell::new(DualPic::new()));
 
 /// 初始化 PIC
 pub unsafe fn init() {
-    PIC.init();
+    (*PIC.0.get()).init();
     log::info!("[pic] PIC initialized: master offset=0x{:02x}, slave offset=0x{:02x}",
                IRQ_OFFSET, IRQ_OFFSET + 8);
 }
 
 /// 发送 EOI
 pub unsafe fn send_eoi(irq: u8) {
-    PIC.send_eoi(irq);
+    (*PIC.0.get()).send_eoi(irq);
 }
 
 /// 解除 IRQ 屏蔽
 pub unsafe fn enable_irq(irq: u8) {
-    PIC.enable_irq(irq);
+    (*PIC.0.get()).enable_irq(irq);
 }
 
 /// 屏蔽 IRQ
 pub unsafe fn disable_irq(irq: u8) {
-    PIC.disable_irq(irq);
+    (*PIC.0.get()).disable_irq(irq);
 }

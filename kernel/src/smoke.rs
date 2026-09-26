@@ -482,6 +482,29 @@ pub fn run_integration_smoke(refs: &BootstrapRefs) {
     // 如果到这里说明 #BP handler 成功返回（iretq 继续执行）
     total += 1;
 
+    // ============================================================
+    // 12. PIC + PIT: 定时器中断实际触发验证（tick 计数递增）
+    // ============================================================
+    info!("[smoke] 12/12 PIC/PIT 定时器中断");
+
+    // 此时中断已开启（_start64 中 pic::enable_irq(0) + interrupts::enable() 已执行），
+    // PIT 以 100Hz 触发 IRQ 0，每次中断让 TICK_COUNT += 1。
+    let ticks_before = crate::pit::tick_count();
+    // 忙等待 ~50ms（100Hz 下应产生约 5 次 tick，留足余量避免抖动误判）
+    crate::pit::busy_wait_ms(50);
+    let ticks_after = crate::pit::tick_count();
+
+    assert!(
+        ticks_after > ticks_before,
+        "PIT tick count should increase after busy_wait_ms(50): before={}, after={}",
+        ticks_before, ticks_after
+    );
+    info!(
+        "[smoke]   tick: {} → {} (+{})",
+        ticks_before, ticks_after, ticks_after - ticks_before
+    );
+    total += 1;
+
     info!("[smoke] {}/{} checks passed", total, total);
 }
 

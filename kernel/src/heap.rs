@@ -24,7 +24,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
 
-use crate::page_frame::{self, PhysicalAddr};
+use crate::page_frame;
 use crate::sync::SpinLock;
 
 /// 堆块头部（16 字节）。

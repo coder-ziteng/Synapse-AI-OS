@@ -6,7 +6,7 @@
 use core::fmt::Write;
 use log::{Level, Log, Metadata, Record, SetLoggerError};
 
-use crate::serial::{self, Uart16550};
+use crate::serial::Uart16550;
 use synapse_hal::serial::SerialDevice;
 
 /// 全局 logger 实例。

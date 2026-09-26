@@ -13,7 +13,6 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
-#![feature(naked_functions)]
 
 extern crate alloc;
 
@@ -72,19 +71,20 @@ pub unsafe extern "C" fn memcpy(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
 
 #[no_mangle]
 pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
-    let mut result: i32 = 0;
-    core::arch::asm!(
-        "rep cmpsb",
-        "sete al",
-        "movzx eax, al",
-        "neg eax",  // 0 → 0, 1 → -1 (memcmp 返回负/正)
-        inout("rdi") a => _,
-        inout("rsi") b => _,
-        inout("rcx") n => _,
-        inout("eax") 0 => result,
-        options(preserves_flags, nostack),
-    );
-    result
+    // C 语义：相等返回 0，不等返回首个差异字节的差值（负/正）。
+    // 注意：不能用 `rep cmpsb + sete + neg` —— 那样"相等"会返回 -1，
+    // 导致 String/slice 的 PartialEq（底层走 memcmp）对相等内容判为不等。
+    // （与 P1-T8 basic_boot.rs 中发现并修复的 bug 同源。）
+    let mut i = 0;
+    while i < n {
+        let x = *a.add(i) as i32;
+        let y = *b.add(i) as i32;
+        if x != y {
+            return x - y;
+        }
+        i += 1;
+    }
+    0
 }
 
 #[no_mangle]
@@ -198,7 +198,7 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'V');
     unsafe { pic::enable_irq(0) }; // 解除 IRQ 0 (定时器) 屏蔽
     boot_marker(b'W');
-    unsafe { x86_64::instructions::interrupts::enable() }; // 开启中断
+    x86_64::instructions::interrupts::enable(); // 开启中断
     boot_marker(b'X');
 
     smoke::run_integration_smoke(&refs);

@@ -18,9 +18,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use x86_64::registers::control::Cr2;
-use x86_64::structures::idt::{
-    InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode,
-};
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 struct IdtCell(UnsafeCell<InterruptDescriptorTable>);
 unsafe impl Sync for IdtCell {}
@@ -41,7 +39,7 @@ impl IdtCell {
         unsafe {
             idt.double_fault
                 .set_handler_addr(x86_64::VirtAddr::new(
-                    double_fault_trampoline_asm as u64
+                    double_fault_trampoline_asm as *const () as u64
                 ))
                 .set_stack_index(0); // IST1
         }
@@ -50,7 +48,7 @@ impl IdtCell {
         unsafe {
             idt.general_protection_fault
                 .set_handler_addr(x86_64::VirtAddr::new(
-                    general_protection_trampoline_asm as u64
+                    general_protection_trampoline_asm as *const () as u64
                 ));
         }
 
@@ -58,7 +56,7 @@ impl IdtCell {
         unsafe {
             idt.page_fault
                 .set_handler_addr(x86_64::VirtAddr::new(
-                    page_fault_trampoline_asm as u64
+                    page_fault_trampoline_asm as *const () as u64
                 ));
         }
 
@@ -76,6 +74,12 @@ impl IdtCell {
 static IDT: IdtCell = IdtCell::new();
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
 
+/// 初始化并加载 IDT（安装全部异常/中断 handler）。
+///
+/// # Safety
+///
+/// 必须在 GDT/TSS（含 IST1）初始化之后、开启中断之前调用；只允许调用一次，
+/// 重复调用会 panic。
 pub unsafe fn init_idt() {
     if INIT_DONE.swap(true, Ordering::SeqCst) {
         panic!("init_idt called twice");
@@ -205,7 +209,7 @@ extern "C" fn page_fault_inner(ip: u64, error_code: u64) -> ! {
 // ============================================================================
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    unsafe { crate::pit::timer_interrupt_handler(); }
+    crate::pit::timer_interrupt_handler();
     unsafe {
         crate::pic::send_eoi(0);
     }
