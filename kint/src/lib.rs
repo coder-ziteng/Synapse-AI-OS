@@ -41,17 +41,20 @@
 #![no_std]
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use synapse_abi::{decode, abi_query_value, Syscall, SyscallFrame};
+use synapse_abi::{abi_query_value, decode, Syscall, SyscallFrame};
 use synapse_audit::{AuditEvent, AuditQueue, DefaultAuditQueue};
 use synapse_cap::{CapError, CapTable, ObjectTable};
 use synapse_ipc::{AgentId, Notification};
-use synapse_proc::{Pid, ProcessTable};
+use synapse_proc::{Pid, ProcessTable, SpawnParams};
 
 /// 错误码（Doc 02 §4.3 表）。
 pub const E_NOT_IMPLEMENTED: i64 = -10;
 /// 非法 capability 引用。
 pub const E_INVALID_CAP: i64 = -1;
+/// 非法用户态地址。
+pub const E_INVALID_ADDR: i64 = -2;
 /// 权限不足。
 pub const E_PERMISSION: i64 = -7;
 
@@ -59,6 +62,7 @@ pub const E_PERMISSION: i64 = -7;
 ///
 /// `caps` / `notifs` 以 `Pid` 为索引（`caps[pid]`），Pid(0) 保留未用。
 /// `current_pid` 由测试设置，模拟"当前进程发起 syscall"。
+/// `user_memory` 模拟用户态地址空间（tests 写入指针数据，dispatcher 读取）。
 pub struct KernelState {
     /// 进程表（synapse-proc）。
     pub procs: ProcessTable,
@@ -72,6 +76,10 @@ pub struct KernelState {
     pub objects: ObjectTable,
     /// 当前进程 PID（测试设置；真实内核从 CPU 状态读取）。
     pub current_pid: Pid,
+    /// Mock 用户态地址空间（tests 写入指针数据，dispatcher 读取 / 写入）。
+    pub user_memory: BTreeMap<u64, Vec<u8>>,
+    /// Mock 单调时钟计数器（gettime 每次调用 +1 纳秒）。
+    pub time_counter: u64,
 }
 
 impl KernelState {
@@ -92,6 +100,8 @@ impl KernelState {
             notifs,
             objects: ObjectTable::new(),
             current_pid: Pid(1), // init
+            user_memory: BTreeMap::new(),
+            time_counter: 0,
         }
     }
 }
@@ -118,18 +128,22 @@ pub fn dispatch(state: &mut KernelState, frame: &SyscallFrame) -> i64 {
         Syscall::ProcessReap { pid } => handle_process_reap(state, Pid(pid)),
         Syscall::ProcessFreeze { pid } => handle_process_freeze(state, Pid(pid)),
         Syscall::ProcessThaw { pid } => handle_process_thaw(state, Pid(pid)),
+        Syscall::ProcessSpawn { elf, args, caps, n_caps, death_ep } => {
+            handle_process_spawn(state, elf, args, caps, n_caps, death_ep)
+        }
         Syscall::CapRevoke { cap } => handle_cap_revoke(state, cap),
+        Syscall::CapDelegate { parent, rights, child_out } => {
+            handle_cap_delegate(state, parent, rights, child_out)
+        }
         Syscall::NotificationSignal { notif, bits } => handle_notification_signal(state, notif, bits),
         Syscall::NotificationWait { notif, mask } => handle_notification_wait(state, notif, mask),
+        Syscall::GetTime { clock_id, ts_out } => handle_gettime(state, clock_id, ts_out),
         // 桩实现
         Syscall::IpcSend { .. }
         | Syscall::IpcRecv { .. }
         | Syscall::IpcReply { .. }
         | Syscall::IpcTrySend { .. }
-        | Syscall::ProcessSpawn { .. }
         | Syscall::CapInvoke { .. }
-        | Syscall::CapDelegate { .. }
-        | Syscall::GetTime { .. }
         | Syscall::Mmap { .. }
         | Syscall::Munmap { .. } => E_NOT_IMPLEMENTED,
     }
@@ -221,6 +235,86 @@ fn handle_notification_wait(state: &mut KernelState, _notif_ref: u8, _mask: u32)
         Some(bits) => bits as i64,
         None => 0, // 无事件（真实内核会阻塞）
     }
+}
+
+fn handle_process_spawn(
+    state: &mut KernelState,
+    _elf_ref: u8,
+    _args_ptr: u64,
+    caps_ptr: u64,
+    n_caps: u64,
+    death_ep: u8,
+) -> i64 {
+    let parent_pid = state.current_pid;
+    let parent_idx = parent_pid.0 as usize;
+    if parent_idx >= state.caps.len() {
+        return E_INVALID_CAP;
+    }
+    // 从 user_memory 读取初始 caps 数组
+    let initial_caps: Vec<u8> = match state.user_memory.get(&caps_ptr) {
+        Some(data) if data.len() >= n_caps as usize => data[..n_caps as usize].to_vec(),
+        _ => return E_INVALID_ADDR,
+    };
+    // stub: 真实内核需校验 elf_ref 是合法 ELF 镜像 cap
+    // stub: 真实内核需校验 death_ep 是合法 endpoint cap
+    // 创建子进程（简化：使用默认 quota，不安装初始 caps）
+    let child_agent = AgentId(100 + state.procs.live_count() as u32);
+    let child_quota = synapse_cap::DEFAULT_QUOTA;
+    let params = SpawnParams {
+        agent: child_agent,
+        quota: child_quota,
+        death_endpoint: death_ep,
+    };
+    match state.procs.spawn(parent_pid, params) {
+        Ok(child_pid) => {
+            // 扩展 caps/notifs 以支持新 pid
+            let child_idx = child_pid.0 as usize;
+            while state.caps.len() <= child_idx {
+                state.caps.push(CapTable::new());
+                state.notifs.push(Notification::new());
+            }
+            // stub: 真实内核需调用 cap::transfer_caps 安装初始 caps
+            let _ = initial_caps;
+            child_pid.0 as i64
+        }
+        Err(e) => cap_error_to_errno(e),
+    }
+}
+
+fn handle_cap_delegate(
+    state: &mut KernelState,
+    parent: u8,
+    rights: u32,
+    child_out: u64,
+) -> i64 {
+    let pid = state.current_pid;
+    let idx = pid.0 as usize;
+    if idx >= state.caps.len() {
+        return E_INVALID_CAP;
+    }
+    // 将 u32 权限位转为 Rights
+    let rights_obj = synapse_cap::Rights::from_bits(rights);
+    match state.caps[idx].delegate(parent, rights_obj) {
+        Ok(child_cptr) => {
+            // 写入 child_cap 到 user_memory
+            state.user_memory.insert(child_out, alloc::vec![child_cptr]);
+            0
+        }
+        Err(e) => cap_error_to_errno(e),
+    }
+}
+
+fn handle_gettime(state: &mut KernelState, clock_id: u32, ts_out: u64) -> i64 {
+    // Mock: 返回单调时钟计数器（每次调用 +1 纳秒）
+    let _ = clock_id; // stub: 真实内核需区分 MONOTONIC / WALL
+    let time = state.time_counter;
+    state.time_counter += 1;
+    // 写入 Timespec { tv_sec: u64, tv_nsec: u32 } = 12 字节
+    let mut timespec = alloc::vec![0u8; 12];
+    timespec[..8].copy_from_slice(&time.to_le_bytes());
+    timespec[8..12].copy_from_slice(&0u32.to_le_bytes()); // tv_nsec = 0
+    state.user_memory.insert(ts_out, timespec);
+    0
 }
 
 /// CapError → errno 映射（Doc 02 §4.3）。

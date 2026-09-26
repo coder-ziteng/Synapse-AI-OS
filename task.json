@@ -532,6 +532,12 @@
       "scope": "P2-T2 物理页帧分配器",
       "summary": "bitmap 线性扫描分配器：bitmap[frame/64] & (1<<(frame%64)) 为 1 = 空闲。MAX_FRAMES=32768（128MB 上限，bitmap 占 512 u64 = 4KB = 1 页）。hint 指针减少扫描碎片。初始化：MEMORY_MAP Usable 区间 → mark_range_usable；内核 [0x200000.._kernel_end] → mark_range_used。双重释放幂等 no-op。QEMU 验证：total=1322 free=1322（5.2 MB）= 160（entry[00]）+ 1757（entry[03]）- 595（kernel）= 1322 ✓。smoke 44/44 通过。",
       "alternatives_rejected": "① Buddy allocator：P2-T2 MVP 阶段不需要连续多帧分配（仅单帧分配），bitmap 线性扫描代码量小 50%+ 且 debug 透明；② 每帧 8 字节 descriptor（frame + tag）：内存开销翻倍，P2 无需求。How to apply: P2-T3 内核堆落地后若连续分配成为热路径（如 2MB 大页 / DMA 缓冲区），再升级为 buddy 或 order-N 分层分配器。"
+    },
+    {
+      "date": "2026-09-26",
+      "decision": "扩展 kint 实现 ProcessSpawn/CapDelegate/GetTime: KernelState 增加 user_memory (BTreeMap) + time_counter; dispatch 支持从用户态内存读取初始 caps 数组、写入 child_cap/timespec",
+      "reason": "证明完整 syscall 分发流水线 (用户帧编码 → decode → 子 crate 操作 → 审计/写入用户内存 → 返回) 在 host 上跑通; user_memory 模拟真实内核地址空间读写",
+      "consequence": "kint 测试从 14 → 17; 工作区总测试 110 → 113; 为后续实现 IpcSend/CapInvoke 等需要 buffer 处理的 syscall 铺路"
     }
   ],
   "current_task": "P2-T2",

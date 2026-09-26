@@ -194,14 +194,110 @@ fn mmap_stub_returns_not_implemented() {
 }
 
 #[test]
-fn gettime_stub_returns_not_implemented() {
+fn gettime_returns_monotonic_counter() {
     let mut state = KernelState::new();
+    // 第一次调用：time_counter = 0
     let frame = build_frame(
         SyscallId::GetTime,
         synapse_user::build_args_gettime(0, 0x2000),
     );
     let ret = dispatch(&mut state, &frame);
-    assert_eq!(ret, E_NOT_IMPLEMENTED);
+    assert_eq!(ret, 0);
+    // 检查 user_memory 中写入了 timespec
+    let timespec = state.user_memory.get(&0x2000).unwrap();
+    assert_eq!(timespec.len(), 12);
+    let tv_sec = u64::from_le_bytes(timespec[..8].try_into().unwrap());
+    assert_eq!(tv_sec, 0);
+    // 第二次调用：time_counter = 1
+    let frame = build_frame(
+        SyscallId::GetTime,
+        synapse_user::build_args_gettime(0, 0x3000),
+    );
+    let ret = dispatch(&mut state, &frame);
+    assert_eq!(ret, 0);
+    let timespec = state.user_memory.get(&0x3000).unwrap();
+    let tv_sec = u64::from_le_bytes(timespec[..8].try_into().unwrap());
+    assert_eq!(tv_sec, 1);
+}
+
+// ============================================================================
+// ProcessSpawn
+// ============================================================================
+
+#[test]
+fn process_spawn_creates_child() {
+    let mut state = KernelState::new();
+    // 设置 user_memory：初始 caps 数组（3 个 CapRef：slots 3, 4, 5）
+    state.user_memory.insert(0x1000, vec![3, 4, 5]);
+    // 调用 process_spawn
+    let frame = build_frame(
+        SyscallId::ProcessSpawn,
+        synapse_user::build_args_proc_spawn(
+            CapRef::new(10).unwrap(), // elf_ref (stub)
+            0, // args_ptr
+            0x1000, // caps_ptr
+            3, // n_caps
+            CapRef::new(5).unwrap(), // death_ep
+        ),
+    );
+    let ret = dispatch(&mut state, &frame);
+    // 返回子进程 pid（应 > 1，因为 init 是 pid 1）
+    assert!(ret > 1);
+    let child_pid = Pid(ret as u32);
+    // 验证子进程已创建
+    assert!(state.procs.get(child_pid).is_some());
+}
+
+#[test]
+fn process_spawn_invalid_caps_ptr_returns_invalid_addr() {
+    let mut state = KernelState::new();
+    // 不设置 user_memory，caps_ptr 无效
+    let frame = build_frame(
+        SyscallId::ProcessSpawn,
+        synapse_user::build_args_proc_spawn(
+            CapRef::new(10).unwrap(),
+            0,
+            0x1000, // caps_ptr 未设置
+            3,
+            CapRef::new(5).unwrap(),
+        ),
+    );
+    let ret = dispatch(&mut state, &frame);
+    assert_eq!(ret, -2); // E_INVALID_ADDR
+}
+
+// ============================================================================
+// CapDelegate
+// ============================================================================
+
+#[test]
+fn cap_delegate_creates_child_cap() {
+    let mut state = KernelState::new();
+    // init 进程的 cap table 中安装一个 cap
+    let parent_cap = synapse_cap::Capability {
+        obj: synapse_cap::ObjRef { index: 0, generation: 0 },
+        rights: synapse_cap::Rights::ALL,
+        badge: 0,
+        parent: None,
+    };
+    let parent_cptr = state.caps[1].alloc(parent_cap).unwrap();
+    // 调用 cap_delegate
+    let frame = build_frame(
+        SyscallId::CapDelegate,
+        synapse_user::build_args_cap_delegate(
+            CapRef::new(parent_cptr.into()).unwrap(),
+            0xFFFF_FFFF, // rights
+            0x4000, // child_out ptr
+        ),
+    );
+    let ret = dispatch(&mut state, &frame);
+    assert_eq!(ret, 0);
+    // 检查 user_memory 中写入了 child_cap
+    let child_cap = state.user_memory.get(&0x4000).unwrap();
+    assert_eq!(child_cap.len(), 1);
+    let child_cptr = child_cap[0];
+    // 验证 child_cap 已安装到 cap table
+    assert!(state.caps[1].get(child_cptr).is_ok());
 }
 
 // ============================================================================
