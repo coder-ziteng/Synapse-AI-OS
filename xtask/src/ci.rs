@@ -27,12 +27,12 @@ pub fn run(timeout_secs: u64) -> Result<(), String> {
     // Step 2: 启动 QEMU
     let mut child = qemu::spawn_headless()?;
 
-    // Step 3: 轮询 serial.log
+    // Step 3: 轮询 logs/serial.log
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask manifest has parent")
         .to_path_buf();
-    let serial = root.join("serial.log");
+    let serial = root.join("logs").join("serial.log");
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut found = false;
 

@@ -12,6 +12,8 @@
 
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
+#![feature(naked_functions)]
 
 extern crate alloc;
 
@@ -26,6 +28,9 @@ pub mod memory_map;
 pub mod page_frame;
 pub mod heap;
 pub mod gdt;
+pub mod idt;
+pub mod pic;
+pub mod pit;
 pub mod bootstrap;
 pub mod smoke;
 
@@ -180,11 +185,28 @@ pub extern "C" fn _start64() -> ! {
     let _gdt_sels = unsafe { gdt::init_gdt_tss() };
     boot_marker(b'Q');
 
+    // P2-T5 IDT：装好 #DE/#BP/#UD/#DF(IST1)/#GP/#PF handler
+    boot_marker(b'R');
+    unsafe { idt::init_idt() };
+    boot_marker(b'S');
+
+    // P2-T6 PIC + PIT：中断控制器 + 定时器
+    boot_marker(b'T');
+    unsafe { pic::init() };
+    boot_marker(b'U');
+    unsafe { pit::init(pit::DEFAULT_FREQUENCY) };
+    boot_marker(b'V');
+    unsafe { pic::enable_irq(0) }; // 解除 IRQ 0 (定时器) 屏蔽
+    boot_marker(b'W');
+    unsafe { x86_64::instructions::interrupts::enable() }; // 开启中断
+    boot_marker(b'X');
+
     smoke::run_integration_smoke(&refs);
     boot_marker(b'I');
 
     // 通过 isa-debug-exit (iobase=0x502) 退出 QEMU。
-    // 注意：QEMU 只取 val 的低 7 位 → exit code = ((0xB5 & 0x7F) << 1) | 1 = 107
+    // QEMU isa-debug-exit 实现为 exit((val << 1) | 1)（无掩码），
+    // 所以 val=0xB5 → exit code = (0xB5 << 1) | 1 = 363。
     unsafe {
         asm!(
             "mov dx, 0x502",

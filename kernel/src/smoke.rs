@@ -461,6 +461,27 @@ pub fn run_integration_smoke(refs: &BootstrapRefs) {
     let _ = INIT_QUOTA;
     let _: Pid = child_pid; // 类型引用
 
+    // ============================================================
+    // 11. IDT + 异常处理: sidt 验证 + int3 (#BP) 触发验证
+    // ============================================================
+    info!("[smoke] 11/11 IDT + 异常处理");
+
+    // IDT base 应非零（lidt 已执行）
+    let idt_base = crate::idt::current_idt_base();
+    assert_ne!(idt_base, 0, "IDT base should be non-zero after init_idt");
+    total += 1;
+
+    // IDT limit 应为 256 * 16 - 1 = 4095
+    let idt_limit = crate::idt::current_idt_limit();
+    assert_eq!(idt_limit, 4095, "IDT limit should be 4095 (256 entries × 16 bytes - 1), got {}", idt_limit);
+    total += 1;
+
+    // 触发 #BP (int3)：handler 应该记录日志并返回（不 panic）
+    // int3 指令 = 0xCC；handler 返回后继续执行下一条指令
+    unsafe { core::arch::asm!("int3"); }
+    // 如果到这里说明 #BP handler 成功返回（iretq 继续执行）
+    total += 1;
+
     info!("[smoke] {}/{} checks passed", total, total);
 }
 

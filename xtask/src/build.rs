@@ -32,8 +32,9 @@ pub fn run(release: bool) -> Result<(), String> {
     // 近期 nightly cargo 要求 JSON target spec 必须显式开启
     cmd.arg("-Zjson-target-spec");
     // 自定义 bare-metal target 没有预编译 core；用 rust-src 现场构建
-    // 只构建 core + compiler_builtins（std 无法为 os=none 构建）
-    cmd.arg("-Zbuild-std=core,compiler_builtins");
+    // 只构建 core + compiler_builtins + alloc（std 无法为 os=none 构建）
+    // P2-T3 起内核启用了 `extern crate alloc`，必须一并构建 alloc
+    cmd.arg("-Zbuild-std=core,compiler_builtins,alloc");
     if release {
         cmd.arg("--release");
     }

@@ -373,10 +373,11 @@
           "id": "P2-T5",
           "name": "IDT + 异常处理",
           "status": "completed",
-          "actual_approach": "kernel/src/idt.rs 实现完整异常处理框架：(1) #DE divide_error + #BP breakpoint + #UD invalid_opcode 基础异常；(2) #DF double_fault 使用 IST1 栈（TSS.IST1 = DF_STACK 顶），naked asm trampoline 绕过 x86-interrupt ABI 栈对齐问题；(3) #GP general_protection_fault 带错误码；(4) #PF page_fault 从 CR2 读故障地址 + 错误码解析（present/writable/user/ifetch/protect/shadow）；(5) 所有 handler panic 输出异常类型 + 错误码 + IP。QEMU 验证：exit=107, dbg501=ABCDEFGHIJKLMNOPQRS + serial [idt] IDT loaded: #DE/#BP/#UD/#DF(IST1)/#GP/#PF + smoke 53/53 全通过。",
+          "actual_approach": "kernel/src/idt.rs 最终版（在 d7a4288 快照基础上重写）：(1) #DE/#BP/#UD 无错误码异常直接用 extern \"x86-interrupt\" ABI（set_handler_fn 类型检查路径）；(2) #DF/#GP/#PF 带错误码异常改用 global_asm! trampoline + set_handler_addr(VirtAddr)：rustc nightly-2026-09-23 对任何带 error_code 参数的 x86-interrupt handler 产生 'offset is not a multiple of 16' codegen 错误（无源码定位），trampoline 从 CPU 48 字节栈帧取 RIP([rsp+16])/err_code([rsp]) 入 rdi/rsi，and rsp,-16 后 call 普通 extern C inner 函数；(3) #DF 经 set_stack_index(0) 挂 TSS.IST1（DF_STACK，P2-T4 已建）；(4) #PF inner 用 Cr2::read_raw()（跳过 canonical 检查防嵌套 #GP）输出 fault_addr+error_code 后 panic；(5) IRQ0 定时器 vector 32：idt.slice_mut(32..33)[0].set_handler_fn(timer_interrupt_handler)（slice_mut 索引是绝对 vector 号，<32 会 panic），handler 调 pit::timer_interrupt_handler + pic::send_eoi(0)；(6) IdtCell(UnsafeCell)+INIT_DONE AtomicBool 防重入（同 gdt.rs 模式）；(7) smoke §11 三项验证：sidt base≠0、limit==4095、int3 触发 #BP 且 iretq 返回。QEMU 验证：dbg501=ABCDEFGHJKLMNOPQRSTUVWXI，serial [idt] IDT loaded + [idt] #BP breakpoint at ip=0x21483f，smoke 56/56 全通过（53→56，+3 IDT 项），exit=363；host cargo test 115 passed 0 failed。",
           "files": [
             "kernel/src/idt.rs",
-            "kernel/src/main.rs"
+            "kernel/src/main.rs",
+            "kernel/src/smoke.rs"
           ]
         },
         {
@@ -555,6 +556,12 @@
       "scope": "P2-T4 GDT/TSS 初始化",
       "summary": "kernel/src/gdt.rs 落地运行时 GDT/TSS：(1) TssCell/GdtCell（UnsafeCell<...> 包装的 static，避开 static_mut 2024 弃用）+ INIT_DONE AtomicBool 重入保护；(2) 两个 4KB 页对齐栈 KERNEL_STACK/DF_STACK（用 Aligned4K<T> wrapper struct，#[repr(align(4096))] 不能直接用于 static）；(3) GDT 8 项布局：null(0) + cs64_kernel(1) + ds64_kernel(2) + cs64_kernel_dup(3) + ds64_user(4) + cs64_user(5) + tss(6..7)；index 3 故意放 ring-0 code 以保 lgdt 后 CS=0x18 在远跳重载 CS 之前的 NMI/#MC 窗口合法；(4) load 流程：lgdt → CS::set_reg(0x08) 远返回 → SS::set_reg(0x10) → load_tss(0x30)；(5) TSS.RSP0 = KERNEL_STACK 顶（Phase 4 syscall/sysret 切栈预留），TSS.IST1 = DF_STACK 顶（#DF handler 专用，P2-T5 IDT 用）。Why: 单 core MVP + 即将到来的 IDT/PIC，需要 TSS.IST1 作为 #DF 异常栈（避免 #DF handler 在同一栈运行→溢出→三重故障）；RSP0 为 Phase 4 用户态 syscall/sysret privilege change 预留。How to apply: 多核就绪后 TSS 改为 per-CPU 数组；用户态启用后用 GDT[4] sel = 0x23 (ds64_user) / [5] 0x2B (cs64_user) 作 sysret 入口；IST2 可扩展 NMI，IST3 可扩展 #MC。",
       "alternatives_rejected": "① 沿用 boot.S 的 trampoline GDT（5 项，无 TSS）→ P2-T5 IDT 装入后 #DF handler 无独立栈，三重故障风险；② static mut TSS/GDT → Rust 2024 弃用警告 + 难以做内部不变性检查；③ 不做页对齐 → IDT handler 难做 guard-page 栈溢出检测，MVP 可接受但失去良好实践。"
+    },
+    {
+      "date": "2026-09-26",
+      "scope": "P2-T5 IDT 带错误码异常 handler codegen 绕过",
+      "decision": "对 #DF/#GP/#PF 放弃 extern \"x86-interrupt\" ABI，改用 global_asm! trampoline（取 RIP/err_code 入 rdi/rsi → and rsp,-16 → call extern C inner）+ Entry::set_handler_addr(VirtAddr) 绕过 set_handler_fn 的类型检查；#DF 保留 set_stack_index(0) 走 IST1。",
+      "alternatives_rejected": "① extern \"x86-interrupt\" fn(frame, u64)：rustc nightly-2026-09-23 codegen bug，任何带 error_code 参数的 x86-interrupt handler 均报 'offset is not a multiple of 16' 且无源码定位，增量二分确认与具体 handler 无关；② #[inline(never)]/内层函数提取/去掉 {:#?} 格式化：均无效；③ #[unsafe(naked)] + asm!：E0787 naked fn 内不允许 asm!（仅 naked_asm!），且同样落入 codegen bug 路径；④ static 里直接 set_handler_fn：E0015 非常量 fn 不能在 static 初始化器调用 → IdtCell(UnsafeCell) 运行时初始化。另：slice_mut 索引必须用绝对 vector 号（32..33），用 0..1 触发 x86_64 crate 运行时 panic 'Cannot return slice from traps, faults, and exception handlers'。"
     }
   ],
   "current_task": "P2-T3",

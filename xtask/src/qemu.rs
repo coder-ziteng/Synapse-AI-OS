@@ -15,6 +15,15 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// 日志目录（`<root>/logs`），不存在时创建。
+///
+/// 所有运行时日志（serial/debugcon）统一写入此目录，禁止散落到项目根目录。
+fn logs_dir() -> PathBuf {
+    let dir = workspace_root().join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// 构造 QEMU 命令行参数。
 ///
 /// 关键参数说明：
@@ -63,10 +72,10 @@ pub fn build_args(serial_log: &Path, dc402: &Path, dc501: &Path) -> Vec<String> 
 
 /// 无头启动 QEMU 并**等待退出**。用于 `xtask run`（用户想看到完整日志后再返回 shell）。
 pub fn run_headless() -> Result<(), String> {
-    let root = workspace_root();
-    let serial = root.join("serial.log");
-    let dc402 = root.join("debugcon-stage12.log");
-    let dc501 = root.join("debugcon-kernel.log");
+    let logs = logs_dir();
+    let serial = logs.join("serial.log");
+    let dc402 = logs.join("debugcon-stage12.log");
+    let dc501 = logs.join("debugcon-kernel.log");
 
     // 清理旧日志，避免误读上一轮残留
     let _ = std::fs::remove_file(&serial);
@@ -89,10 +98,10 @@ pub fn run_headless() -> Result<(), String> {
 
 /// 启动 QEMU 并返回子进程句柄（不等待）。用于 `xtask ci`（需要轮询 serial log + 超时杀进程）。
 pub fn spawn_headless() -> Result<Child, String> {
-    let root = workspace_root();
-    let serial = root.join("serial.log");
-    let dc402 = root.join("debugcon-stage12.log");
-    let dc501 = root.join("debugcon-kernel.log");
+    let logs = logs_dir();
+    let serial = logs.join("serial.log");
+    let dc402 = logs.join("debugcon-stage12.log");
+    let dc501 = logs.join("debugcon-kernel.log");
 
     let _ = std::fs::remove_file(&serial);
     let _ = std::fs::remove_file(&dc402);
