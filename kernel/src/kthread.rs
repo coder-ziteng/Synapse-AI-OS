@@ -32,9 +32,13 @@
 //! 若返回则落入 fallback panic。
 
 use core::arch::{asm, global_asm};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use log::{info, warn};
-use synapse_sched::{ContextSlot, Scheduler, SchedError, SwitchDecision, ThreadId, MAX_THREADS};
+use synapse_sched::{
+    ContextSlot, Priority, Scheduler, SchedError, SwitchDecision, ThreadId, ThreadState,
+    MAX_THREADS,
+};
 
 use crate::page_frame::{self, FRAME_SIZE};
 use crate::sync::SpinLock;
@@ -130,6 +134,16 @@ const UNINIT: &str = "SCHED accessed before kthread_init()";
 extern "C" {
     /// 新线程首次进入的跳板（下方 global_asm 定义）。
     fn kthread_trampoline() -> !;
+    /// 上下文切换（下方 global_asm 定义，详见 [`switch_to`] 安全包装）。
+    ///
+    /// **返回语义**：本线程被换出后，未来某次别的线程 `switch_to` 把它选为
+    /// `next` 时，从当初的调用点"返回"（callee-saved + rsp/rip 从快照恢复）。
+    /// 绝不能声明为 `-> !`：那会让 rustc 把调用点之后的代码全部当死代码删除，
+    /// 切换回来的线程落进编译器填充的 int3/ud2（P3-T5 首跑 #DF 的根因之一）。
+    fn _switch_to(
+        prev: *mut synapse_sched::ContextSlot,
+        next: *const synapse_sched::ContextSlot,
+    );
 }
 
 // 跳板：switch_to `ret` 至此 → `call rbx`（entry）。entry 声明为 `-> !`，
@@ -142,6 +156,98 @@ global_asm!(
     "3: jmp 3b",
     fallback = sym kthread_fallback,
 );
+
+// ========================================================================
+// P3-T5 `switch_to`：上下文切换汇编
+// ========================================================================
+//
+// ## ABI 契约（对照 Intel SDM Vol.1 §3.7 + SysV AMD64 ABI §3.2.3）
+//
+// **SysV AMD64 调用约定**：
+// - 调用方负责保存 caller-saved（rax/rcx/rdx/rsi/rdi/r8-r11）；本函数复用 rax
+//   作为 rip 中转，不影响调用方对 caller-saved 的保存责任。
+// - callee-saved 集合 = { rbx, rbp, r12, r13, r14, r15, rsp }。rip 不在此
+//   集合内——但 `call` 指令将 rip 压栈，进入时 [rsp] = ret-addr = 调用点续址。
+// - 进入本函数时 rsp ≡ caller_rsp − 8；退出/切换后调用点处 rsp ≡ caller_rsp
+//   → SysV 要求调用函数前后 rsp 16 对齐的一致性自动满足（参见 SDM §3.7.2）。
+//
+// **ContextSlot 字段序**（sched `types.rs:171-176` 编译期断言）：
+//   words[0..8] = [rbx, rbp, r12, r13, r14, r15, rsp, rip]，
+//   8 字节步进。`CpuContext::to_slot` 与本汇编采用**同一套偏移**，所以可
+//   直接对 `*mut ContextSlot` 操作（16-word 槽位的 words[8..] 暂未使用，保留
+//   给未来 AVX-512 扩展位）。
+//
+// ## 寄存器策略
+//
+// 与传统 Linux `__switch_to` "push 到 prev 栈 → 换栈 → pop 从新栈" 不同，
+// 本实现采用**直接读写 ctx**（不引入栈上的 callee-saved 影子帧），原因：
+//
+// 1. kthread_create 仅在 `[rsp]` 预置 1 个 ret-word（trampoline 地址）；
+//    新线程栈不含 callee-saved 的影子帧，传统 push/pop 路径需要重新填栈
+//    → 增加 bug 面积且与 P3-T4 已通过的 smoke 检查矛盾。
+// 2. 直接读写 ctx 跨"创建/恢复"两条流：`switch_to(boot_ctx, t_ctx)` 中
+//    t_ctx.words[0..8] 是创建期预设的 rbx=entry/rip=trampoline，加载后
+//    `ret` 弹 trampoline → kthread_trampoline: `call rbx` → entry 永不返回。
+//
+// ## 对齐保证
+//
+// - 入口 rsp ≡ caller_rsp − 8 ⇒ rsp % 16 == 8（SysV 进栈约定）。
+// - 加载 next.rsp 后 rsp 立即由 next 决定；新线程栈顶预置 rsp ≡ stack_top − 8
+//   ⇒ ret 弹出后 rsp ≡ stack_top ≡ 16 对齐（kthread_create 保证 stack_top
+//   4KB 对齐 ⇒ stack_top % 16 == 0）。
+// - 跳板 `call rbx` 再入栈 8 ⇒ rsp ≡ stack_top − 8 ⇒ entry 函数进入时
+//   rsp % 16 == 8（SysV 入栈约定达成）。
+global_asm!(
+    ".globl _switch_to",
+    "_switch_to:",
+    // ---- 保存 callee-saved 到 prev_ctx (rdi = prev) ----
+    "  mov [rdi + 0x00], rbx",     // rbx
+    "  mov [rdi + 0x08], rbp",     // rbp
+    "  mov [rdi + 0x10], r12",     // r12
+    "  mov [rdi + 0x18], r13",     // r13
+    "  mov [rdi + 0x20], r14",     // r14
+    "  mov [rdi + 0x28], r15",     // r15
+    // ---- 保存 rsp（入口 rsp = caller_rsp - 8）与 rip（[rsp] = ret-addr）----
+    "  mov [rdi + 0x30], rsp",     // rsp
+    "  mov rax, [rsp]",
+    "  mov [rdi + 0x38], rax",     // rip
+    // ---- 加载 next 的 callee-saved 与 rsp (rsi = next) ----
+    "  mov rbx, [rsi + 0x00]",
+    "  mov rbp, [rsi + 0x08]",
+    "  mov r12, [rsi + 0x10]",
+    "  mov r13, [rsi + 0x18]",
+    "  mov r14, [rsi + 0x20]",
+    "  mov r15, [rsi + 0x28]",
+    "  mov rsp, [rsi + 0x30]",
+    // ---- ret 弹 [rsp] 即新 RIP ----
+    "  ret",
+);
+
+/// 上下文切换：保存 `prev` 的 callee-saved + rsp + rip，加载 `next` 同名寄存器。
+///
+/// **返回时机**：`prev` 线程被换出后不立即返回；当它未来被另一个 `switch_to`
+/// 选为 `next` 时，本调用"返回"，执行从调用点之后继续（callee-saved 与
+/// rsp/rip 均从换出时的快照恢复——对调用方而言等价于一次普通的阻塞调用）。
+///
+/// # Safety
+///
+/// - `prev` 与 `next` 必须指向 sched `ContextSlot`（16-word，前 8 字布局 =
+///   `[rbx, rbp, r12, r13, r14, r15, rsp, rip]`）。**典型用法**：从 `s.thread_mut(id)` /
+///   `s.thread(id)` 取出引用后转 `*mut` / `*const ContextSlot`。
+/// - `prev` 与 `next` **不得指向同一个槽位**：别名会使"保存"覆盖目标快照，
+///   "恢复"读回调用者自己的状态，`ret` 落进调用方编译器视为不可达的区域
+///   （int3/ud2 填充）→ #BP 风暴 → #DF。调用前必须先经 sched 状态机
+///   （`commit_switch`）确定 prev/next 是两个不同线程。
+/// - `next.rsp` 指向的栈内存必须合法（[rsp] 是恢复时的 RIP；新线程由
+///   `kthread_create` 在栈顶预置 trampoline 地址）。
+/// - 调用方在取指针与切换期间不持有 [`SCHED`] 自旋锁（单核 MVP：临界区内
+///   取指针 → 出临界区 → 切换；切换后新线程的锁状态必须干净）。
+pub unsafe fn switch_to(
+    prev: *mut synapse_sched::ContextSlot,
+    next: *const synapse_sched::ContextSlot,
+) {
+    unsafe { _switch_to(prev, next) }
+}
 
 /// 跳板 fallback：entry 意外返回时 panic（走既有 backtrace + 355 出口）。
 extern "C" fn kthread_fallback() -> ! {
@@ -450,10 +556,160 @@ pub fn kthread_smoke() {
     );
     check!(total, "live_count = 2 (boot + t1)", with_sched(|s| s.live_count() == 2));
 
-    // 收尾：t1 留队（P3-T5 switch_to 真机验证的第一个切换目标）。
+    // 收尾：回收 t1——它的 entry 是 hlt 死循环占位（T4 无切换能力时代的产物），
+    // 留队会 ① 干扰 P3-T5 switch smoke 的 commit_switch "队首必须是 next" 断言
+    // ② 一旦被误调度即永久挂死。exit + reap 归还帧与账本。
+    kthread_exit(t1).expect("exit t1");
+    kthread_reap(t1).expect("reap t1");
     let _ = with_sched(|s| s.take_need_resched()); // 清 schedule() 残留标志
     if with_sched(|s| s.need_resched()) {
         warn!("[kthread-smoke] need_resched unexpectedly set");
     }
     info!("[kthread-smoke] {}/{} checks passed", total, total);
+}
+
+// ========================================================================
+// P3-T5 真机 smoke：switch_to 上下文切换的双向贯通
+// ========================================================================
+//
+// 流程：commit(boot→t) → switch_to → t 跑 entry 自增计数器 → commit(t→boot)
+//      → switch_to → boot 从调用点"返回" → 验证计数/状态/双方 ctx 快照。
+//
+// **先 commit 后切换**（P3-T5 首跑 #DF 的教训）：sched `current()` 是 entry
+// 定位自身 prev ctx 的唯一依据；不 commit 则 entry 里 prev/next 别名同一个
+// boot_ctx——保存阶段覆写 boot 快照，恢复阶段读回自己的状态，`ret` 落进
+// 编译器视为不可达的 int3 填充区 → #BP 风暴 → 跑飞 #DF。
+//
+// entry 无法收参数（`KthreadEntry = fn() -> !`）：boot 的 ThreadId 经
+// [`SWITCH_BOOT_ID`] 全局传入；entry 自身 id 用 `s.current()`（已 commit）。
+
+/// 切换 smoke：boot 通过此 static 把 ThreadId 告诉 entry（`ThreadId.0` 是 u32）。
+static SWITCH_BOOT_ID: AtomicU32 = AtomicU32::new(0);
+/// 切换 smoke：entry 自增次数（验证 entry 真的被跑到）。
+static SWITCH_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// 切换 smoke 用 entry：自增计数 + 切回 boot。
+///
+/// SAFETY: 调用本函数前必须已 `SWITCH_BOOT_ID.store(boot.0)`。
+extern "C" fn switch_entry() -> ! {
+    SWITCH_TICK.fetch_add(1, Ordering::Relaxed);
+    let boot = ThreadId(SWITCH_BOOT_ID.load(Ordering::Relaxed));
+    // 取 ctx 指针 + commit_switch（t → boot）：更新 scheduler.current = boot
+    let (prev, next) = with_sched(|s| {
+        let current = s.current().expect("current running");
+        // commit_switch: current(t) → boot（boot 状态 Exited → Running）
+        s.commit_switch(Some(current), boot).expect("commit_switch t→boot");
+        let prev = &mut s.thread_mut(current).expect("current tcb").ctx as *mut _;
+        let next = &s.thread(boot).expect("boot tcb").ctx as *const _;
+        (prev, next)
+    });
+    // SAFETY: SCHED 锁外不重入；ctx 指针在数组中稳定；prev/next 经 commit_switch
+    // 确定为两个不同线程；next.rsp 已由前次 switch_to 保存（boot 换出快照）。
+    unsafe { _switch_to(prev, next) }
+    // 正常路径下本线程被换出后不再回来（T5 smoke 结束时 t 已被 exit+reap）。
+    // 若未来某次切换把 t 选为 next，会从这里的"调用点之后"恢复——落进 panic
+    // 留证（smoke 语义：t 只应被调度一次）。
+    panic!("switch_entry resumed after switch-away (unexpected in T5 smoke)");
+}
+
+/// P3-T5 真机 smoke：在 `_start64` 集成 smoke 之后调用。
+pub fn kthread_switch_smoke() {
+    info!("[kthread-switch-smoke] start");
+    let mut total: u32 = 0;
+
+    // 1. 准备：记录 boot id、清零计数器
+    let boot = with_sched(|s| s.current().expect("current is boot"));
+    SWITCH_BOOT_ID.store(boot.0, Ordering::Relaxed);
+    SWITCH_TICK.store(0, Ordering::Relaxed);
+
+    // 2. 创建切换线程。必须 HIGH 优先级：commit_switch 要求 next 在队首，
+    //    而 boot（HIGH）被换出时也会回插 level-0 队尾——若 t 是 DEFAULT，
+    //    队首会变成 boot 自己 → BadState。HIGH + FIFO（t 先入队）保证 peek()=t。
+    let t = kthread_create(switch_entry, Priority::HIGH.0).expect("create switch thread");
+
+    // 3. 切换前：boot 仍是 current、t 是 Ready
+    check!(
+        total,
+        "boot still current before switch",
+        with_sched(|s| s.current() == Some(boot))
+    );
+    check!(
+        total,
+        "switch thread Ready",
+        with_sched(|s| s.state_of(t) == Ok(ThreadState::Ready))
+    );
+
+    // 4. 切换 boot → t（先 commit_switch 更新 scheduler.current = t）
+    let (prev, next) = with_sched(|s| {
+        // commit_switch: boot → t（更新 current 字段，t 状态 Ready → Running）
+        s.commit_switch(Some(boot), t).expect("commit_switch boot→t");
+        let prev = &mut s.thread_mut(boot).expect("boot tcb").ctx as *mut _;
+        let next = &s.thread(t).expect("t tcb").ctx as *const _;
+        (prev, next)
+    });
+    // SAFETY: prev=boot / next=t 是两个不同槽位（commit 已定序，无别名）；
+    // t 的栈与蹦床帧由 kthread_create 预置；SCHED 锁已释放（t 的 entry 还要
+    // 再进临界区）。本次调用在 t 切回 boot 后"返回"——控制流从下一行继续。
+    unsafe { _switch_to(prev, next) };
+
+    // 5. 验证：t 已执行（counter==1）→ 切回 boot → boot 继续
+    check!(
+        total,
+        "switch_entry ran exactly once (counter = 1)",
+        SWITCH_TICK.load(Ordering::Relaxed) == 1
+    );
+    check!(
+        total,
+        "current restored to boot",
+        with_sched(|s| s.current() == Some(boot))
+    );
+
+    // 6. 验证：boot 的 ctx 在切换时已被 switch_to 保存（rsp/rip 非零、对齐）。
+    //    SysV：call 前 rsp ≡ 0 (mod 16)，call 压 8 字节 → _switch_to 入口
+    //    rsp ≡ 8 (mod 16)，保存的正是这个值。
+    let boot_ctx = with_sched(|s| CpuContext::from_slot(&s.thread(boot).unwrap().ctx));
+    check!(
+        total,
+        "boot ctx.rsp saved (nonzero, entry-aligned %16==8)",
+        boot_ctx.rsp != 0 && boot_ctx.rsp % 16 == 8
+    );
+    check!(
+        total,
+        "boot ctx.rip saved (nonzero, in kernel text)",
+        boot_ctx.rip != 0 && boot_ctx.rip > 0x20_0000 && boot_ctx.rip < 0x80_0000
+    );
+
+    // 7. 验证：t 的 ctx 也被 switch_entry 内第二次 _switch_to 保存。
+    //    t_ctx.rsp = switch_entry 调 _switch_to 时的入口 rsp——位于 t 自己的
+    //    栈区间内（guard 之上、栈顶之下），而不是创建期的 stack_top-8。
+    let t_ctx = with_sched(|s| CpuContext::from_slot(&s.thread(t).unwrap().ctx));
+    let (t_base, t_frames, t_entry, _) = meta_of(t).expect("t meta");
+    let t_stack_top = t_base + (t_frames * FRAME_SIZE) as u64;
+    check!(
+        total,
+        "t ctx.rsp inside own stack (switch_entry frame saved)",
+        t_ctx.rsp > t_base + FRAME_SIZE as u64 && t_ctx.rsp < t_stack_top && t_ctx.rsp % 16 == 8
+    );
+    // rip = switch_entry 内第二次 _switch_to 调用点的续址（内核 text 段内）。
+    // 不检查 rbx==entry：entry 真实运行后 rbx 是编译器自由使用的 callee-saved
+    // 值（仅要求 switch_entry 自己的调用者视角守恒），==entry 只是 -O0 巧合。
+    check!(
+        total,
+        "t ctx.rip = resume point inside entry (kernel text)",
+        t_ctx.rip > 0x20_0000 && t_ctx.rip < 0x80_0000
+    );
+    let _ = t_entry; // meta 完整性由上方 kthread-smoke 的 entry 检查覆盖
+
+    // 8. 收尾：exit + reap t（此刻 t 是 Ready——第二次 commit_switch 把它回插
+    //    level-0 队列）。必须清掉：否则 t 留在队里，未来任何调度点都会把它
+    //    选中 → 恢复进 switch_entry 尾部的 panic 留证路径。
+    kthread_exit(t).expect("exit t");
+    kthread_reap(t).expect("reap t");
+    check!(
+        total,
+        "t cleaned up (exit + reap, queue empty)",
+        with_sched(|s| s.state_of(t) == Err(SchedError::NotFound) && s.ready_count() == 0)
+    );
+
+    info!("[kthread-switch-smoke] {}/{} checks passed", total, total);
 }

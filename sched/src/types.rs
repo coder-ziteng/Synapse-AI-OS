@@ -115,7 +115,12 @@ pub enum SchedError {
 ///
 /// 纯逻辑 crate 不解释内容；内核集成层（P3-T4/T5）按约定读写。
 /// 全零 = 新线程尚未首次切换（switch_to 需走蹦床入口而非恢复路径）。
+///
+/// `repr(C)`：内核 `switch_to` 汇编按固定字节偏移（0x00..0x38）直接读写
+/// `words[0..8]`，且以裸指针跨 FFI 边界传递——必须保证 `words` 位于偏移 0
+/// 且布局稳定（下方 tests 有编译期断言）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(C)]
 pub struct ContextSlot {
     /// 上下文原始字存储。
     pub words: [u64; CTX_WORDS],
@@ -173,6 +178,8 @@ mod tests {
     fn context_slot_size_fits_callee_saved() {
         // rbx rbp r12 r13 r14 r15 rsp rip = 8 ≤ CTX_WORDS（编译期断言）
         const _: () = assert!(CTX_WORDS >= 8);
+        // repr(C) + words 在偏移 0：内核 switch_to 汇编按 0x00..0x38 固定偏移访问
+        assert_eq!(core::mem::offset_of!(ContextSlot, words), 0);
         assert_eq!(core::mem::size_of::<ContextSlot>(), CTX_WORDS * 8);
     }
 }

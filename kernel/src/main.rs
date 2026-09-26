@@ -234,6 +234,11 @@ pub extern "C" fn _start64() -> ! {
     kthread::kthread_smoke();
     boot_marker(b'b');
 
+    // P3-T5 switch_to 真机 smoke：上下文切换双向贯通
+    boot_marker(b'c');
+    kthread::kthread_switch_smoke();
+    boot_marker(b'd');
+
     // 通过 isa-debug-exit (iobase=0x502) 退出 QEMU。
     // QEMU isa-debug-exit 实现为 exit((val << 1) | 1)（无掩码），
     // 所以 val=0xB5 → exit code = (0xB5 << 1) | 1 = 363。
