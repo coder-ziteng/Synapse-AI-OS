@@ -1,83 +1,140 @@
 # Synapse — AI 原生微内核
 
-> **状态**：设计文档 Doc 01~06 全部 **PROPOSED 完成**（Phase 4/5/6+ 核心决策收敛）；代码阶段 Phase 1 进行中（P1-T5/T6/T7/T9 已完成，P1-T4 boot 调试中）。
+> 一个从零自研的 x86_64 微内核，目标是让 **AI Agent 成为一等公民**：
+> 内核态只保留调度 / 内存 / IPC / 能力（Capability）原语，所有 AI 业务
+> （外交工具、Agent 运行时、记忆系统）全部运行在用户态，受 Capability
+> 权限模型与审计事件流约束。
 >
-> **任务管理**：[`task.json`](task.json) 是项目长记忆状态与任务计划的唯一来源，按 [`docs/design/rule.md`](docs/design/rule.md) 规则维护。
+> **当前状态**：✅ Phase 0~2 已完成（裸机点亮 → 内存 / 中断 / 异常框架 → TSC 时钟校准），
+> 真机 QEMU smoke 全部通过。下一步：Phase 3 多任务与调度。
 >
-> **设计文档索引**：[`docs/README.md`](docs/README.md) — 状态总览、阅读顺序、跨文档一致性、剩余 TBD。
+> **任务看板**：[`task.json`](task.json)（唯一事实来源） · **开发规则**：[`docs/design/rule.md`](docs/design/rule.md) · **设计文档索引**：[`docs/README.md`](docs/README.md)
 
 ---
 
-## 1. 项目目标
+## 1. 为什么做这个项目
 
-构建面向 AI Agent 原生运行的微内核：内核态仅保留调度/内存/IPC/能力原语，所有 AI 业务逻辑下沉到用户态（外交工具 + Agent 运行时 + 记忆系统）。详见 [`docs/design/00-adr-from-scratch.md`](docs/design/00-adr-from-scratch.md)（已接受：从零自研 vs 二次开发）。
+现有 OS 把 AI Agent 当普通进程对待：权限粗粒度（文件系统 / 网络全有或全无）、
+行为不可审计、资源不可核算。Synapse 的回答是：
 
-## 2. 文档导航
+- **Capability 安全模型** — Agent 的每项权限（对象访问、IPC、设备）都是可委托、
+  可撤销、可审计的能力对象，支持 L1~L5 分级授权与高风险操作人工确认通道。
+- **微内核 + 用户态外交工具** — 网络出口收敛到唯一持有网卡能力的外交工具进程，
+  架构性保证"唯一网络出口"不变量；内核仅提供 IPC 与中断路由。
+- **AI 原生原语** — 资源核算（FR8）、进程冻结 / 频率计数（FR10）、
+  append-only 审计事件流（FR9）从内核层直接支撑 Agent 监督树与行为围栏。
 
-| 入口 | 路径 |
-|------|------|
-| 需求目标（FR/NFR + 路线图）| [`需求目标.md`](需求目标.md) |
-| 需求评审与补充方案 | [`docs/requirements-review-and-supplement.md`](docs/requirements-review-and-supplement.md) |
-| 设计文档 00 ADR | [`docs/design/00-adr-from-scratch.md`](docs/design/00-adr-from-scratch.md) |
-| 设计文档 01 Capability | [`docs/design/01-capability-agent-permission-model.md`](docs/design/01-capability-agent-permission-model.md) |
-| 设计文档 02 用户态 ABI | [`docs/design/02-userspace-abi-and-process-model.md`](docs/design/02-userspace-abi-and-process-model.md) |
-| 设计文档 03 IPC | [`docs/design/03-ipc-message-and-single-copy-path.md`](docs/design/03-ipc-message-and-single-copy-path.md) |
-| 设计文档 04 外交工具 | [`docs/design/04-diplomat-channel-architecture.md`](docs/design/04-diplomat-channel-architecture.md) |
-| 设计文档 05 跨 OS 外交 | [`docs/design/05-inter-os-diplomacy-protocol.md`](docs/design/05-inter-os-diplomacy-protocol.md) |
-| 设计文档 06 系统服务层路线图 | [`docs/design/06-system-services-roadmap.md`](docs/design/06-system-services-roadmap.md) |
-| 开发规则 | [`docs/design/rule.md`](docs/design/rule.md) |
+设计取舍详见 [ADR 00：从零自研 vs 二次开发](docs/design/00-adr-from-scratch.md)
+与 [需求目标.md](需求目标.md)（FR/NFR + 六阶段路线图）。
 
-## 3. 路线图（高层）
+## 2. 架构总览
 
-- **Phase 0** — 环境与基线（Rust nightly + QEMU + bootimage）
-- **Phase 1** — 裸机点亮 + 工程基建（QEMU Hello Synapse）
-- **Phase 2** — 内存 / 中断 / 异常框架
-- **Phase 3** — 多任务与调度（FR8/FR10 原语）
-- **Phase 4** — 用户态与 IPC（Capability + 单拷贝路径）
-- **Phase 4.5** — PCI 枚举与中断用户态化
-- **Phase 5** — 外交工具 + Agent 雏形
-- **Phase 6** — SMP / 存储栈 / 跨 OS 外交 / 硬件信任根
+```text
+┌─────────────────────────────────────────────────────────┐
+│  用户态（规划中，Phase 4+）                               │
+│  Agent 运行时 · 外交工具(smoltcp/virtio-net) · 记忆系统    │
+├──────────────── syscall (18 个, ABI 见设计文档 02) ────────┤
+│  内核态                                                  │
+│  cap/   Capability 表 · 对象表 · 委托/撤销级联             │
+│  ipc/   Endpoint(同步) · Notification(异步) · 单拷贝路径    │
+│  proc/  进程表 · Agent 注册表 · spawn/exit/reap            │
+│  kernel/ 引导链 · 页帧/堆 · GDT/TSS/IDT · PIC/PIT · TSC 时钟│
+│  hal/   硬件抽象 Trait (Mmu/Interrupt/Timer/Serial)        │
+│  audit/ 审计事件流（骨架）                                 │
+└─────────────────────────────────────────────────────────┘
+```
 
-并行：**S1~S6 系统服务层**（详见设计文档 06）。
+`cap/`、`ipc/`、`proc/` 为零依赖纯逻辑 crate（`#![deny(unsafe_code)]`），
+宿主端 115 个单元测试全绿；内核集成层用 IRQ-safe SpinLock 包装后已在
+QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit → reap）。
 
-## 4. 当前任务
+## 3. 进度（详细状态见 [task.json](task.json)）
 
-见 [`task.json`](task.json) 的 `session.current_phase` / `current_task`。Phase 0 阻塞于工具链缺失，需用户侧执行安装（参见 task.json `env_prerequisites`）。
+| Phase | 内容 | 状态 |
+| --- | --- | --- |
+| P0 | 环境与基线（nightly-2026-09-23 锁定 + QEMU + 工具链验证） | ✅ 完成 |
+| P1 | 裸机点亮与工程基建（三级 boot 链 · UART · log/panic 回溯 · CI · 测试框架） | ✅ 完成 (11/11) |
+| P2 | 内存 / 中断 / 异常（E820 · 页帧分配器 · 内核堆 · GDT/TSS/IST · IDT · PIC/PIT · TSC 校准） | ✅ 完成 (7/7) |
+| P3 | 多任务与调度（TCB · 上下文切换 · 抢占模型 · RR 调度器） | ⏳ 待拆解 |
+| P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 未开始 |
+| P4.5 | PCI 枚举与中断用户态化 | 未开始 |
+| P5 | 外交工具与 Agent 雏形 | 未开始 |
+| P6 | SMP / 存储栈 / IOMMU / 本地推理 / 跨 OS 外交 | 远期 |
 
-## 5. 构建与运行
+## 4. 快速开始
 
 ### 前置条件
 
 - Rust nightly（日期锁定于 `rust-toolchain.toml`）+ `rust-src` + `llvm-tools-preview`
-- QEMU ≥ 7.0（`qemu-system-x86_64`）
-- Python 3（用于 `build_disk.py`）
+- QEMU ≥ 7.0（`qemu-system-x86_64` 在 PATH 中）
+- Python 3（`build_disk.py` 打包磁盘镜像）
 
-### 构建内核 ELF
+### 一键构建 + 运行 + 判定（推荐）
 
-```bash
-cargo build -p synapse-kernel --target x86_64-bootloader.json
+```powershell
+.\startAIOS.ps1              # 构建 → QEMU 无头运行 → 三重自动判定
+.\startAIOS.ps1 -Test        # 运行 QEMU 内测试套件（P1-T8）
+.\startAIOS.ps1 -BuildOnly   # 只构建 kernel_hd.img
 ```
 
-### 生成可引导镜像
+成功判定（脚本自动检查）：QEMU 退出码 **363**、`logs\serial.log` 出现
+`N/N checks passed` 且无 `[PANIC]`、`logs\debugcon-kernel.log` boot marker 序列完整。
+所有运行日志统一落 `logs\` 子目录。
+
+### 手动分步
 
 ```bash
-python build_disk.py target/x86_64-bootloader/debug/synapse-kernel kernel_hd.img
+cargo run -p synapse-xtask -- build   # 构建磁盘镜像
+cargo run -p synapse-xtask -- run     # QEMU 运行（exit 1 属正常，看 logs\ 判定）
+cargo test --workspace --exclude synapse-kernel   # 宿主单元测试
+python kernel/tests/run_tests.py      # QEMU 测试套件
 ```
 
-### QEMU 启动
+## 5. 仓库结构
 
-```bash
-qemu-system-x86_64 -nographic -drive file=kernel_hd.img,if=ide,format=raw -device isa-debugcon,iobase=0x501,chardev=dbg -chardev file,path=debug.log,id=dbg -device isa-debug-exit,iobase=0x501,exit-code=181
-```
+| 路径 | 说明 |
+| --- | --- |
+| `kernel/` | 内核本体（引导链 boot.S、内存、中断、异常、集成层、smoke） |
+| `cap/` `ipc/` `proc/` | 纯逻辑 crate：Capability / IPC / 进程（零 unsafe，宿主可测） |
+| `hal/` | 硬件抽象 Trait + `cfg(test)` fake 实现 |
+| `abi/` | 用户态 ABI（syscall 号表，18 个，设计文档 02 §4.2） |
+| `audit/` | 审计事件流（骨架） |
+| `user/` | 用户态程序（Phase 4 启用） |
+| `xtask/` | 构建 / 运行 / CI 任务封装 |
+| `docs/design/` | 设计文档 00~07 + rule.md 开发规则 |
+| `scripts/` `build_disk.py` `verify-all.ps1` | 辅助脚本 |
 
-> **注意**：P1-T4 boot 调试中。当前 stage 2 → 64-bit 跳转后内核 `_start64` 的到达尚未完全验证。调试检查点输出见 `debug.log`（port 0x501）。
+## 6. 文档导航
 
-### 运行测试（HAL）
+| 入口 | 路径 |
+| ------ | ------ |
+| 需求目标（FR/NFR + 路线图） | [`需求目标.md`](需求目标.md) |
+| 需求评审与补充方案 | [`docs/requirements-review-and-supplement.md`](docs/requirements-review-and-supplement.md) |
+| Doc 00 ADR：从零自研 | [`docs/design/00-adr-from-scratch.md`](docs/design/00-adr-from-scratch.md) |
+| Doc 01 Capability 与 Agent 权限模型 | [`docs/design/01-capability-agent-permission-model.md`](docs/design/01-capability-agent-permission-model.md) |
+| Doc 02 用户态 ABI 与进程模型 | [`docs/design/02-userspace-abi-and-process-model.md`](docs/design/02-userspace-abi-and-process-model.md) |
+| Doc 03 IPC 消息与单拷贝路径 | [`docs/design/03-ipc-message-and-single-copy-path.md`](docs/design/03-ipc-message-and-single-copy-path.md) |
+| Doc 04 外交工具通道架构 | [`docs/design/04-diplomat-channel-architecture.md`](docs/design/04-diplomat-channel-architecture.md) |
+| Doc 05 跨 OS 外交协议 | [`docs/design/05-inter-os-diplomacy-protocol.md`](docs/design/05-inter-os-diplomacy-protocol.md) |
+| Doc 06 系统服务层路线图 | [`docs/design/06-system-services-roadmap.md`](docs/design/06-system-services-roadmap.md) |
+| Doc 07 显示栈与空间外壳 | [`docs/design/07-display-stack-and-spatial-shell.md`](docs/design/07-display-stack-and-spatial-shell.md) |
+| 设计文档索引（状态总览 + 阅读顺序） | [`docs/README.md`](docs/README.md) |
+| **开发规则（含 README 同步协议）** | [`docs/design/rule.md`](docs/design/rule.md) |
 
-```bash
-cargo test -p synapse-hal
-```
+## 7. 协作与贡献
 
-### CI
+本项目由多个并行开发窗口（人类 + AI Agent）协作开发，核心约定：
 
-见 `.github/workflows/ci.yml`（P1-T9 已完成）。
+1. **`task.json` 是看板唯一事实来源** — 修改需持 `.task.lock`（原子创建，用完即释放），
+   decision_log 只追加不改写；每窗口独立 git 分支。
+2. **README 同步协议（rule.md 第 8 条）** — 任何窗口完成任务提交时，必须在同一提交
+   （或紧邻提交）中更新本 README 的受影响小节：状态行、进度表、快速开始、仓库结构。
+   增量小编辑，禁止整篇重写他人正在维护的小节。
+3. **完成标准** — 每个任务必须真机（QEMU）验证：退出码 + boot marker + 串口日志
+   三重证据写入 task.json 的 `actual_approach`。
+4. 面向 GitHub 开源维护：README 是新成员（人类与 AI Agent）的第一入口，
+   价值主张与架构图必须保持最新。
+
+---
+
+*Synapse — 让 AI Agent 在能力约束与审计之下，成为操作系统的一等公民。*
