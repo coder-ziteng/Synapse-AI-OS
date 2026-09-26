@@ -44,7 +44,6 @@
 .long 8                       // length: 8 bytes
 
 .global _start
-.type _start, @function
 
 _start:
     // —— Step 1: 关闭中断 ——
@@ -175,7 +174,8 @@ _start:
     .short 0x18                       // 64-bit ring-0 code segment (L=1)
     .quad  _start64                   // 64-bit RIP（R_X86_64_64）
 
-.size _start, . - _start
+// 注：rustc bundled assembler 不识别 `.size SYM, . - SYM` GNU as 语法，
+// 移除以消除 "unknown directive" 错误——大小由 .text 段边界推导。
 
 // ======================================================================
 // 数据 / BSS
@@ -199,7 +199,7 @@ trampoline_gdt_ptr:
 // 4 级页表 + 临时栈（DATA section — 必须落在文件内以便 QEMU PVH 实际加载）
 // PVH loader 可能不会 zero-fill memsz 超过 filesz 的部分，所以把 boot-time 数据
 // 放到 .data（PROGBITS，文件中有数据）而不是 .bss（NOBITS，文件中无数据）。
-.section .data.boot, "aw", @progbits
+.section .data.boot, "aw"
 .align 4096
 page_tables:
     .skip 4096      // PML4
@@ -218,7 +218,7 @@ trampoline_stack_top:
 // ======================================================================
 // Xen PVH ABI: ELF note name="Xen", type=18 (PHYS32_ENTRY),
 //              desc = 32-bit 物理入口地址
-.section .note.Xen, "a", @note
+.section .note.Xen, "a"
 .balign 4
 .long 4                       // namesz: strlen("Xen") + 1 = 4
 .long 4                       // descsz: 4 bytes (32-bit address)

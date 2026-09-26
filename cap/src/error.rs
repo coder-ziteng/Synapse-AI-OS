@@ -69,3 +69,12 @@ impl CapError {
         }
     }
 }
+
+/// `Display` impl — 与 [`CapError::errno`] 对齐，输出 `-N (CapError::Variant)` 形式。
+///
+/// 用途：kernel 集成层 panic 消息、log 输出使用 `{}` 格式化（避免依赖 Debug 的 {:?}）。
+impl core::fmt::Display for CapError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{} ({:?})", self.errno(), self)
+    }
+}

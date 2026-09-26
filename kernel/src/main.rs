@@ -18,6 +18,10 @@ use core::panic::PanicInfo;
 
 pub mod serial;
 pub mod logger;
+pub mod sync;
+pub mod kstate;
+pub mod bootstrap;
+pub mod smoke;
 
 // 把 trampoline 汇编链入二进制；`boot.S` 中 `.global _start` 提供链接器 entry。
 global_asm!(include_str!("boot.S"));
@@ -119,6 +123,13 @@ pub extern "C" fn _start64() -> ! {
     log::info!("Hello, Synapse!");
     kprintln!("[boot] _start64: long mode + 4-level paging active");
     boot_marker(b'F');
+
+    // P2-T3 集成层（cap/ipc/proc 真机验证）：G/H/I 标记 bootstrap/smoke 步骤
+    boot_marker(b'G');
+    let refs = bootstrap::kernel_bootstrap();
+    boot_marker(b'H');
+    smoke::run_integration_smoke(&refs);
+    boot_marker(b'I');
 
     // 通过 isa-debug-exit (iobase=0x502) 退出 QEMU。
     // 注意：QEMU 只取 val 的低 7 位 → exit code = ((0xB5 & 0x7F) << 1) | 1 = 107

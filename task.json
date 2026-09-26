@@ -1,7 +1,7 @@
 {
   "project": "synapse-ai-os",
   "schema_version": "1",
-  "last_update": "2026-09-26",
+  "last_update": "2026-09-26T14:30:00Z",
   "session": {
     "current_phase": "P1",
     "current_task": "P1-T8",
@@ -313,6 +313,21 @@
             "readme 包含 hello_synapse 演示命令"
           ],
           "completed_note": "2026-09-25: readme.md 更新状态+构建命令; docs/README.md 创建设计文档索引(状态总览/阅读顺序/一致性/TBD汇总)"
+        },
+        {
+          "id": "P1-T11",
+          "name": "内核集成层：SpinLock/KState/bootstrap + cap-ipc-proc 真机 smoke",
+          "status": "completed",
+          "actual_approach": "在 kernel/ 接入 cap/ipc/proc 三个纯逻辑 crate：(1) kernel/src/sync.rs——IRQ-safe SpinLock<T>（保存 RFLAGS.IF → cli → 自旋 → guard Drop 恢复）；(2) kernel/src/kstate.rs——5 张表独立 static（OBJECTS/PROCS/CAP_TABLES/ENDPOINTS/NOTIFICATIONS），锁序 OBJECTS → PROCS → CAP_TABLES → ENDPOINTS → NOTIFICATIONS，提供 with_*/k_alloc_object/k_mint_root/k_transfer/k_install_initial/k_ep_*/k_notify_*/k_create_cap_table/k_destroy_cap_table 包装；(3) kernel/src/bootstrap.rs——kernel_bootstrap() 顺序：kstate_init → init CapTable → 铸造 ep/no 根 cap；(4) kernel/src/smoke.rs——run_integration_smoke() 7 段端到端真机验证：spawn + install_initial_caps、delegate + revoke_cascade、transfer_caps 正反、object lifecycle (begin_revoke → retire → free → generation 失配)、Endpoint try_send/recv/cancel_sender、Notification signal/poll 读清、exit → DeathSignal → reap 全链路（含配额归还校验）；(5) kernel/src/main.rs 接线 G/H/I markers（保留 A-F + 107 退出码基线）。QEMU 真机验证：exit=107、dbg501=ABCDEFGHI、serial [smoke] 38/38 checks passed、host tests 50/50 全绿（cap 22 + ipc 14 + proc 14）。",
+          "files": [
+            "kernel/Cargo.toml",
+            "kernel/src/sync.rs",
+            "kernel/src/kstate.rs",
+            "kernel/src/bootstrap.rs",
+            "kernel/src/smoke.rs",
+            "kernel/src/main.rs",
+            "kernel/src/boot.S"
+          ]
         }
       ]
     },
@@ -475,6 +490,26 @@
       "decision": "audit/ 独立 crate：drop-oldest 环形队列 (DEFAULT_QUEUE_CAPACITY=256, overflow u64 累计) + AuditEvent **API 层无 payload 字段** (构造函数不接收业务数据) + drain 批量消费",
       "reason": "Doc 03 §6.3 + FR9：审计永不阻塞热路径 (NFR2)；审计记录必须从 API 层面杜绝含 用户态业务数据原文（Doc 01 §5.2 泄密防线）；批量 drain 减少每事件 IPC 次数",
       "consequence": "队满覆盖最旧，overflow > 0 自身可作为一条 System 事件上报（丢失可见、不静默）；固定大小 repr(C) 事件可零拷贝跨 IPC 批量提交给审计服务"
+    },
+    {
+      "date": "2026-09-26",
+      "scope": "kernel/kstate.rs 锁语义",
+      "summary": "MVP-3 单线程场景下，cap/ipc/proc 三 crate 的\"无锁 + 集成层关中断临界区\"约定落地为单粗粒度 SpinLock 表内结构（SpinLockGuard IRQs-off）；锁序单向 OBJECTS→PROCS→CAP_TABLES→ENDPOINTS→NOTIFICATIONS 防死锁。多核 / 真正的抢占语义待 Phase 2 IDT+多核就绪后切换为更细粒度的 per-object 锁或 RCU 风格。Why: 单核 MVP 下过细分锁增加复杂度零收益，且 crate 接口均已 &mut self 单调用方，等同单锁。How to apply: P2 多核就绪时按调用频度评估是否切分；OBJECTS/PROCS 因 alloc/reap 冷路径可保持单锁，CAP_TABLES 热路径（IPC 收发的 cap 查找）需切为 per-pid 锁或 RCU。",
+      "alternatives_rejected": "三表分别持锁 + 复杂嵌套顺序校验：MVP-3 零收益，调试成本高。"
+    },
+    {
+      "date": "2026-09-26",
+      "scope": "kernel/kstate.rs Endpoint/Notification 实体存储",
+      "summary": "Endpoint/Notification 实体按 ObjRef.index 直接索引到 64 槽静态数组；对象分配单调递增使早期 index<64 必成立，超限 k_alloc_object 返回 NoMemory。P2 页帧分配器落地后改为按需 alloc（endpoints/notifications crate 已用 heap::Vec 即可）。Why: P1-T11 阶段无内核堆 alloc；按需分配需 sync::Mutex<Vec<Option<Box<Endpoint>>>> + 全局 allocator，复杂度与体积双增。How to apply: 内核堆落地（P2-T3 之后）即重写为按需分配并去除 64 上限。",
+      "alternatives_rejected": "每对象都 alloc：需内核堆 → 推迟到 P2。"
+    },
+    {
+      "date": "2026-09-26",
+      "scope": "kernel .bss 增长",
+      "summary": "集成层 5 表新增约 ~1.06MB .bss（CapTableStore 128×6.4KB≈820KB + EndpointStore 64×3.3KB≈213KB + ObjectTable~20KB + ProcessTable~10KB）。.bss 由 build_disk.py 以零填充进磁盘镜像并随加载循环拷贝至 RAM，无运行时清零开销。镜像尺寸 ~2.4MB（≈4832 扇区 → 38 加载块），远低于 32765 扇区上限。Why: 单表整体 static 避免在 ~300KB 内核栈（0x16000..0x60008）构造 ~1MB 临时对象。How to apply: P2 引入内核堆 + 按需分配后，CapTable 改为 alloc + 释放路径同步处理，bss 占用回落到 ~20KB。",
+      "alternatives_rejected": "单 KernelState struct on stack：踩页表风险（已设计时规避）。"
     }
-  ]
+  ],
+  "current_task": "P2-T1",
+  "notes": "\n[2026-09-26 14:30 claude/design-pure-review] P1-T11 内核集成层落地：\n- 5 表独立 static（避免 ~1MB KernelState 在 300KB 内核栈构造溢出）。\n- 锁序 OBJECTS → PROCS → CAP_TABLES → ENDPOINTS → NOTIFICATIONS 单向。\n- Endpoint/Notification 64 槽按 ObjRef.index 直接索引（MVP 约束，注释说明）。\n- smoke 7 段：spawn/install_initial_caps/delegate+revoke_cascade/transfer_caps 正反/object lifecycle/Endpoint/Notification/exit→reap，含配额划拨归还校验。\n- QEMU 验证 exit=107 + dbg501=ABCDEFGHI + serial [smoke] 38/38 + 38 load blocks 回读字节一致。\n- host tests 50/50（cap 22 + ipc 14 + proc 14）未回归。\n下一步候选：P2-T1 (Memory Map 探测) 或 P1-T8 (test_framework 落格)，倾向 P2-T1。\n"
 }

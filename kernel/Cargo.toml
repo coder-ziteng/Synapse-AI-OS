@@ -29,3 +29,13 @@ log = { version = "0.4", default-features = false }
 # 内核 entry / 内联汇编 / 中断处理需 unsafe；HAL 化后 unsafe 集中在 hal::arch 子模块
 unsafe_code = "allow"
 missing_docs = "warn"     # 核心 API 鼓励文档注释（rule 6）
+
+# ===== 内核集成层 (2026-09-26): cap/ipc/proc 纯逻辑 crate 接入 =====
+[dependencies.synapse-cap]
+path = "../cap"
+
+[dependencies.synapse-ipc]
+path = "../ipc"
+
+[dependencies.synapse-proc]
+path = "../proc"

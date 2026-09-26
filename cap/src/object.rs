@@ -74,11 +74,24 @@ impl ObjectTable {
     ///
     /// generation 历史保留；下次 `alloc` 复用该槽时递增。
     pub fn free(&mut self, obj: ObjRef) -> Result<(), CapError> {
-        let slot = self.slot_checked(obj)?;
-        if slot.state == ObjState::Freed {
-            return Err(CapError::ObjectRetired);
+        let idx = obj.index as usize;
+        if idx >= MAX_OBJECTS {
+            return Err(CapError::InvalidCap);
         }
-        self.slots[obj.index as usize] = None;
+        // 仅不可变借用，避免与下文的 `self.slots[idx] = None` 冲突
+        match self.slots[idx].as_ref() {
+            None => return Err(CapError::ObjectRetired),
+            Some(slot) => {
+                if slot.generation != obj.generation {
+                    return Err(CapError::ObjectRetired);
+                }
+                if slot.state == ObjState::Freed {
+                    return Err(CapError::ObjectRetired);
+                }
+            }
+        }
+        // borrow 结束，安全释放
+        self.slots[idx] = None;
         self.live_count -= 1;
         Ok(())
     }
