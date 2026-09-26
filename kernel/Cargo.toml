@@ -11,6 +11,10 @@ publish     = false
 [[bin]]
 name = "synapse-kernel"
 path = "src/main.rs"
+test = false  # 不构建 bin 的 test 版本（避免 duplicate core lang item）
+
+# P1-T8: 集成测试 self-contained — 测试框架代码直接放在 tests/basic_boot.rs
+# （不创建 lib，避免与 main.rs 的 #[global_allocator] / C 运行时符号冲突）
 
 [dependencies]
 # HAL 依赖；P1-T7 UART 走 HAL::SerialDevice trait
