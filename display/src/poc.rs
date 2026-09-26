@@ -1,9 +1,8 @@
 //! 混合模式最小视觉 POC
 //!
-//! 跑通最小化的"空间外壳 + 平面内容"混合模式：
-//! - 1 个虚拟人（锚在屏幕左下）
-//! - 2 个面板（任务卡片 + 通知卡片，锚定到虚拟人附近）
-//! - 1 个锚点（FocusPoint 虚拟演示用）
+//! 跑通最小化的"空间外壳 + 平面内容"混合模式（玄武视觉 v2）：
+//! - Bento Grid 7 卡（brand/status/clock/hero/log/vitals/progress，Liquid Glass）
+//! - 1 个赛博朋克虚拟人（hero 卡主舞台，6 表情状态机）
 //!
 //! 渲染输出 PNG，文件名由调用方传入。
 //!
@@ -18,7 +17,7 @@
 use crate::avatar::{Avatar, Expression};
 use crate::camera::{SpatialCamera, Viewport};
 use crate::renderer::{save_png, Renderer, TinySkiaRenderer};
-use crate::scene::{Panel, SceneGraph, SceneNode};
+use crate::scene::{Panel, SceneGraph, SceneNode, Vital, VitalHue};
 use crate::types::Vec3;
 
 /// 渲染参数
@@ -47,29 +46,64 @@ impl PocOptions {
 pub fn run(options: &PocOptions) -> Result<f64, String> {
     let start = std_time_now_ms();
 
-    // 1. 构造场景
+    // 1. 构造场景（Bento Grid 7 卡，对齐玄武开机视觉分镜）
     let mut scene = SceneGraph::new();
 
-    // 虚拟人：屏幕左下，主舞台
+    scene.add(SceneNode::Panel(Panel::brand_card(0)));
+    scene.add(SceneNode::Panel(Panel::status_card(1, "BOOTING")));
+    scene.add(SceneNode::Panel(Panel::clock_card(2, "9.52")));
+    scene.add(SceneNode::Panel(Panel::hero_card(3, "玄武 · XUANWU")));
+    scene.add(SceneNode::Panel(Panel::log_card(
+        4,
+        vec![
+            "stage2 EDD read ok, A20 gate opened".into(),
+            "[ OK ] long mode entered, identity-map 0-4 GiB".into(),
+            "[ OK ] kernel 5.1 MiB loaded @ 0x200000".into(),
+            "[INFO] serial COM1 online, 115200 8N1".into(),
+            "[ OK ] GDT / TSS loaded, IST1 double-fault armed".into(),
+            "[ OK ] IDT 256 vectors, #PF #GP #DF handlers set".into(),
+            "[ OK ] PIC remapped, PIT 100 Hz IRQ0 ticking".into(),
+            "[ OK ] heap online, first-fit 4096 KiB pool".into(),
+            "[INFO] TSC calibrated 3.199 GHz (PIT cross-check)".into(),
+            "[ ** ] smoke: 57/57 checks passed".into(),
+        ],
+    )));
+    scene.add(SceneNode::Panel(Panel::vitals_card(
+        5,
+        vec![
+            Vital {
+                name: "NEURAL LOAD".into(),
+                value: "78".into(),
+                ratio: 0.78,
+                hue: VitalHue::Cyan,
+            },
+            Vital {
+                name: "MEMORY".into(),
+                value: "1.9 / 16 GB".into(),
+                ratio: 0.12,
+                hue: VitalHue::Violet,
+            },
+            Vital {
+                name: "SYNAPSE SYNC".into(),
+                value: "100".into(),
+                ratio: 1.0,
+                hue: VitalHue::Mint,
+            },
+        ],
+    )));
+    scene.add(SceneNode::Panel(Panel::progress_card(6, "SERVICES", 0.76)));
+
+    // 虚拟人：hero 卡主舞台（z_order 14 叠在 hero 卡玻璃之上）
     let mut avatar = Avatar {
-        position: Vec3::new(-280.0, 40.0, 0.0),
+        position: Vec3::new(-262.0, 40.0, 0.0),
+        body_radius_x: 100.0,
+        body_radius_y: 140.0,
+        head_radius: 58.0,
+        z_order: 14,
         ..Default::default()
     };
     avatar.set_expression(options.expression);
     scene.add(SceneNode::Avatar(avatar));
-
-    // 任务卡片：锚定到虚拟人右侧，z=600（中等距离）
-    scene.add(SceneNode::Panel(Panel::task_card(
-        0,
-        "会议纪要",
-        "5 项任务待办,2 项需今天完成",
-    )));
-
-    // 通知卡片：屏幕左上（系统级），z=200（较近）
-    scene.add(SceneNode::Panel(Panel::notice_card(
-        1,
-        "新消息:合同审批",
-    )));
 
     // 2. 构造摄像机
     let camera = SpatialCamera::new(options.viewport);

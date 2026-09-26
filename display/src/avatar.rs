@@ -45,6 +45,8 @@ pub struct Avatar {
     pub body_radius_y: f32,
     /// 头部半径
     pub head_radius: f32,
+    /// Z 顺序（Bento 布局中虚拟人需叠在 hero 卡玻璃之上）
+    pub z_order: i16,
 }
 
 impl Default for Avatar {
@@ -58,6 +60,7 @@ impl Default for Avatar {
             body_radius_x: 90.0,
             body_radius_y: 130.0,
             head_radius: 55.0,
+            z_order: 0,
         }
     }
 }

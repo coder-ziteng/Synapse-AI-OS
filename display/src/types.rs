@@ -114,6 +114,31 @@ impl Color {
     /// 文字次色
     pub const SYNAPSE_TEXT_SECONDARY: Self =
         Self::rgba(1.0, 1.0, 1.0, 0.75);
+
+    /// 玄武玄黑底色（开机视觉 #05070e）
+    pub const XUANWU_BG: Self = Self::rgb8(0x05, 0x07, 0x0E);
+    /// 玄武主光晕青（#4dd0e1）
+    pub const XUANWU_CYAN: Self = Self::rgb8(0x4D, 0xD0, 0xE1);
+    /// 玄武副光晕紫（#7c4dff）
+    pub const XUANWU_VIOLET: Self = Self::rgb8(0x7C, 0x4D, 0xFF);
+    /// 玄武 mint（#34d399，online 态）
+    pub const XUANWU_MINT: Self = Self::rgb8(0x34, 0xD3, 0x99);
+    /// 玄武主文字（#e6f4f7）
+    pub const XUANWU_TEXT: Self = Self::rgb8(0xE6, 0xF4, 0xF7);
+    /// Liquid Glass 填充（white 4.5%）
+    pub const GLASS_FILL: Self = Self::rgba(1.0, 1.0, 1.0, 0.045);
+    /// Liquid Glass 玻璃边（white 8.5%）
+    pub const GLASS_EDGE: Self = Self::rgba(1.0, 1.0, 1.0, 0.085);
+
+    /// 替换 alpha 分量（玻璃层次叠色用）
+    pub const fn with_alpha(self, a: f32) -> Self {
+        Self {
+            r: self.r,
+            g: self.g,
+            b: self.b,
+            a,
+        }
+    }
 }
 
 /// 2D 仿射变换矩阵（a, b, c, d, e, f）：
