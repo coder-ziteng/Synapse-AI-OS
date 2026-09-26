@@ -405,7 +405,7 @@ bootloader → kernel_main → mm/sched/ipc init
 
 ## 8. 待决策清单（Phase 4 前必须收敛）
 
-- [ ] 用户态 target json 完整字段（与内核 data-layout / features 对齐）—— 需内核 target 稳定后对齐
+- [x] ~~用户态 target json 完整字段~~ → **DECIDED（P4-T1, 2026-09-27）：`x86_64-synapse-user.json`，llvm-target / data-layout / features 与内核 `x86_64-bootloader.json` 逐字段一致（避免 ABI 漂移）；panic=abort · disable-redzone · relocation-model=static · ld.lld + `user/hello/linker.ld`（基址 0x400000，text RX / data RW 双 PT_LOAD，W^X）。构建入口 `xtask user`：`--manifest-path user/hello` + `-Zbuild-std=core,alloc`，产物过 ELF 头断言（ET_EXEC / entry∈基址区 / 无 PT_DYNAMIC）。实测坑：lld 的 `--script=` 相对包根解析；compiler_builtins 在 os=none 上不提供 memset（`user/src/runtime.rs` cfg 门控补齐，与内核 main.rs 同款）**
 - [ ] 是否提供 `std` / libc shim —— 需用户态应用需求明确后决策（首期建议 `no_std`）
 - [x] ~~静态 ELF 加载基址与是否支持 PIE~~ → **PROPOSED：基址 = 0x400000，首期不支持 PIE**，理由见 §3.1
 - [ ] syscall 号表最终版 + 错误码约定 —— 需实现阶段逐步固化

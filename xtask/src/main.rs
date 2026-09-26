@@ -7,10 +7,14 @@
 //! * `xtask run   [--release]` — `build` + 启动 QEMU（headless，等待 QEMU 自然退出）。
 //! * `xtask ci    [--timeout N]` — `build` + 启动 QEMU + 轮询 `serial.log`，
 //!   在超时内断言出现 `EXPECTED_SERIAL`（默认 10 秒）。
+//! * `xtask user  [--release]` — 构建用户态 bin（user/hello，
+//!   `x86_64-synapse-user.json` + `user/linker.ld` 基址 0x400000）
+//!   + 宿主侧 ELF 头断言（ET_EXEC / entry 基址区 / PT_LOAD RX·RW / 无 PT_DYNAMIC）。
 
 mod build;
 mod ci;
 mod qemu;
+mod user;
 
 use std::env;
 use std::process;
@@ -37,6 +41,7 @@ fn main() {
         "build" => build::run(release),
         "run"   => build::run(release).and_then(|()| qemu::run_headless()),
         "ci"    => ci::run(timeout),
+        "user"  => user::run(release),
         other   => {
             usage();
             eprintln!("unknown command: {other}");
@@ -51,8 +56,9 @@ fn main() {
 }
 
 fn usage() {
-    eprintln!("Usage: xtask <build|run|ci> [options]");
+    eprintln!("Usage: xtask <build|run|ci|user> [options]");
     eprintln!("  build [--release]");
     eprintln!("  run   [--release]");
     eprintln!("  ci    [--timeout SECONDS]   (default 10)");
+    eprintln!("  user  [--release]           构建 user/hello + ELF 头断言 (P4-T1)");
 }

@@ -1,0 +1,44 @@
+# P4-T1：第一个静态用户态 ELF（bin crate）。
+#
+# **不入根 workspace**（root Cargo.toml `exclude = ["user/hello"]`）：
+# 宿主 `cargo test` 会尝试为宿主 target 链接 #![no_main] bin → LNK 失败。
+# 构建入口统一走 `cargo run -p xtask -- user`（xtask/src/user.rs）：
+#   cargo build --manifest-path user/hello/Cargo.toml
+#               --target x86_64-synapse-user.json
+#               -Zjson-target-spec -Zbuild-std=core,alloc
+# 产物：user/hello/target/x86_64-synapse-user/{debug|release}/hello
+
+[package]
+name         = "synapse-hello"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.85"
+license      = "MIT OR Apache-2.0"
+description  = "Synapse 第一个静态用户态 ELF（abi_query/exit 占位 + 死循环兜底）"
+publish      = false
+
+# 自成 workspace 根：即使物理上位于仓库目录树内，也不被根 workspace 收编
+# （root Cargo.toml 的 exclude 在 Windows 路径归一化下不可靠，双保险）。
+[workspace]
+
+[[bin]]
+name = "hello"
+path = "src/main.rs"
+
+[dependencies]
+# 复用 P1 就绪的用户态运行时：synapse-user（invoke syscall 封装）+
+# synapse-abi（SyscallId 号表）。不引任何宿主/std 依赖。
+synapse-user = { path = ".." }
+synapse-abi  = { path = "../../abi" }
+
+# standalone crate 不继承根 workspace profile；panic=abort 必须与
+# target json 的 panic-strategy=abort 一致，否则链接期报 mismatch。
+[profile.dev]
+panic = "abort"
+debug = true
+
+[profile.release]
+panic = "abort"
+debug = true
+opt-level = "s"
+lto = "thin"
