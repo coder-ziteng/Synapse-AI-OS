@@ -5,6 +5,7 @@ members = [
     "hal",
     "cap",
     "ipc",
+    "proc",
     "user",
     "xtask",
 ]
