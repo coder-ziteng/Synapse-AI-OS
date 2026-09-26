@@ -21,7 +21,7 @@
 | 地址空间 | 用户空间 0x0~0x7FFF_FFFF_FFFF，内核映射 0xFFFF_8000_... | §3.1 |
 | spawn 权限 | 仅 init 进程可 spawn | §5.2 |
 | death notification | death endpoint + signal 消息 + reap syscall | §5.3 |
-| syscall 表 | 18 个 syscall（IPC 4 + Notification 2 + Capability 3 + Process 6 + Time 1 + Memory 2 + ABI 1）| §4.2 |
+| syscall 表 | 19 个 syscall（IPC 4 + Notification 2 + Capability 3 + Process 6 + Time 1 + Memory 2 + ABI 1）| §4.2 |
 | 错误码 | 自定义负值（-1~-127），15 个核心错误码 | §4.3 |
 | ABI 版本策略 | abi_query syscall + 消息头 version + rights 只追加 | §4.5 |
 | 每进程配额 | Quota struct（pages/threads/caps/endpoints/msg/pending/grants）| §5.5 |
@@ -170,7 +170,7 @@ pub struct UserMemoryRegion {
 | 40 | `mmap` | `addr: *mut u8, len: usize, prot: u32, flags: u32` | 映射内存区域 |
 | 41 | `munmap` | `addr: *mut u8, len: usize` | 解除映射 |
 
-**总计**：首期 17 个 syscall（IPC 4 + Notification 2 + Capability 3 + Process 6 + Time 1 + Memory 2）。
+**总计**：首期 18 个 syscall（IPC 4 + Notification 2 + Capability 3 + Process 6 + Time 1 + Memory 2）；加 §4.5 的 `abi_query`（#18）共 **19 个**。
 
 ### 4.3 错误码约定（PROPOSED）
 
