@@ -1,0 +1,18 @@
+[package]
+name        = "synapse-sched"
+version     = "0.1.0"
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace      = true
+description = "Synapse 调度核心纯逻辑：TCB 状态机 / RR+优先级 runqueue / sleep 队列（架构无关，宿主可测；P3-T1）"
+publish     = false
+
+[lib]
+path = "src/lib.rs"
+
+# 零依赖：纯 no_std，固定数组实现（不使用 alloc），与 cap/ipc/proc 同一纪律
+[dependencies]
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

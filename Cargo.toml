@@ -6,6 +6,7 @@ members = [
     "cap",
     "ipc",
     "proc",
+    "sched",
     "abi",
     "audit",
     "user",
