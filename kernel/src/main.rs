@@ -20,6 +20,8 @@ pub mod serial;
 pub mod logger;
 pub mod sync;
 pub mod kstate;
+pub mod memory_map;
+pub mod page_frame;
 pub mod bootstrap;
 pub mod smoke;
 
@@ -124,10 +126,21 @@ pub extern "C" fn _start64() -> ! {
     kprintln!("[boot] _start64: long mode + 4-level paging active");
     boot_marker(b'F');
 
-    // P2-T3 集成层（cap/ipc/proc 真机验证）：G/H/I 标记 bootstrap/smoke 步骤
+    // P2-T3 集成层（cap/ipc/proc 真机验证）：G/H 标记 bootstrap，J/K 标记 memory_map，I 标记 smoke
     boot_marker(b'G');
     let refs = bootstrap::kernel_bootstrap();
     boot_marker(b'H');
+
+    // P2-T1 Memory Map：解析 boot.S 在 32-bit 保护模式写入 0x20000 的 E820 buffer
+    boot_marker(b'J');
+    memory_map::memory_map_init();
+    boot_marker(b'K');
+
+    // P2-T2 物理页帧分配器：消费 MEMORY_MAP，bitmap 管理 4KB 帧
+    boot_marker(b'L');
+    page_frame::init_page_frame_allocator();
+    boot_marker(b'M');
+
     smoke::run_integration_smoke(&refs);
     boot_marker(b'I');
 

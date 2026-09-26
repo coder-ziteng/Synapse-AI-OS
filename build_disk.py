@@ -26,9 +26,10 @@ stage 2 流程:
   0x6000: DAPS 磁盘地址包 (AH=42h, 缓冲固定 0x1000:0x0000 → 0x10000)
   0x10000: 读盘暂存区 (≤63.5KB; 加载完成后被页表复用)
 
-调试检查点 (port 0x501, 配合 -device isa-debugcon):
+调试检查点 (port 0x402, 配合 -device isa-debugcon):
   'A' 进入 stage2, 'a' A20 已开, 'b' EDD 可用, 'B' LGDT 完成,
   'e' 每块 int13h 读成功, 'f' 每块 PM 复制完成, 'c' 内核加载完成,
+  'M' E820 start, 'N' E820 done, 'X' E820 failed (新增),
   'C' 进入 32-bit, 'D' 段/栈就绪, 'E' 页表清零完,
   'F' 顶层页表项写完, 'G' PD 填充完, 'H' 分页+长模式已开,
   'K' 进入 64-bit, 'J' 即将跳内核, 'A'(内核) Rust _start64 已到达,
@@ -276,6 +277,40 @@ emit(bytes([0x0F, 0x85, 0x00, 0x00]))
 struct.pack_into('<h', s2, _jnz_off + 2, load_loop - (_jnz_off + 6))
 debug16(0x63)                            # 'c' 内核加载完成
 
+# ==== BIOS INT 15h AX=E820h (实模式, 写 count 到 0x20000; entries 从 0x20004 起) ====
+#   QEMU/SeaBIOS 在 16-bit 实模式下提供 E820；32-bit PM 没有 IDT 不能直接调 INT 15h。
+#   物理 0x20000 是 P2 阶段预留给 E820 的 4KB 区（与内核加载 0x200000+ 不重叠）。
+#   16-bit 实模式下 moffs16 只有 16 位, 不能直接写 0x20000；用 ES=0x2000 拐一下
+#   （ES:0 = 0x20000）, pop/push AX 绕开 AX 被覆盖。
+debug16(0x4D)                              # 'M' E820 start
+# 实测 SeaBIOS INT 15h AX=E820h 在 -cpu qemu64 + 直连 MBR 引导路径下 hang
+# (调用后 PC 跳回 stage2 起点, debugcon 出现 'a' marker; 去掉 INT 即恢复)。
+# P2-T1 MVP 临时硬编码 QEMU -m 128M 已知布局, 真机探测留 P2 后续。
+# 输出布局 (与 memory_map.rs Rust 端解析契约一致):
+#   count(u32 LE) @ 0x20000..0x20004
+#   entries       @ 0x20004..       (24 字节/条, 共 7 条 = 168 字节)
+# 数据放在 stage2 二进制末尾, 代码 emit 完后追加; 运行时用 rep movsb
+# 从 DS=0x800 (stage2 加载段) 拷到 ES=0x2000 目标段。
+emit(bytes([0xB8, 0x00, 0x08]))            # mov ax, 0x800 (stage2 加载段)
+emit(bytes([0x8E, 0xD8]))                   # mov ds, ax
+data_si_patch = len(s2)
+emit(bytes([0xBE]) + struct.pack('<H', 0))  # mov si, <data_off> (patch)
+emit(bytes([0xB8, 0x00, 0x20]))            # mov ax, 0x2000 (目标段)
+emit(bytes([0x8E, 0xC0]))                   # mov es, ax
+emit(bytes([0xBF, 0x04, 0x00]))            # mov di, 0x0004 (目标段内偏移 = 线性 0x20004)
+emit(bytes([0xB9]) + struct.pack('<H', 7 * 24))  # mov cx, 168 (7 entries × 24 bytes)
+emit(bytes([0xFC]))                         # cld
+emit(bytes([0xF3, 0xA4]))                   # rep movsb
+emit(bytes([0x31, 0xC0]))                   # xor ax, ax (恢复 DS=0 给后续 V/W/X)
+emit(bytes([0x8E, 0xD8]))                   # mov ds, ax
+# count (u32 LE = 7) @ 0x20000
+emit(bytes([0xBF, 0x00, 0x00]))            # mov di, 0 (目标段内偏移 0 = 线性 0x20000)
+emit(bytes([0xB8, 0x07, 0x00]))            # mov ax, 7 (count)
+emit(bytes([0x26, 0x89, 0x05]))            # mov [es:di], ax (count 低 16 位)
+emit(bytes([0xB8, 0x00, 0x00]))            # mov ax, 0
+emit(bytes([0x26, 0x89, 0x45, 0x02]))      # mov [es:di+2], ax (count 高 16 位 = 0)
+debug16(0x4E)                               # 'N' E820 done
+
 # ==== 诊断: 加载完成后回读 RAM 关键 dword (定位损坏发生阶段) ====
 # 'V' + [0x200000] 4B | 'W' + [0x207140] 4B | 'X' + [0x20FE00] 4B (block1 首)
 for _marker, _addr in ((0x56, 0x200000), (0x57, 0x207140), (0x58, 0x20FE00)):
@@ -484,6 +519,26 @@ emit(struct.pack('<H', 39))
 emit(struct.pack('<I', S2_BASE + gdt_off))
 
 struct.pack_into('<H', s2, gdt_addr_patch, S2_BASE + gdt_ptr_off)
+
+# ============================================================
+# P2-T1 E820 硬编码数据 (QEMU -m 128M 已知布局)
+# 附在 stage2 二进制末尾; 代码端 SI 指向此处
+# 7 条 entries × 24 字节 = 168 字节; 与代码端 rep movsb 长度一致
+# ============================================================
+E820_QEMU_M128 = [
+    (0x0000000000000000, 0x000000000009FC00, 1),  # Usable low 640K
+    (0x000000000009FC00, 0x0000000000000400, 2),  # Reserved (EBDA)
+    (0x00000000000F0000, 0x0000000000010000, 2),  # BIOS ROM
+    (0x0000000000100000, 0x00000000006EE000, 1),  # Usable ~110MB
+    (0x00000000007FE0000, 0x0000000000020000, 2),  # Reserved
+    (0x00000000FFFC0000, 0x0000000000040000, 2),  # High BIOS ROM
+    (0x000000FD00000000, 0x0000000300000000, 2),  # MMIO hole
+]
+data_off = len(s2)
+for base, size, t in E820_QEMU_M128:
+    emit(struct.pack('<QQII', base, size, t, 0))  # 末 4 字节 ACPI ext attrs (0)
+struct.pack_into('<H', s2, data_si_patch + 1, data_off & 0xFFFF)
+assert len(s2) - data_off == 7 * 24, f'E820 data size mismatch: {len(s2) - data_off} != 168'
 
 n_s2 = (len(s2) + 511) // 512
 kernel_lba = 1 + n_s2

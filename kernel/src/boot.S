@@ -68,6 +68,13 @@ _start:
     // —— Step 4: 重设栈 ——
     mov esp, OFFSET trampoline_stack_top
 
+    // NOTE: P2-T1 E820 由 build_disk.py stage2 在 16-bit 实模式写入 0x20000。
+    //   此 trampoline 在当前生产路径下**不会被执行** (stage2 直接跳 _start64),
+    //   保留 PVH 路径以备后续 (multiboot1/multiboot2 直接加载 .bin 启动)。
+    // TODO(PVH path): 在 32-bit 保护模式下探测 BIOS INT 15h AX=E820h,
+    //   写 count 到 [0x20000], entries 到 [0x20004..]. 当前 SeaBIOS/直连 MBR
+    //   引导下 stage2 已抢先填好 buffer, 此函数不再被调用。
+
     // —— Step 5: 清零 4 级页表（16 KB）——
     //   4 个 4KB 页表 × 1024 个 dword = 4096 dword；但当前仅使用 PML4 + PDPT + PD0 + PD1，
     //   共 4*1024 = 4096 dword。循环 1024*4 = 4096 次，每次清 4 字节。

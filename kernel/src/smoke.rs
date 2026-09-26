@@ -33,6 +33,7 @@ use synapse_proc::{
 
 use crate::bootstrap::BootstrapRefs;
 use crate::kstate;
+use crate::page_frame;
 
 /// `must!(label, expr)` —— `expr` 须返回 `Result<T, CapError>`；`Err` 立即 panic。
 /// 返回 Ok 值；不计入 total（调用方显式 `+= 1`）。
@@ -337,7 +338,48 @@ pub fn run_integration_smoke(refs: &BootstrapRefs) {
     );
     total += 1;
 
-    // 引用防止 lint：FaultKind + INIT_QUOTA 走快速路径
+    // ============================================================
+    // 8. Page frame allocator: alloc / free / exhaustion / double-free
+    // ============================================================
+    info!("[smoke] 8/8 page frame allocator");
+
+    let free_pre = page_frame::with_page_frames(|a| a.free_frames());
+    let total_pre = page_frame::with_page_frames(|a| a.total_frames());
+    info!(
+        "[smoke]   pre: total={} free={} ({:.1} MB)",
+        total_pre,
+        free_pre,
+        (free_pre * page_frame::FRAME_SIZE) as f64 / 1024.0 / 1024.0
+    );
+    assert!(total_pre > 0, "page frame allocator should have usable frames");
+    total += 1;
+
+    // 正路径: alloc → free → 计数回归
+    let f1 = page_frame::alloc_frame().expect("first alloc");
+    assert_eq!(f1 % page_frame::FRAME_SIZE as u64, 0, "frame must be 4KB aligned");
+    total += 1;
+
+    let free_after_one = page_frame::with_page_frames(|a| a.free_frames());
+    assert_eq!(free_after_one, free_pre - 1, "free count should decrement by 1");
+    total += 1;
+
+    let f2 = page_frame::alloc_frame().expect("second alloc");
+    assert_ne!(f1, f2, "two allocs should return distinct frames");
+    total += 1;
+
+    page_frame::free_frame(f1);
+    page_frame::free_frame(f2);
+    let free_after_free = page_frame::with_page_frames(|a| a.free_frames());
+    assert_eq!(free_after_free, free_pre, "free count should return to pre-alloc");
+    total += 1;
+
+    // 双重释放幂等: 不改变 free count
+    page_frame::free_frame(f1);
+    let free_after_double = page_frame::with_page_frames(|a| a.free_frames());
+    assert_eq!(free_after_double, free_pre, "double-free should be no-op");
+    total += 1;
+
+    // 引用防止 lint
     assert!(matches!(FaultKind::SegFault, FaultKind::SegFault));
     let _ = INIT_QUOTA;
     let _: Pid = child_pid; // 类型引用

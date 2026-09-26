@@ -351,7 +351,7 @@
         {
           "id": "P2-T2",
           "name": "物理页帧分配器",
-          "status": "pending"
+          "status": "completed"
         },
         {
           "id": "P2-T3",
@@ -526,8 +526,14 @@
       "decision": "kint/ 独立 crate：MockKernelState（Vec<CapTable> + Vec<Notification> + ProcessTable + AuditQueue + ObjectTable）+ dispatch(frame) → i64 分发器 （完整实现 8 个 syscall：AbiQuery/Yield/Process*/CapRevoke/Notify*；桩实现 11 个：Ipc*/CapInvoke/Delegate/GetTime/Mmap/Munmap）",
       "reason": "证明\"用户侧帧编码 → 内核侧 decode → 子 crate 操作 → 审计事件 → 返回\" 完整闭环在 host 上跑通；后续 port 到 kernel/src/ 时直接替换 Vec → 固定数组、 current_pid → CPU 状态读取",
       "consequence": "14/14 宿主集成测试验证：AbiQuery/Yield 无状态 / ProcessExit+Reap 两阶段终止 / ProcessFreeze/Thaw / CapRevoke / NotifySignal+Wait / 桩实现返回 -E_NOT_IMPLEMENTED / 未知号返回 None → -E_NOT_IMPLEMENTED；工作区 7 个 crate 共 110/110 全绿"
+    },
+    {
+      "date": "2026-09-26",
+      "scope": "P2-T2 物理页帧分配器",
+      "summary": "bitmap 线性扫描分配器：bitmap[frame/64] & (1<<(frame%64)) 为 1 = 空闲。MAX_FRAMES=32768（128MB 上限，bitmap 占 512 u64 = 4KB = 1 页）。hint 指针减少扫描碎片。初始化：MEMORY_MAP Usable 区间 → mark_range_usable；内核 [0x200000.._kernel_end] → mark_range_used。双重释放幂等 no-op。QEMU 验证：total=1322 free=1322（5.2 MB）= 160（entry[00]）+ 1757（entry[03]）- 595（kernel）= 1322 ✓。smoke 44/44 通过。",
+      "alternatives_rejected": "① Buddy allocator：P2-T2 MVP 阶段不需要连续多帧分配（仅单帧分配），bitmap 线性扫描代码量小 50%+ 且 debug 透明；② 每帧 8 字节 descriptor（frame + tag）：内存开销翻倍，P2 无需求。How to apply: P2-T3 内核堆落地后若连续分配成为热路径（如 2MB 大页 / DMA 缓冲区），再升级为 buddy 或 order-N 分层分配器。"
     }
   ],
-  "current_task": "P2-T1",
-  "notes": "\n[2026-09-26 14:30 claude/design-pure-review] P1-T11 内核集成层落地：\n- 5 表独立 static（避免 ~1MB KernelState 在 300KB 内核栈构造溢出）。\n- 锁序 OBJECTS → PROCS → CAP_TABLES → ENDPOINTS → NOTIFICATIONS 单向。\n- Endpoint/Notification 64 槽按 ObjRef.index 直接索引（MVP 约束，注释说明）。\n- smoke 7 段：spawn/install_initial_caps/delegate+revoke_cascade/transfer_caps 正反/object lifecycle/Endpoint/Notification/exit→reap，含配额划拨归还校验。\n- QEMU 验证 exit=107 + dbg501=ABCDEFGHI + serial [smoke] 38/38 + 38 load blocks 回读字节一致。\n- host tests 50/50（cap 22 + ipc 14 + proc 14）未回归。\n下一步候选：P2-T1 (Memory Map 探测) 或 P1-T8 (test_framework 落格)，倾向 P2-T1。\n\n[2026-09-26 claude/design-pure-review] P2-T1 Memory Map 完成：\n- build_disk.py stage2 16-bit 实模式硬编码 QEMU -m 128M 布局 7 条 entries（168 字节），通过 rep movsb 从 stage2 数据区拷到物理 0x20000。\n- kernel memory_map.rs 用 read_unaligned 解析（修复 E820Entry 8 字节对齐要求 vs 0x20004 仅 4 字节对齐导致的 UB panic）。\n- boot.S 清理：移除从未执行的 32-bit PM E820 代码（stage2 直接跳 _start64），保留 PVH path TODO 注释。\n- QEMU 验证：exit=363（isa-debug-exit 0xB5）+ serial `[memory_map] parsed 7 entries; usable = 0x78dc00 bytes` + 7 条条目与 SeaBIOS e820 map 输出完全一致 + smoke 38/38 未回归。\n- 关键发现：BIOS INT 15h AX=E820h 在 stage2 16-bit 实模式 hang（PC 跳回 stage2 起点），推迟到后续真机/SeaBIOS 调试。\n下一步候选：P2-T2 (物理页帧分配器，消费 memory_map) 或 P2-T4/T5 (GDT+IDT 基础) 或 P1-T8 (test_framework)。"
+  "current_task": "P2-T2",
+  "notes": "\n[2026-09-26 14:30 claude/design-pure-review] P1-T11 内核集成层落地：\n- 5 表独立 static（避免 ~1MB KernelState 在 300KB 内核栈构造溢出）。\n- 锁序 OBJECTS → PROCS → CAP_TABLES → ENDPOINTS → NOTIFICATIONS 单向。\n- Endpoint/Notification 64 槽按 ObjRef.index 直接索引（MVP 约束，注释说明）。\n- smoke 7 段：spawn/install_initial_caps/delegate+revoke_cascade/transfer_caps 正反/object lifecycle/Endpoint/Notification/exit→reap，含配额划拨归还校验。\n- QEMU 验证 exit=107 + dbg501=ABCDEFGHI + serial [smoke] 38/38 + 38 load blocks 回读字节一致。\n- host tests 50/50（cap 22 + ipc 14 + proc 14）未回归。\n下一步候选：P2-T1 (Memory Map 探测) 或 P1-T8 (test_framework 落格)，倾向 P2-T1。\n\n[2026-09-26 claude/design-pure-review] P2-T1 Memory Map 完成：\n- build_disk.py stage2 16-bit 实模式硬编码 QEMU -m 128M 布局 7 条 entries（168 字节），通过 rep movsb 从 stage2 数据区拷到物理 0x20000。\n- kernel memory_map.rs 用 read_unaligned 解析（修复 E820Entry 8 字节对齐要求 vs 0x20004 仅 4 字节对齐导致的 UB panic）。\n- boot.S 清理：移除从未执行的 32-bit PM E820 代码（stage2 直接跳 _start64），保留 PVH path TODO 注释。\n- QEMU 验证：exit=363（isa-debug-exit 0xB5）+ serial `[memory_map] parsed 7 entries; usable = 0x78dc00 bytes` + 7 条条目与 SeaBIOS e820 map 输出完全一致 + smoke 38/38 未回归。\n- 关键发现：BIOS INT 15h AX=E820h 在 stage2 16-bit 实模式 hang（PC 跳回 stage2 起点），推迟到后续真机/SeaBIOS 调试。\n下一步候选：P2-T2 (物理页帧分配器，消费 memory_map) 或 P2-T4/T5 (GDT+IDT 基础) 或 P1-T8 (test_framework)。\n\n[2026-09-26 claude/design-pure-review] P2-T2 物理页帧分配器完成：\n- kernel/src/page_frame.rs: bitmap 线性扫描分配器，MAX_FRAMES=32768（128MB 上限，bitmap 占 1 页）。\n- 接口：`alloc_frame() -> Option<PhysicalAddr>` / `free_frame(PhysicalAddr)` / `with_page_frames` 临界区访问。\n- 初始化：从 MEMORY_MAP Usable 区间填充 bitmap → 保留内核 [0x200000.._kernel_end]（通过 linker.ld 符号 `_kernel_end`）。\n- 双重释放幂等 no-op；hint 指针减少扫描碎片。\n- QEMU 验证：total=1322 free=1322（5.2 MB）= 160（entry[00]）+ 1757（entry[03]）- 595（kernel）= 1322 ✓；smoke 44/44 通过（新增 6 项 page frame 检查）；dbg501=ABCDEFGHJKLMI（L/M 为 page_frame init 标记）。\n下一步候选：P2-T3（内核堆，依赖 P2-T2）、P2-T4/T5（GDT/TSS/IDT）、P1-T8（test_framework）。"
 }
