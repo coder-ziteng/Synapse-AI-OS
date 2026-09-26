@@ -39,7 +39,7 @@
 │  ipc/   Endpoint(同步) · Notification(异步) · 单拷贝路径    │
 │  proc/  进程表 · Agent 注册表 · spawn/exit/reap            │
 │  sched/ TCB 状态机 · runqueue · sleep 队列 · FR8 核算 · FR10 频率计数│
-│  kernel/ 引导链 · 页帧/堆 · GDT/TSS/IDT · PIC/PIT · TSC · kthread · paging/AS│
+│  kernel/ 引导链 · 页帧/堆 · GDT/TSS/IDT · PIC/PIT · TSC · kthread · paging/AS/VMA│
 │  hal/   硬件抽象 Trait (Mmu/Interrupt/Timer/Serial)        │
 │  audit/ 审计事件流（骨架）                                 │
 └─────────────────────────────────────────────────────────┘
@@ -57,7 +57,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 | P1 | 裸机点亮与工程基建（三级 boot 链 · UART · log/panic 回溯 · CI · 测试框架） | ✅ 完成 (11/11) |
 | P2 | 内存 / 中断 / 异常（E820 · 页帧分配器 · 内核堆 · GDT/TSS/IST · IDT · PIC/PIT · TSC 校准） | ✅ 完成 (7/7) |
 | P3 | 多任务与调度（sched/ 纯逻辑 crate · switch_to 汇编 · 抢占模型 · Mutex · FR8/FR10 原语） | 🔄 进行中 (5/8)：T1 sched crate ✅ · T2 FR8 核算 ✅ · T3 FR10 频率计数 ✅ · T4 kthread 基建 ✅ 真机 27/27 · T5 switch_to 汇编 ✅ 真机双线程往返 9/9 |
-| P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 🔄 进行中 (2/12)：已分解 12 任务（T1 target+ELF → T12 PCID+收尾）· T1 ✅ 用户态 target json + 基址 1GB 链接脚本 + 第一个静态 ELF（xtask user + ELF 头断言；原 0x400000 与内核恒等映射冲突改址，见 Doc 02 §3.1 UPDATE）· T2 ✅ 内核 4KB 页表 + AddressSpace（CR3 切换/用户页读写/#PF 期望故障恢复，真机 15/15；顺带修复 page_frame 低 1MB 保留 + idt trampoline RIP 偏移两个潜伏 bug）（独立 worktree d:/ai-os-p4，分支 claude/p4-userspace） |
+| P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 🔄 进行中 (3/12)：已分解 12 任务（T1 target+ELF → T12 PCID+收尾）· T1 ✅ 用户态 target json + 基址 1GB 链接脚本 + 第一个静态 ELF · T2 ✅ 内核 4KB 页表 + AddressSpace（CR3 切换/用户页读写/#PF 期望故障恢复，真机 15/15）· T3 ✅ VMA 表 + 按需分页缺页路径（synapse-vma 纯逻辑 crate 20/20 宿主测 + 内核 handle_user_fault 接 idt#PF 真机 14/14：VMA 注册/需求映射/权限违例 kill/未注册 kill/NULL guard/FR8 归零；顺带强化 #PF trampoline 保存 caller-saved GPR 让 faulting 指令正确重执）（独立 worktree d:/ai-os-p4，分支 claude/p4-userspace） |
 | P4.5 | PCI 枚举与中断用户态化 | 未开始 |
 | P5 | 外交工具与 Agent 雏形 | 未开始 |
 | P6 | SMP / 存储栈 / IOMMU / 本地推理 / 跨 OS 外交 | 远期 |
@@ -97,7 +97,7 @@ python kernel/tests/run_tests.py      # QEMU 测试套件
 
 | 路径 | 说明 |
 | --- | --- |
-| `kernel/` | 内核本体（引导链 boot.S、内存、中断、异常、集成层、kthread 栈/CpuContext、paging 4KB 页表/AddressSpace、smoke） |
+| `kernel/` | 内核本体（引导链 boot.S、内存、中断、异常、集成层、kthread 栈/CpuContext、paging 4KB 页表/AddressSpace、demand paging + kill 骨架、smoke） |
 | `cap/` `ipc/` `proc/` `sched/` | 纯逻辑 crate：Capability / IPC / 进程 / 调度（零 unsafe，宿主可测） |
 | `hal/` | 硬件抽象 Trait + `cfg(test)` fake 实现 |
 | `abi/` | 用户态 ABI（syscall 号表，18 个，设计文档 02 §4.2） |

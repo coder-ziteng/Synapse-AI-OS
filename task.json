@@ -655,7 +655,7 @@
         {
           "id": "P4-T3",
           "name": "VMA 区域表 + 按需分页缺页路径",
-          "status": "pending",
+          "status": "done",
           "deliverables": [
             "UserMemoryRegion 表（start/end/flags[R/W/X/GROWABLE]/kind[Code/Data/Stack/Heap/Mapped]，Doc 02 §3.3）——纯逻辑部分宿主可测",
             "#PF handler 接 VMA 查表（读 CR2）：命中合法 region → page_frame 分配 + 映射 + 清零；未命中 → 进程 fault（杀进程路径骨架）",
@@ -668,7 +668,8 @@
           "deps": [
             "P4-T2"
           ],
-          "estimate": "1-2 窗口"
+          "estimate": "1-2 窗口",
+          "actual_approach": "synapse-vma 纯逻辑 crate（vma/src/{lib,table}.rs，零依赖 #![deny(unsafe_code)]，与 cap/ipc/proc/sched 同一纪律）：RegionFlags 手动位组合 R/W/X/GROWABLE（const fn contains/union），RegionKind=Code|Data|Stack|Heap|Mapped，UserMemoryRegion 含 validate/contains/overlaps，RegionTable 固定 [Option<UserMemoryRegion>; MAX_REGIONS=32] + insert/lookup/remove/grow/clear/iter。grow 规则：GROWABLE 必需 + 单调延展（new_start<=old.start && new_end>=old.end 否则 Shrink）+ 不与其他区域重叠。NULL_GUARD_END=0x1000（Doc 02 §3.1）。宿主 20/20 单测全绿。内核 glue（kernel/src/paging.rs P4-T3 节）：DEMAND_TABLE 单例（接 T5+ proc 改 per-process），DEMAND_AS/KILL_SINK_RIP/KILL_COUNT 等 statics。handle_user_fault(cr2, error_code, ip) → u64：① 路由（ring-0 + 内核区 → 0 panic；cr2<NULL_GUARD_END 或出窗 → kill guard）② VMA lookup（短临界区，copy 后立即 drop 锁避免 logging in lock）③ 权限校验（write/fetch/read ↔ RegionFlags，命中非法 → kill_path）④ 按需映射（zeroed_frame + AddressSpace::map_page 按 flags 设 US/W/NX，AsMapped/OutOfFrames 处理，OutOfFrames 返 0 走 panic）⑤ 返回原 ip = 重执 faulting 指令。kill_path(cr2, err, ip, reason)：KILL_COUNT++ + CR2 记录 + 单次 sink 消费；无 sink 时返 0 panic。probe_expect_kill(addr)（读）与 probe_expect_kill_write(addr)（写）双原语，后者 ring-0 不触发（supervisor 忽略 R/W 位）。idt#PF trampoline 同步强化：入口 push 9 caller-saved（rax/rcx/rdx/rsi/rdi/r8-r11），inner 返回后 pop 复原；resume RIP 借 callee-saved r12 跨 pop 传递——原实现让 inner clobber rax，faulting 指令 `mov rax, [rax]` 重执读到 faulting 指令自身字节。vma_smoke 真机 14/14：NULL 守卫/未对齐拒绝 → 注册 code+data 双区 → AS2 激活/需求武装 → code 首次读零页/多页同区需求映射/data 写权限按需/权限违例直接策略 kill/未注册地址 #PF kill/已映射页无 false fault/用户态 NULL kill/ring-0 NULL 返 0 panic/CR3 恢复/FR8 归零。判定：QEMU exit 363 + 62/62+27/27+9/9+15/15+14/14 smoke + markers …Iabcdefgh；QEMU 测试套件 4/4；宿主 20/20 vma + 全 workspace 145/145 绿；零警告。"
         },
         {
           "id": "P4-T4",
@@ -1126,6 +1127,16 @@
       "date": "2026-09-27",
       "scope": "内核 bug 修复：idt.rs #DF/#GP/#PF trampoline 读 RIP 偏移错误（P4-T2 顺带）",
       "decision": "三个 trampoline 的 `mov rdi, [rsp+16]` 改为 `[rsp+8]`。CPU 压栈序 [SS|RSP|RFLAGS|CS|RIP|err]：err=+0、RIP=+8、CS=+16——原实现把 CS 当 RIP 传给 inner 打日志。既有证据：P3-T5 调试期 #DF 日志 'ip=0x8' 即内核 CS 选择子而非真实故障地址（当时靠 #BP 风暴旁证定位）。#PF trampoline 同时重写支持 expected-fault 恢复：page_fault_inner 签名 -> ! 改 -> u64（返回恢复 RIP，非期望缺页照旧 panic 发散），trampoline 保存原 rsp → call → test rax 防御 → 还原 rsp → 覆写 [frame+8] = resume → 弃 err → iretq。真机 15/15 含两次 #PF 捕获-恢复往返验证。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4-T3 实测发现：x86-64 ring-0 忽略叶级 R/W 位（supervisor 访问永远可写）",
+      "decision": "原 vma_smoke 设计含 'write-to-RX probe_expect_kill_write(code_base)' 期望 #PF(P=1|W=1) → kill 骨架。真机验证：handle_user_fault 完全未被调用，kill_count=0。AMD64 Vol.2 §4.5：'For supervisor-mode accesses, the R/W bit is ignored (always writable)'——ring-0 写RX 页根本不 fault。修复：① 把该探测换成 handle_user_fault 直接调用（error_code=P=1|W=1 + sink armed，验证策略路径）；② probe_expect_kill_write 加 #[allow(dead_code)] 与文档说明（'仅供 T5+ ring-3 smoke 使用，ring-0 不可触发'）；③ Doc 02 §3.3 UPDATE 同步记录此约束。影响：未来 ring-3 syscall smoke 设计需知此限制，权限违例 kill 测试须在 ring-3 跑或走直接调用。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4-T3 内核 bug 修复：#PF trampoline 让 inner clobber caller-saved GPR，faulting 指令以 rax 作地址操作数时重执读到指令自身字节",
+      "decision": "vma_smoke 首次真机跑：需求读 code_base 时 #PF → handler 正确分配帧+零页+映射 → v0 应为 0 实际为 0xf9f8858948008b48（解码 mov rax,[rax]; mov [rbp-0x608],rax 字节，正是 read_volatile 自身指令+下一指令）。根因：x86-64 #PF CPU 帧不含 GPR（仅 SS/RSP/RFLAGS/CS/RIP/err），inner (extern \"C\") 按 ABI 自由破坏 caller-saved（rax/rcx/rdx/rsi/rdi/r8-r11）。原 trampoline：mov rdi/rsi ← ip/err → call inner → pop rdi/rsi 漏了 rax 等 → inner 返回值（rax=resume_rip）留在 rax → iretq 重执 `mov rax, [rax]` 时 rax 已非原值。修复：trampoline 入口 push r11/r10/r9/r8/rdi/rsi/rdx/rcx/rax（9 个 caller-saved），对齐全栈后 call inner，inner 返回后 mov r12,rax（借 callee-saved 跨 pop 传递 resume），pop 9 GPR 复原 faulting 上下文，mov [rsp+8],r12 改写 RIP，add rsp,8 弃 err，iretq。panic 路径亦同步清理 GPR 再 ud2。影响：所有 #PF resume 路径（expected-fault / demand paging / kill sink）现在能正确重执任何含 rax 等作基址的 faulting 指令。P4-T2 的 probe_expect_pf 不受影响（其 resume=lea 目标不依赖 rax）。"
     }
   ],
   "current_task": "P3-T6",
