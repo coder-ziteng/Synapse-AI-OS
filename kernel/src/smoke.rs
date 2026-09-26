@@ -464,7 +464,7 @@ pub fn run_integration_smoke(refs: &BootstrapRefs) {
     // ============================================================
     // 11. IDT + 异常处理: sidt 验证 + int3 (#BP) 触发验证
     // ============================================================
-    info!("[smoke] 11/11 IDT + 异常处理");
+    info!("[smoke] 11/13 IDT + 异常处理");
 
     // IDT base 应非零（lidt 已执行）
     let idt_base = crate::idt::current_idt_base();
@@ -485,7 +485,7 @@ pub fn run_integration_smoke(refs: &BootstrapRefs) {
     // ============================================================
     // 12. PIC + PIT: 定时器中断实际触发验证（tick 计数递增）
     // ============================================================
-    info!("[smoke] 12/12 PIC/PIT 定时器中断");
+    info!("[smoke] 12/13 PIC/PIT 定时器中断");
 
     // 此时中断已开启（_start64 中 pic::enable_irq(0) + interrupts::enable() 已执行），
     // PIT 以 100Hz 触发 IRQ 0，每次中断让 TICK_COUNT += 1。
@@ -502,6 +502,66 @@ pub fn run_integration_smoke(refs: &BootstrapRefs) {
     info!(
         "[smoke]   tick: {} → {} (+{})",
         ticks_before, ticks_after, ticks_after - ticks_before
+    );
+    total += 1;
+
+    // ============================================================
+    // 13. 时钟基准: TSC ↔ PIT 校准结果 + 单调时钟交叉验证
+    // ============================================================
+    info!("[smoke] 13/13 时钟基准 (TSC 校准 + 单调时钟)");
+
+    // 13a. 校准结果应在合理区间（QEMU TCG 下 TSC 通常为数百 MHz ~ 数 GHz）
+    let tsc_hz = crate::clock::tsc_hz();
+    assert!(
+        tsc_hz >= 50_000_000 && tsc_hz <= 20_000_000_000,
+        "calibrated TSC freq out of sane range [50MHz, 20GHz]: {} Hz",
+        tsc_hz
+    );
+    total += 1;
+
+    // 13b. rdtsc 单调递增（连续两次读取）
+    let t0 = crate::clock::rdtsc();
+    let t1 = crate::clock::rdtsc();
+    assert!(t1 > t0, "rdtsc should be strictly increasing: {} -> {}", t0, t1);
+    total += 1;
+
+    // 13c/13d. busy_wait_ms(100) 期间，PIT 毫秒钟与 TSC 单调钟都应前进 ~100ms
+    let pit_ms_before = crate::pit::milliseconds();
+    let mono_ms_before = crate::clock::monotonic_ms();
+    crate::pit::busy_wait_ms(100);
+    let pit_ms_delta = crate::pit::milliseconds() - pit_ms_before;
+    let mono_ms_delta = crate::clock::monotonic_ms() - mono_ms_before;
+
+    // PIT 钟：busy_wait 以 10ms 粒度轮询，delta 应恰为 100~120
+    assert!(
+        pit_ms_delta >= 100 && pit_ms_delta <= 120,
+        "pit milliseconds should advance ~100ms during busy_wait_ms(100), got {}",
+        pit_ms_delta
+    );
+    total += 1;
+
+    // TSC 单调钟：与 PIT 同源校准，放宽到 50~200ms（TCG 虚拟时钟抖动余量）
+    assert!(
+        mono_ms_delta >= 50 && mono_ms_delta <= 200,
+        "monotonic_ms should advance ~100ms during busy_wait_ms(100), got {}",
+        mono_ms_delta
+    );
+    total += 1;
+
+    // 13e. 交叉一致性：两个时钟对同一等待窗口的测量差 ≤ 25% + 10ms 裕量
+    let diff = if mono_ms_delta > pit_ms_delta {
+        mono_ms_delta - pit_ms_delta
+    } else {
+        pit_ms_delta - mono_ms_delta
+    };
+    assert!(
+        diff <= pit_ms_delta / 4 + 10,
+        "TSC monotonic clock and PIT clock disagree: mono={}ms pit={}ms (diff={}ms)",
+        mono_ms_delta, pit_ms_delta, diff
+    );
+    info!(
+        "[smoke]   clock cross-check: pit={}ms, tsc-monotonic={}ms (tsc_hz={})",
+        pit_ms_delta, mono_ms_delta, tsc_hz
     );
     total += 1;
 

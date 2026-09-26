@@ -30,6 +30,7 @@ pub mod gdt;
 pub mod idt;
 pub mod pic;
 pub mod pit;
+pub mod clock;
 pub mod bootstrap;
 pub mod smoke;
 
@@ -200,6 +201,11 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'W');
     x86_64::instructions::interrupts::enable(); // 开启中断
     boot_marker(b'X');
+
+    // P2-T7 时钟基准：TSC ↔ PIT 交叉校准（需中断开启 + PIT 已跑，阻塞 ~100ms）
+    boot_marker(b'Y');
+    clock::calibrate();
+    boot_marker(b'Z');
 
     smoke::run_integration_smoke(&refs);
     boot_marker(b'I');

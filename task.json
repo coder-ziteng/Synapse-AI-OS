@@ -402,7 +402,14 @@
         {
           "id": "P2-T7",
           "name": "定时器频率校准",
-          "status": "pending"
+          "status": "completed",
+          "actual_approach": "kernel/src/clock.rs 新增时钟基准模块：(1) TSC ↔ PIT 交叉校准：采样点对 (rdtsc, PIT 累计输入时钟计数)，累计计数 = tick_count×divisor + (divisor−latched_counter)，采样在 without_interrupts 临界区内完成保证 latch/ticks 读取一致；(2) 累积式测量窗口（≥10 tick ≈ 100ms）：QEMU TCG 下 IRQ 0 投递可延迟到 TB 边界，counter 已重载而 TICK_COUNT 未跟上时累计计数瞬时倒退 ~divisor，端点 wrapping_sub 会放大成 ~u64::MAX 假窗口（首版实测触发 clock.rs:112 乘法溢出 panic）；修复为逐段累加且仅消费 cnt 前进的区间，倒退时不更新基线等 tick 补齐——tsc 单调，无系统性偏差；(3) 校准结果合理性防线 assert [1MHz, 18GHz]，上限同时保证 monotonic_ns 的 (tsc%hz)×1e9 不溢出 u64；(4) monotonic_ns/us/ms 用 (tsc/hz)×mult + (tsc%hz)×mult/hz 拆分避免中间溢出；(5) pit.rs milliseconds() 修正：原 1000/DEFAULT_FREQUENCY 硬编码 10ms/tick，改用实际配置频率 ticks×1000/freq；(6) main.rs 启动序列 marker Y/Z 接入 clock::calibrate()（中断开启后、smoke 前）；(7) smoke §13 五项：tsc_hz∈[50MHz,20GHz]、rdtsc 严格递增、busy_wait_ms(100) 期间 PIT 钟前进 100~120ms、TSC 单调钟前进 50~200ms、两钟交叉偏差 ≤25%+10ms。QEMU 验证：tsc_hz=2696957715 (~2696 MHz)，window=119310 PIT counts (~99ms)，cross-check pit=100ms vs tsc-monotonic=98ms（偏差 2%），dbg501=ABCDEFGHJKLMNOPQRSTUVWXYZI，smoke 62/62 全通过（57→62，+5 时钟项），exit=363。host cargo test 115 passed / 0 failed。",
+          "files": [
+            "kernel/src/clock.rs",
+            "kernel/src/pit.rs",
+            "kernel/src/main.rs",
+            "kernel/src/smoke.rs"
+          ]
         }
       ]
     }
@@ -595,6 +602,12 @@
       "scope": "P1-T8 交接项收尾 — cargo runner 接线 + main.rs #[cfg(test)] 交付项处置",
       "decision": "另一窗口释放 .cargo/config.toml 后接线 [target.x86_64-bootloader] runner = python tests/qemu_test_runner.py（a323fa0，验证 config 解析正常、管线 4/4 通过）；nightly 双 core E0152 阻塞构建期，runner 暂不被 cargo test 触达，toolchain 修复后自动生效。main.rs #[cfg(test)] 交付项标记 superseded：self-contained 测试设计 + kernel/Cargo.toml [[bin]] test=false 下 bin 永不以 test 模式编译，cfg(test) 门控为死代码；且 main.rs 正被另一窗口 P2-T7（clock 校准）占用，不做编辑。",
       "alternatives_rejected": "在 main.rs 加 #[cfg(not(test))] 门控（global_allocator/panic_handler/C 运行时符号）：test=false 下不可达，纯噪声，且与 P2-T7 在途改动冲突，弃。"
+    },
+    {
+      "date": "2026-09-26",
+      "scope": "P2-T7 定时器频率校准（TSC ↔ PIT）",
+      "decision": "校准源选 PIT ch0 tick+latch 累积测量（100ms 窗口），TSC 频率 = Δtsc×1193182÷Δpit_counts；采样对 (tsc, ticks×divisor+(divisor−counter)) 在 cli 临界区内取，跨区间用累积式（只消费前进区间，倒退跳过不更新基线）容忍 QEMU TCG 的 IRQ 投递延迟；结果存 AtomicU64，monotonic_ns/us/ms 基于 rdtsc 换算，供 Phase 3 时间片与 Phase 4 gettime 使用。",
+      "alternatives_rejected": "① 端点两次采样直接相减（wrapping_sub）：TCG 下 IRQ 0 投递滞后使 counter 重载而 TICK_COUNT 未 +1，累计计数瞬时倒退，wrapping 放大成 ~u64::MAX 假窗口 → 乘法溢出 panic（实测踩中，boot 挂死在 panic hlt 循环）；② PIT ch2 one-shot 轮询：需操作 port 0x61 gate 位且 ch2 无中断，收益不明显；③ APIC timer 反推：Phase 2 尚未迁移 APIC；④ RTC/CMOS：粒度太粗；⑤ u128 中间量：需 __udivti3，改用 (tsc/hz)×mult+(tsc%hz)×mult/hz 拆分 + 校准上限 18GHz 防线即可保证 u64 不溢出。"
     }
   ],
   "current_task": "P1-T8",

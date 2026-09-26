@@ -129,11 +129,18 @@ pub fn tick_count() -> u64 {
     TICK_COUNT.load(Ordering::Relaxed)
 }
 
-/// 获取自启动以来的毫秒数
+/// 获取自启动以来的毫秒数（基于**实际配置频率**，而非硬编码默认值）。
+///
+/// P2-T7 修正：原实现用 `1000 / DEFAULT_FREQUENCY` 硬编码 10ms/tick，
+/// 若 `init()` 传入非默认频率（如 1000Hz）换算即错误。
 pub fn milliseconds() -> u64 {
     let ticks = tick_count();
-    let ms_per_tick = 1000 / DEFAULT_FREQUENCY;
-    ticks * ms_per_tick as u64
+    // SAFETY: 只读 PIT 配置字段；初始化前 frequency==0，此时返回 0。
+    let freq = unsafe { frequency() } as u64;
+    if freq == 0 {
+        return 0;
+    }
+    ticks * 1000 / freq
 }
 
 /// 忙等待指定毫秒
