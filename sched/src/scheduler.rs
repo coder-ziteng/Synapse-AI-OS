@@ -51,6 +51,8 @@ pub struct Scheduler {
     total_cpu: u64,
     /// per-process 内存页账本（FR8 内存维度）。
     ledger: PageLedger,
+    /// per-process syscall/IPC 频率表（FR10 行为围栏数据源）。
+    rate: crate::rate::RateTable,
 }
 
 impl Scheduler {
@@ -72,6 +74,7 @@ impl Scheduler {
             switch_count: 0,
             total_cpu: 0,
             ledger: PageLedger::new(),
+            rate: crate::rate::RateTable::new(),
         }
     }
 
@@ -143,8 +146,7 @@ impl Scheduler {
     /// 并检查当前线程时间片。返回本次唤醒个数。
     pub fn tick(&mut self, now: u64, woken_out: &mut [ThreadId]) -> usize {
         let n = self.sq.wake_due(now, woken_out);
-        for i in 0..n {
-            let id = woken_out[i];
+        for &id in woken_out.iter().take(n) {
             // Sleeping → Ready（状态机保证合法；失败即内部 bug，忽略继续）
             if self.threads.transition(id, ThreadState::Ready).is_ok() {
                 if let Ok(t) = self.threads.get(id) {
@@ -242,7 +244,7 @@ impl Scheduler {
         // 注：Running 线程不在就绪队列中，peek 即"换出它之后的下一个"。
         if let Some(c) = cur {
             if let Ok(t) = self.threads.get(c) {
-                let preempted = self.rq.best_priority().map_or(false, |p| p < t.priority.0);
+                let preempted = self.rq.best_priority().is_some_and(|p| p < t.priority.0);
                 if !preempted && !self.need_resched && now < self.slice_deadline {
                     return SwitchDecision::KeepCurrent;
                 }
@@ -373,6 +375,17 @@ impl Scheduler {
     /// 进程 exit 路径调用 `drain` 取泄漏数供审计）。
     pub fn ledger_mut(&mut self) -> &mut PageLedger {
         &mut self.ledger
+    }
+
+    /// 频率表只读访问（FR10：监督树轮询 `is_over` / 审计读 `counts_of`）。
+    pub fn rate(&self) -> &crate::rate::RateTable {
+        &self.rate
+    }
+
+    /// 频率表可写访问（syscall 入口 / IPC send 路径 `record_*`；
+    /// spawn 路径 `register`、exit 路径 `unregister`）。
+    pub fn rate_mut(&mut self) -> &mut crate::rate::RateTable {
+        &mut self.rate
     }
 
     // ====================================================================
@@ -623,6 +636,47 @@ mod tests {
         s.reap(a).unwrap();
         // reap 后旧 ID 不可记账（total 保留历史累计，供审计对账）
         assert_eq!(s.account_cpu(a, 1), Err(SchedError::NotFound));
+    }
+
+    #[test]
+    fn frozen_thread_never_scheduled_thaw_keeps_priority() {
+        let mut s = Scheduler::new();
+        let hi = s.spawn(0, 0).unwrap(); // 高优先级
+        let lo = s.spawn(5, 0).unwrap();
+        run_schedule(&mut s, 0); // hi running
+        assert_eq!(s.current(), Some(hi));
+        s.freeze(hi).unwrap(); // 冻结当前线程 → 摘出 CPU + 出队
+        assert_eq!(s.ready_count(), 1); // 只剩 lo
+        assert_eq!(run_schedule(&mut s, 0), SwitchDecision::Switch { prev: None, next: lo });
+        // 反复 tick + schedule：冻结的 hi 永不入选
+        for now in (2..20).step_by(2) {
+            s.tick(now, &mut []);
+            let d = s.schedule(now);
+            assert!(matches!(d, SwitchDecision::KeepCurrent)); // 只有 lo，无更优
+            assert_eq!(s.state_of(hi), Ok(ThreadState::Frozen));
+        }
+        assert_eq!(s.current(), Some(lo));
+        s.thaw(hi).unwrap(); // 解冻 → Ready，原优先级 0 恢复
+        assert_eq!(s.state_of(hi), Ok(ThreadState::Ready));
+        assert_eq!(s.thread(hi).unwrap().priority.0, 0);
+        assert!(s.need_resched()); // 高优先级回队 → 请求抢占
+        assert_eq!(run_schedule(&mut s, 20), SwitchDecision::Switch { prev: Some(lo), next: hi });
+    }
+
+    #[test]
+    fn rate_table_passthrough() {
+        let mut s = Scheduler::new();
+        let _a = s.spawn(1, 9).unwrap(); // owner_pid=9
+        s.rate_mut().register(9, 100, 2, 2).unwrap();
+        s.rate_mut().record_syscall(9, 0).unwrap();
+        s.rate_mut().record_syscall(9, 1).unwrap();
+        assert!(!s.rate().is_over(9));
+        s.rate_mut().record_syscall(9, 2).unwrap(); // 第 3 次 > 限额 2
+        assert!(s.rate().is_over(9)); // 集成层据此可 freeze / 写审计
+        s.rate_mut().clear_over(9);
+        assert!(!s.rate().is_over(9));
+        s.rate_mut().unregister(9).unwrap(); // exit 路径清理
+        assert_eq!(s.rate().live_count(), 0);
     }
 
     #[test]

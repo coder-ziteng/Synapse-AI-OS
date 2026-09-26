@@ -82,7 +82,7 @@ impl PageLedger {
         let idx = self
             .entries
             .iter()
-            .position(|e| e.map_or(false, |e| e.pid == pid))
+            .position(|e| e.is_some_and(|e| e.pid == pid))
             .ok_or(SchedError::NotFound)?;
         let leaked = self.entries[idx].map(|e| e.pages).unwrap_or(0);
         self.entries[idx] = None;

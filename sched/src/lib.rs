@@ -11,6 +11,7 @@
 //! | [`runqueue`] | `RunQueue`：NQ 级优先级位图 + 每级 FIFO 环（同级 Round-Robin） |
 //! | [`sleepq`] | `SleepQueue`：deadline 队列，`pop_due(now)` 按最早到期序唤醒 |
 //! | [`accounting`] | FR8 资源核算：`PageLedger` per-process 内存页账本（CPU 时间在 `Scheduler::account_cpu`） |
+//! | [`rate`] | FR10 频率计数：`RateTable` per-process syscall/IPC 固定窗口计数 + 粘性超限标志 |
 //! | [`scheduler`] | `Scheduler` 门面：spawn/block/unblock/sleep/wake/freeze/thaw/exit/reap + tick 时间片 + `schedule()` 决策 |
 //!
 //! ## 抢占模型（需求评审修订）
@@ -32,6 +33,7 @@
 #![warn(missing_docs)]
 
 pub mod accounting;
+pub mod rate;
 pub mod runqueue;
 pub mod scheduler;
 pub mod sleepq;
@@ -39,6 +41,7 @@ pub mod tcb;
 pub mod types;
 
 pub use accounting::{PageLedger, MAX_PROC_LEDGERS};
+pub use rate::{RateTable, DEFAULT_IPC_LIMIT, DEFAULT_RATE_WINDOW, DEFAULT_SYSCALL_LIMIT, MAX_RATE_SLOTS};
 pub use runqueue::RunQueue;
 pub use scheduler::{Scheduler, SwitchDecision, DEFAULT_TIME_SLICE};
 pub use sleepq::SleepQueue;

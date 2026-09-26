@@ -171,8 +171,8 @@ mod tests {
 
     #[test]
     fn context_slot_size_fits_callee_saved() {
-        // rbx rbp r12 r13 r14 r15 rsp rip = 8 ≤ CTX_WORDS
-        assert!(CTX_WORDS >= 8);
+        // rbx rbp r12 r13 r14 r15 rsp rip = 8 ≤ CTX_WORDS（编译期断言）
+        const _: () = assert!(CTX_WORDS >= 8);
         assert_eq!(core::mem::size_of::<ContextSlot>(), CTX_WORDS * 8);
     }
 }
