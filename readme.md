@@ -123,7 +123,7 @@ python kernel/tests/run_tests.py      # QEMU 测试套件
 
 ## 7. 协作与贡献
 
-本项目由多个并行开发窗口（人类 + AI Agent）协作开发，核心约定：
+本项目由紫藤（陈朕）带领多个AI Agent协作开发，核心约定：
 
 1. **`task.json` 是看板唯一事实来源** — 修改需持 `.task.lock`（原子创建，用完即释放），
    decision_log 只追加不改写；每窗口独立 git 分支。
