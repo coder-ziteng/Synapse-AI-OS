@@ -13,6 +13,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 
@@ -22,6 +24,8 @@ pub mod sync;
 pub mod kstate;
 pub mod memory_map;
 pub mod page_frame;
+pub mod heap;
+pub mod gdt;
 pub mod bootstrap;
 pub mod smoke;
 
@@ -76,6 +80,31 @@ pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
         options(preserves_flags, nostack),
     );
     result
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
+    let mut len = 0;
+    while *s.add(len) != 0 {
+        len += 1;
+    }
+    len
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn memmove(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
+    if (d as usize) < (s as usize) || (d as usize) >= (s as usize).wrapping_add(n) {
+        // 不重叠或 d 在 s 之前：正向拷贝
+        memcpy(d, s, n)
+    } else {
+        // 重叠且 d 在 s 之后：反向拷贝
+        let mut i = n;
+        while i > 0 {
+            i -= 1;
+            *d.add(i) = *s.add(i);
+        }
+        d
+    }
 }
 
 /// 引导插桩：向 debugcon 0x501 写一个字节（定位启动崩溃点用，P1 收尾后可删）。
@@ -140,6 +169,16 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'L');
     page_frame::init_page_frame_allocator();
     boot_marker(b'M');
+
+    // P2-T3 内核堆：基于 page_frame 的 first-fit 分配器（1MB 池）
+    boot_marker(b'N');
+    heap::init_heap(256); // 256 页 = 1MB
+    boot_marker(b'O');
+
+    // P2-T4 GDT/TSS：运行时 GDT（含 ring-3 预留 + TSS）+ IST1=double fault 栈
+    boot_marker(b'P');
+    let _gdt_sels = unsafe { gdt::init_gdt_tss() };
+    boot_marker(b'Q');
 
     smoke::run_integration_smoke(&refs);
     boot_marker(b'I');

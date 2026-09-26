@@ -116,6 +116,61 @@ impl PageFrameAllocator {
         None
     }
 
+    /// 分配 `count` 个连续物理页帧（4KB 对齐）。
+    ///
+    /// 返回起始帧的物理地址。`None` 表示无法找到足够的连续帧。
+    /// MVP 用途：内核堆需要连续物理内存。
+    pub fn alloc_contiguous_frames(&mut self, count: usize) -> Option<PhysicalAddr> {
+        if count == 0 {
+            return None;
+        }
+        if self.used + count > self.total {
+            return None;
+        }
+
+        // 扫描 bitmap 寻找 count 个连续的 1（空闲帧）
+        let mut start_frame = 0;
+        let mut consecutive = 0;
+
+        for frame in 0..MAX_FRAMES {
+            let idx = frame / 64;
+            let bit = frame % 64;
+            if self.bitmap[idx] & (1u64 << bit) != 0 {
+                // 当前帧空闲
+                if consecutive == 0 {
+                    start_frame = frame;
+                }
+                consecutive += 1;
+                if consecutive == count {
+                    // 找到足够的连续帧，标记为已用
+                    for i in 0..count {
+                        let f = start_frame + i;
+                        let w = f / 64;
+                        let b = f % 64;
+                        self.bitmap[w] &= !(1u64 << b);
+                    }
+                    self.used += count;
+                    self.hint = start_frame + count;
+                    return Some((start_frame * FRAME_SIZE) as u64);
+                }
+            } else {
+                // 当前帧已用，重置计数
+                consecutive = 0;
+            }
+        }
+        None
+    }
+
+    /// 释放 `count` 个连续物理页帧（从 `addr` 开始）。
+    ///
+    /// 必须与 `alloc_contiguous_frames` 配对使用。
+    pub fn free_contiguous_frames(&mut self, addr: PhysicalAddr, count: usize) {
+        let start_frame = addr as usize / FRAME_SIZE;
+        for i in 0..count {
+            self.free_frame((start_frame + i) as PhysicalAddr);
+        }
+    }
+
     /// 释放一个物理页帧。
     ///
     /// **双重释放是 no-op**（幂等），不会 panic。

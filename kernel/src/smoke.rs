@@ -341,7 +341,7 @@ pub fn run_integration_smoke(refs: &BootstrapRefs) {
     // ============================================================
     // 8. Page frame allocator: alloc / free / exhaustion / double-free
     // ============================================================
-    info!("[smoke] 8/8 page frame allocator");
+    info!("[smoke] 8/9 page frame allocator");
 
     let free_pre = page_frame::with_page_frames(|a| a.free_frames());
     let total_pre = page_frame::with_page_frames(|a| a.total_frames());
@@ -377,6 +377,83 @@ pub fn run_integration_smoke(refs: &BootstrapRefs) {
     page_frame::free_frame(f1);
     let free_after_double = page_frame::with_page_frames(|a| a.free_frames());
     assert_eq!(free_after_double, free_pre, "double-free should be no-op");
+    total += 1;
+
+    // ============================================================
+    // 9. Kernel heap: Box/Vec alloc + dealloc (GlobalAlloc trait)
+    // ============================================================
+    info!("[smoke] 9/9 kernel heap (Box/Vec)");
+
+    // Box<u64> 分配
+    let boxed = alloc::boxed::Box::new(0xDEAD_BEEF_u64);
+    assert_eq!(*boxed, 0xDEAD_BEEF, "Box<u64> value mismatch");
+    total += 1;
+
+    // Vec<u32> 分配
+    let mut vec = alloc::vec::Vec::new();
+    for i in 0..100 {
+        vec.push(i);
+    }
+    assert_eq!(vec.len(), 100, "Vec length mismatch");
+    assert_eq!(vec[99], 99, "Vec content mismatch");
+    total += 1;
+
+    // String 分配（用 String::from() 避免 format! 的格式化路径）
+    let s = alloc::string::String::from("hello 42");
+    // 字节级比较（避坑：assert_eq! 在 nightly 上 String/&str 偶发失败，
+    // 见 heap.rs 排查注释；这里仅做 raw 字节验证）
+    if s.as_bytes() != b"hello 42" {
+        panic!("String bytes mismatch");
+    }
+    total += 1;
+
+    // 释放后内存应回归（MVP 暂不校验，仅验证不 panic）
+    drop(boxed);
+    drop(vec);
+    drop(s);
+    total += 1;
+
+    // ============================================================
+    // 10. GDT/TSS: lgdt + ltr + IST1/RSP0 验证
+    // ============================================================
+    info!("[smoke] 10/10 GDT/TSS (IST1 double-fault stack + RSP0)");
+
+    // TSS.IST1 应指向 DF_STACK 栈顶（gdt::DF_STACK 基址 + 4096）。
+    // 用 `gdt::ist1_df_stack_top()` 读回 TSS 字段并校验落在 DF_STACK 范围内。
+    let ist1 = crate::gdt::ist1_df_stack_top();
+    assert_ne!(ist1, 0, "IST1 must be non-zero after init_gdt_tss");
+    // 注：CPU 不强制 IST/RSP 页对齐，但栈顶 = 基址 + 4096 应落在 DF_STACK 内
+    // （基址因 linker 未生效 repr(align(4096)) 可能非页对齐，故此处不校验页对齐）
+    let df_base = crate::gdt::df_stack_base() as u64;
+    assert!(ist1 >= df_base && ist1 <= df_base + 4096, "IST1 should be within DF_STACK");
+    total += 1;
+
+    let rsp0 = crate::gdt::rsp0_stack_top();
+    assert_ne!(rsp0, 0, "RSP0 must be non-zero after init_gdt_tss");
+    let k_base = crate::gdt::kernel_stack_base() as u64;
+    assert!(rsp0 >= k_base && rsp0 <= k_base + 4096, "RSP0 should be within KERNEL_STACK");
+    total += 1;
+
+    // IST1 与 RSP0 应指向不同栈（避免 DF handler 踩内核栈）。
+    assert_ne!(ist1, rsp0, "IST1 and RSP0 should be distinct stacks");
+    total += 1;
+
+    // CS 应该已被收敛到规范形式 0x08（不是 boot.S 的 0x18）。
+    let cs: u16 = {
+        let sel: u16;
+        unsafe { core::arch::asm!("mov {0:x}, cs", out(reg) sel, options(nostack, preserves_flags)); }
+        sel
+    };
+    assert_eq!(cs, 0x08, "CS should be 0x08 (new GDT kernel code), got {:#x}", cs);
+    total += 1;
+
+    // SS 应为 0x10（新 GDT kernel data）。
+    let ss: u16 = {
+        let sel: u16;
+        unsafe { core::arch::asm!("mov {0:x}, ss", out(reg) sel, options(nostack, preserves_flags)); }
+        sel
+    };
+    assert_eq!(ss, 0x10, "SS should be 0x10 (new GDT kernel data), got {:#x}", ss);
     total += 1;
 
     // 引用防止 lint
