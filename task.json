@@ -637,7 +637,7 @@
         {
           "id": "P4-T2",
           "name": "内核 4KB 页表模块 + 地址空间抽象",
-          "status": "pending",
+          "status": "done",
           "deliverables": [
             "kernel/src/paging：4 级 4KB 页表（PML4/PDPT/PD/PT）map/unmap/权限位（U/S、NX、R/W）",
             "AddressSpace 抽象：每进程一个 PML4（CR3），内核区映射策略按 Doc 02 §3.2（用户页表中内核区 supervisor-only，首期不做 KPTI，记入威胁模型）",
@@ -649,7 +649,8 @@
           "deps": [
             "P2-T2"
           ],
-          "estimate": "1-2 窗口"
+          "estimate": "1-2 窗口",
+          "actual_approach": "kernel/src/paging.rs（新模块，非目录）。AddressSpace：每 AS 3 帧固定开销（PML4 + 私有 PDPT + user PD），PDPT[0]→共享 boot PD0（0-1GB 内核恒等映射，supervisor-only 无 US 位 = Doc 02 §3.2 用户页表内核区不可访问，首期无 KPTI），PDPT[1]→1-2GB 用户区（map_page 惰性挂 4KB PT）。API：new/activate(CR3)/map_page/unmap_page(invlpg)/translate(含 2MB 大页路径)/Drop 归还全部页表帧（FR8 出账）。权限位常量齐备（P/RW/US/A/D/PS/NX）；EFER.NXE 幂等开启（boot.S 只开 LME，NX 位否则是保留位）。expected-fault 钩子：probe_expect_pf 武装恢复 RIP → 探测读触发 #PF → idt.rs page_fault_inner 经 take_expected_fault 消费 → trampoline 改写栈帧 RIP + iretq 续跑（P4-T3 缺页路径复用此基建）。真机 smoke 15/15：AS 新建 → translate 内核共享区（大页）→ 映射用户页（RW|US|NX）→ CR3 切换后内核存活 → ring0 写读往返 → 未映射 #PF CR2 断言 → unmap 后再 #PF（invlpg 生效）→ 内核区/重复/未对齐三错误路径 → 旧 CR3 恢复 → FR8 归零。顺带修复两个内核潜伏 bug（各自 decision_log 条目）：① page_frame 低 1MB 未保留；② idt trampoline RIP 偏移读成 CS。三重判定全绿：exit=363 + 62/62+27/27+9/9+15/15 + markers …Iabcdef；QEMU 测试套件 4/4；宿主 workspace 28 套件全绿。"
         },
         {
           "id": "P4-T3",
@@ -1115,6 +1116,16 @@
       "date": "2026-09-27",
       "scope": "用户态 ELF 加载基址改址（P4-T1 产物修订 + P4-T2 设计输入，claude/p4-userspace）",
       "decision": "用户基址 0x400000 → 0x4000_0000（1GB），DECIDED。冲突根因：boot.S 以 2MB 大页恒等映射 0-4GB（supervisor-only），内核镜像占 PA [0x200000,0x4cb000)——用户 VA 0x400000 与内核自身 .data/.bss/page_tables 的 VA 完全重叠，同一地址空间内同一 VA 不能两者兼是，PD 大页拆分亦无解（2MB 粒度下内核镜像横跨 entry 1-2）。新基址选 1GB：① PDPT[0] entry 1 粒度整区独占——每地址空间为该 entry 挂独立清零 PD，与共享的内核 0-1GB 恒等映射（entry 0→boot PD0）零重叠、零大页拆分；② PA 1-2GB 无物理内存（E820 usable 上限 ~128MB），不遮蔽任何真实页帧；③ 用户 VA 区 [1GB,2GB) 足够 MVP（text/data/heap/stack）。已同步：user/hello/linker.ld、xtask ELF 断言器（USER_BASE/USER_ENTRY_LIMIT + 8/8 单测）、Doc 02 §3.1 UPDATE 块 + §8 条目、README。内核高半迁移（Doc 02 §3.1 图中 0x8000_0000_0000 区）维持远期方向，届时用户区可回迁低址。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P2 潜伏 bug 修复：page_frame 低 1MB 保留（P4-T2 触发发现，影响所有帧分配方）",
+      "decision": "init_page_frame_allocator 增加显式 mark_range_used(0, 0x10_0000)。原实现假设'E820 已把 0..1MB 标 Reserved'——本机 QEMU E820 entry[0] 实际报 0..0x9fc00 为 Usable，导致活跃区可被分配复用：stage2(0x8000)、**boot 页表 = 当前 CR3(0x10000..0x16000)**、E820 raw buffer(0x20000)、IVT/BDA(0..0x500)。既有证据：P3-T4 起 kthread 栈实际拿到 stack=[0x0..0x5000)（PA 0），继续分配到第 16 帧即踩boot 页表（清零 = 立即致命）；P4-T2 paging smoke 首跑因 PA 0 触发 debug 构建 ptr::write_bytes 非空断言 panic 而暴露。修复后首帧从 kernel_end 之后起（实测 0x4b4000），kthread/smoke 既有断言全部动态计算不受影响（62/62+27/27+9/9 复验绿）。注：文件头'保留帧'契约本就声明 0..1MB 保留，此修复是让实现对齐既有契约而非新语义。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "内核 bug 修复：idt.rs #DF/#GP/#PF trampoline 读 RIP 偏移错误（P4-T2 顺带）",
+      "decision": "三个 trampoline 的 `mov rdi, [rsp+16]` 改为 `[rsp+8]`。CPU 压栈序 [SS|RSP|RFLAGS|CS|RIP|err]：err=+0、RIP=+8、CS=+16——原实现把 CS 当 RIP 传给 inner 打日志。既有证据：P3-T5 调试期 #DF 日志 'ip=0x8' 即内核 CS 选择子而非真实故障地址（当时靠 #BP 风暴旁证定位）。#PF trampoline 同时重写支持 expected-fault 恢复：page_fault_inner 签名 -> ! 改 -> u64（返回恢复 RIP，非期望缺页照旧 panic 发散），trampoline 保存原 rsp → call → test rax 防御 → 还原 rsp → 覆写 [frame+8] = resume → 弃 err → iretq。真机 15/15 含两次 #PF 捕获-恢复往返验证。"
     }
   ],
   "current_task": "P3-T6",
