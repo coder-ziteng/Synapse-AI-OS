@@ -102,7 +102,7 @@ python kernel/tests/run_tests.py      # QEMU 测试套件
 | `abi/` | 用户态 ABI（syscall 号表，18 个，设计文档 02 §4.2） |
 | `audit/` | 审计事件流（骨架） |
 | `user/` | 用户态程序（Phase 4 启用） |
-| `display/` | S6 显示栈预研（synapse-display：tiny-skia 渲染管线 + 混合模式场景图 + 2D 虚拟人，`renderer` feature 门控） |
+| `display/` | S6 显示栈预研（synapse-display：tiny-skia 渲染管线 + 混合模式场景图 + 2D 虚拟人；examples/logo 导出玄武徽章 4 版 PNG，`renderer` feature 门控） |
 | `xtask/` | 构建 / 运行 / CI 任务封装 |
 | `docs/design/` | 设计文档 00~07 + rule.md 开发规则 |
 | `scripts/` `build_disk.py` `verify-all.ps1` | 辅助脚本 |
