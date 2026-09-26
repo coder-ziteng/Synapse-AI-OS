@@ -263,11 +263,30 @@ S4 的两个存储引擎是**外部依赖缺口**，必须在 S4 启动前决策
 | **显示栈** | virtio-gpu 驱动 + 合成器 + 渲染管线 |
 | **应用注册表** | 应用 = 本体模型实例化（运行时可加载）|
 
-### 8.2 GUI 显示栈选型（待决策）
-- 显示驱动：virtio-gpu（QEMU 支持）
-- 合成器：**TBD**（自研最小合成器 vs 移植现成方案）
-- 渲染：浏览器引擎（Tauri 风格 WebView vs 自研最小渲染器 vs Skia 子集）
-- **TBD**：选择路径对路线图影响巨大，建议 S6 启动前专门评审。
+### 8.2 GUI 显示栈选型（**DECIDED → 见 [设计文档 07](07-display-stack-and-spatial-shell.md)**）
+
+完整选型决策、对比、ABI、混合模式、阶段拆分见 [设计文档 07](07-display-stack-and-spatial-shell.md)。本节仅给核心结论：
+
+| 决策项 | DECIDED |
+|--------|---------|
+| 渲染栈 | **tiny-skia** + 自研矢量场景图 |
+| 显示驱动 | virtio-gpu 用户态驱动（PCI） |
+| 合成器 | 自研极简合成器（分层 SceneGraph → framebuffer 单遍绘制） |
+| 虚拟人 | 2D 矢量动画起步（Live2D 风格），后期可换 3D |
+| 交互范式 | **混合模式**：空间外壳（3D 摄像机 + 锚点 + 虚拟人）+ 平面内容（动态卡片面板） |
+| UI 生成 | DynamicUIGenerator 读 OntologyEngine → PanelSchema JSON → DisplayService 消费 |
+
+**为什么不是 WebView / 浏览器引擎套壳**（否决记录）：
+
+- 与原始构想"AI 原生"叙事冲突——浏览器是给人用的，不是给 AI 编排 UI 用的。
+- 工作量并不显著小于自研（浏览器引擎移植堪比内核）。
+- 性能不可控（无法保证 60 FPS 帧时间预算）。
+- C++ FFI 污染用户态 Rust 栈。
+
+**为什么不上 wgpu/vulkan 原生 GPU**（否决记录）：
+
+- 裸机用户态需自研 GPU 驱动栈，工作量 6 个月+，个人项目不可承受。
+- Phase 6.x 远期可加 GPU backend（`Renderer` trait 抽象，SceneGraph 与合成器不变）。
 
 ### 8.3 退出标准
 - 动态 UI 可基于意图实时生成（demo：用户说"整理会议录音" → UI 自动出现录音列表 + 任务进度面板）。

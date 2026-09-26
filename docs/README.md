@@ -16,6 +16,7 @@
 | 04 | [外交工具通道架构](design/04-diplomat-channel-architecture.md) | **PROPOSED 完成** | Phase 5 | 5 |
 | 05 | [跨 OS 外交协议](design/05-inter-os-diplomacy-protocol.md) | **PROPOSED 完成** | Phase 6+ | 7 |
 | 06 | [系统服务层路线图](design/06-system-services-roadmap.md) | **PROPOSED 完成** | S1~S6 | 6 |
+| 07 | [显示栈与空间外壳](design/07-display-stack-and-spatial-shell.md) | **DECIDED** | S6 + Phase 6 | 9 |
 
 ---
 
@@ -41,6 +42,7 @@
 ### 系统服务层 (S1~S6)
 1. Doc 06 全文 — 服务层路线图
 2. Doc 06 §13 — 硬件信任根埋点设计
+3. Doc 07 全文 — 显示栈与空间外壳（GUI 选型、混合模式、DynamicUIGenerator）
 
 ---
 
@@ -68,7 +70,7 @@
 | 性能基准 | 3 | 审计批量 N/T 值、单页 IPC 延迟实测、WASM 沙箱性能 |
 | 远期基础设施 | 4 | 跨 OS CRL 同步、自动仲裁、主动/被动分层阈值 |
 | 驱动模型 | 2 | Notification mask/unmask、跨进程共享 |
-| GUI/显示栈 | 2 | 合成器选型、渲染引擎选型 |
+| GUI/显示栈 | 0 | ~~合成器选型、渲染引擎选型~~（已收敛，见 Doc 07）|
 
 ---
 
