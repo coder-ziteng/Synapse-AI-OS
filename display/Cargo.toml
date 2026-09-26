@@ -20,3 +20,7 @@ renderer = ["dep:tiny-skia", "dep:image"]
 [[example]]
 name = "poc"
 required-features = ["renderer"]
+
+[[example]]
+name = "logo"
+required-features = ["renderer"]
