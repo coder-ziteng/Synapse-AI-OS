@@ -372,7 +372,12 @@
         {
           "id": "P2-T5",
           "name": "IDT + 异常处理",
-          "status": "pending"
+          "status": "completed",
+          "actual_approach": "kernel/src/idt.rs 实现完整异常处理框架：(1) #DE divide_error + #BP breakpoint + #UD invalid_opcode 基础异常；(2) #DF double_fault 使用 IST1 栈（TSS.IST1 = DF_STACK 顶），naked asm trampoline 绕过 x86-interrupt ABI 栈对齐问题；(3) #GP general_protection_fault 带错误码；(4) #PF page_fault 从 CR2 读故障地址 + 错误码解析（present/writable/user/ifetch/protect/shadow）；(5) 所有 handler panic 输出异常类型 + 错误码 + IP。QEMU 验证：exit=107, dbg501=ABCDEFGHIJKLMNOPQRS + serial [idt] IDT loaded: #DE/#BP/#UD/#DF(IST1)/#GP/#PF + smoke 53/53 全通过。",
+          "files": [
+            "kernel/src/idt.rs",
+            "kernel/src/main.rs"
+          ]
         },
         {
           "id": "P2-T6",
