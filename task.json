@@ -4,9 +4,9 @@
   "last_update": "2026-09-26",
   "session": {
     "current_phase": "P1",
-    "current_task": "P1-T5",
+    "current_task": "P1-T8",
     "status": "in_progress",
-    "notes": "2026-09-25: 设计文档纯设计审查完成 (claude/design-pure-review 分支)。\nDoc 01~06 全部升级为 PROPOSED 完成，添加决策汇总表。Phase 4/5/6+ 核心设计收敛。\n\n2026-09-25: 需求评审 §6 Phase 4 硬性闸门设计缺口补全完成 (f253114, 92f7201, 53b89b1)。\n- Doc 01 §4.2: 对象生命周期状态机 + generation 校验 + 进程退出回收顺序\n- Doc 02 §4.5: ABI 版本策略 (abi_query + 消息头 version + rights 只追加) + 5 新错误码\n- Doc 02 §5.5: 每进程资源配额模型 (Quota struct + 管理规则 + FR8 关系)\n- Doc 02 §5.1/§3.2: MVP-3 单线程约束 + PCID 可选优化说明\n- Doc 03 §5.1: IPC 错误语义 + 对端死亡处理规则\n- Doc 04: Phase 5 MVP 范围约束 (仅 API Channel)\n- Doc 06 §2.1: 服务层依赖级别 (P0/P1/P2) + 各阶段首期承诺\n\n需求评审 §6 的 12 项 Phase 4 闸门决策：11 项已收敛，1 项 (基准测试配置) 属测试/CI 范畴。\n\n2026-09-25: CI/xtask 落地完成 (d3c4994)。P1-T4 boot 调试发现：\n- QEMU trace 显示 #PF @ IP=0x2068dc CR2=0xC0000080\n- IP=0x2068dc 在 raw_cpuid 库代码中，不在 _start64 (0x200d90)\n- rsp 被破坏（应为 0x15008，实际 0xC0000072）\n- stage2 debugcon 输出到 'L' (jmp rax 前) 后无 'AB' 从 _start64\n- 结论：stage2 的 jmp rax 未成功到达 _start64，或到达后 rsp 被破坏\n- 可能原因：stage2 页表/栈设置问题，或 _start64 入口约定不符\n- 内核 ELF 有 Xen PVH note (entry=0x200018)，但 QEMU -kernel 未走 PVH\n下一步：P1-T5 (log + panic handler) 不依赖 boot，可并行推进。\n\n2026-09-25: P1-T6 (HAL SerialDevice trait) + P1-T7 (UART HAL化) 完成。HAL 提供零成本抽象 + cfg(test) fake impl。\n\nP1-T5 (log + logger) 完成。内核集成 log crate，KernelLogger 输出到串口。\n\n2026-09-26: synapse-cap crate 落地 (cap/)。能力子系统核心全部实现并宿主测试通过 (22 tests)：\n- error.rs: CapError 15 错误码 + errno 映射 (-1..-15, Doc 02 §4.3/§4.5)\n- rights.rs: 权限位掩码 (零依赖手写 bitflags, 保留位掩掉防 ABI 漂移)\n- types.rs: CapRef=u8 / ObjRef{index,generation} / Capability{obj,rights,badge,parent} / ObjKind 10 类\n- table.rs: 256 槽 CapTable (slot 0 NULL trap) + delegate(attenuation-only, 需 GRANT) + revoke_cascade(不动点迭代, 无递归)\n- object.rs: ObjectTable 1024 槽 + generation 历史独立于槽位 (防复用复活) + Live→Revoking→Retired→Freed 状态机\n- quota.rs: Quota/DEFAULT_QUOTA/QuotaUsage charge-release (O(1), 超限 QuotaExceeded 不阻塞) + spawn 划拨校验 (Doc 02 §5.5)\n- transfer.rs: atomic all-or-nothing 跨进程转移 (5 步预检查零副作用, MAX_TRANSFER=8, Doc 03 §5)\n- 附带修复: Doc 01 §4.2 E_OBJECT_RETIRED errno -10→-12 (与 Doc 02 对齐); Doc 03 §5.1 transfer 表满 E_PERMISSION→E_NO_MEMORY; Doc 01 free_top u8→u16\n下一步: 内核集成层 (Spinlock 包装 + syscall 绑定) 待 boot 打通后接入。\n\n2026-09-26: synapse-ipc crate 落地 (ipc/)。IPC 核心宿主测试通过 (14 tests)：\n- header.rs: IpcHeader repr(C) 20B 固定 ABI (version/header_len 前向兼容, flags 严格 0) + AgentId 数值盖章 (字符串↔数值映射归 init, Doc 01 §7) + validate (AbiMismatch/-11, cap 数超限/-1, payload>min(quota,4KB)/-13)\n- path.rs: 三档传输路径分类 (≤32B 寄存器直传 / ≤4KB kmap 单拷贝 / >4KB grant 描述符, Doc 03 §4.3)\n- notification.rs: 位图 u64 OR 聚合 + 读清 poll (Doc 03 §6.2, O(1))\n- endpoint.rs: 单接收者同步端点环形队列 (32 深) + try_send(Delivered/Queued/WouldBlock) + cancel_sender 对端死亡摘除 (FIFO 保持, 等待接收者不受扰, Doc 03 §5.1)\n调度/kmap memcpy/cap 安装留给内核集成层；synapse-ipc 已验证可链入 x86_64-bootloader.json 目标。\n\n2026-09-26: synapse-proc crate 落地 (proc/)。进程模型核心宿主测试通过 (14 tests)：\n- process.rs: ProcessTable(128 槽) + Pcb + 状态机 Created→Running⇄Blocked→Exited/Faulted→Zombie→reap (Doc 02 §5.3)；spawn 六步校验链 (仅 init 可 spawn/agent 查重/配额划拨预留)；exit/fault 返回 DeathSignal (集成层投递 death_endpoint)；孤儿过继 init；freeze/thaw 行为围栏 (E_FROZEN -8)；pid 单调分配不复用；配额 carve/uncarve (spawn 预留、reap 归还)\n- agent.rs: 内核侧数值 agent_id 唯一性注册表 (字符串映射归 init 用户态, Doc 01 §7)\n- grant.rs: spawn 初始 caps 安装复用 transfer_caps atomic 语义 (衰减+GRANT 校验+零副作用回滚)\n资源释放顺序契约 (页帧→CapTable→agent_id→pid) 前两步归集成层、后两步在 reap。三 crate 累计 50 宿主测试全绿，均可链入 x86_64-bootloader.json。"
+    "notes": "2026-09-25: 设计文档纯设计审查完成 (claude/design-pure-review 分支)。\nDoc 01~06 全部升级为 PROPOSED 完成，添加决策汇总表。Phase 4/5/6+ 核心设计收敛。\n\n2026-09-25: 需求评审 §6 Phase 4 硬性闸门设计缺口补全完成 (f253114, 92f7201, 53b89b1)。\n- Doc 01 §4.2: 对象生命周期状态机 + generation 校验 + 进程退出回收顺序\n- Doc 02 §4.5: ABI 版本策略 (abi_query + 消息头 version + rights 只追加) + 5 新错误码\n- Doc 02 §5.5: 每进程资源配额模型 (Quota struct + 管理规则 + FR8 关系)\n- Doc 02 §5.1/§3.2: MVP-3 单线程约束 + PCID 可选优化说明\n- Doc 03 §5.1: IPC 错误语义 + 对端死亡处理规则\n- Doc 04: Phase 5 MVP 范围约束 (仅 API Channel)\n- Doc 06 §2.1: 服务层依赖级别 (P0/P1/P2) + 各阶段首期承诺\n\n需求评审 §6 的 12 项 Phase 4 闸门决策：11 项已收敛，1 项 (基准测试配置) 属测试/CI 范畴。\n\n2026-09-25: CI/xtask 落地完成 (d3c4994)。P1-T4 boot 调试发现：\n- QEMU trace 显示 #PF @ IP=0x2068dc CR2=0xC0000080\n- IP=0x2068dc 在 raw_cpuid 库代码中，不在 _start64 (0x200d90)\n- rsp 被破坏（应为 0x15008，实际 0xC0000072）\n- stage2 debugcon 输出到 'L' (jmp rax 前) 后无 'AB' 从 _start64\n- 结论：stage2 的 jmp rax 未成功到达 _start64，或到达后 rsp 被破坏\n- 可能原因：stage2 页表/栈设置问题，或 _start64 入口约定不符\n- 内核 ELF 有 Xen PVH note (entry=0x200018)，但 QEMU -kernel 未走 PVH\n下一步：P1-T5 (log + panic handler) 不依赖 boot，可并行推进。\n\n2026-09-25: P1-T6 (HAL SerialDevice trait) + P1-T7 (UART HAL化) 完成。HAL 提供零成本抽象 + cfg(test) fake impl。\n\nP1-T5 (log + logger) 完成。内核集成 log crate，KernelLogger 输出到串口。\n\n2026-09-26: synapse-cap crate 落地 (cap/)。能力子系统核心全部实现并宿主测试通过 (22 tests)：\n- error.rs: CapError 15 错误码 + errno 映射 (-1..-15, Doc 02 §4.3/§4.5)\n- rights.rs: 权限位掩码 (零依赖手写 bitflags, 保留位掩掉防 ABI 漂移)\n- types.rs: CapRef=u8 / ObjRef{index,generation} / Capability{obj,rights,badge,parent} / ObjKind 10 类\n- table.rs: 256 槽 CapTable (slot 0 NULL trap) + delegate(attenuation-only, 需 GRANT) + revoke_cascade(不动点迭代, 无递归)\n- object.rs: ObjectTable 1024 槽 + generation 历史独立于槽位 (防复用复活) + Live→Revoking→Retired→Freed 状态机\n- quota.rs: Quota/DEFAULT_QUOTA/QuotaUsage charge-release (O(1), 超限 QuotaExceeded 不阻塞) + spawn 划拨校验 (Doc 02 §5.5)\n- transfer.rs: atomic all-or-nothing 跨进程转移 (5 步预检查零副作用, MAX_TRANSFER=8, Doc 03 §5)\n- 附带修复: Doc 01 §4.2 E_OBJECT_RETIRED errno -10→-12 (与 Doc 02 对齐); Doc 03 §5.1 transfer 表满 E_PERMISSION→E_NO_MEMORY; Doc 01 free_top u8→u16\n下一步: 内核集成层 (Spinlock 包装 + syscall 绑定) 待 boot 打通后接入。\n\n2026-09-26: synapse-ipc crate 落地 (ipc/)。IPC 核心宿主测试通过 (14 tests)：\n- header.rs: IpcHeader repr(C) 20B 固定 ABI (version/header_len 前向兼容, flags 严格 0) + AgentId 数值盖章 (字符串↔数值映射归 init, Doc 01 §7) + validate (AbiMismatch/-11, cap 数超限/-1, payload>min(quota,4KB)/-13)\n- path.rs: 三档传输路径分类 (≤32B 寄存器直传 / ≤4KB kmap 单拷贝 / >4KB grant 描述符, Doc 03 §4.3)\n- notification.rs: 位图 u64 OR 聚合 + 读清 poll (Doc 03 §6.2, O(1))\n- endpoint.rs: 单接收者同步端点环形队列 (32 深) + try_send(Delivered/Queued/WouldBlock) + cancel_sender 对端死亡摘除 (FIFO 保持, 等待接收者不受扰, Doc 03 §5.1)\n调度/kmap memcpy/cap 安装留给内核集成层；synapse-ipc 已验证可链入 x86_64-bootloader.json 目标。\n\n2026-09-26: synapse-proc crate 落地 (proc/)。进程模型核心宿主测试通过 (14 tests)：\n- process.rs: ProcessTable(128 槽) + Pcb + 状态机 Created→Running⇄Blocked→Exited/Faulted→Zombie→reap (Doc 02 §5.3)；spawn 六步校验链 (仅 init 可 spawn/agent 查重/配额划拨预留)；exit/fault 返回 DeathSignal (集成层投递 death_endpoint)；孤儿过继 init；freeze/thaw 行为围栏 (E_FROZEN -8)；pid 单调分配不复用；配额 carve/uncarve (spawn 预留、reap 归还)\n- agent.rs: 内核侧数值 agent_id 唯一性注册表 (字符串映射归 init 用户态, Doc 01 §7)\n- grant.rs: spawn 初始 caps 安装复用 transfer_caps atomic 语义 (衰减+GRANT 校验+零副作用回滚)\n资源释放顺序契约 (页帧→CapTable→agent_id→pid) 前两步归集成层、后两步在 reap。三 crate 累计 50 宿主测试全绿，均可链入 x86_64-bootloader.json。\n\n2026-09-26: P1-T4 boot 链路全通 + P1-T5 真机验收 (claude/design-pure-review 分支)。QEMU 退出码 107, serial '[INFO] Hello, Synapse!', dbg501 'ABCDEF', 21/21 块加载回读与镜像一致, panic backtrace 4 帧符号化有效。三个根因: ① 内核栈误放 0xF0000 (QEMU isa-bios ROM 区, CPU 写入被静默忽略→retf 弹垃圾→三重故障), 移至 0x60008 并满足 Rust ABI 入口 rsp%16==8; ② stage2 加载循环 debug16 标记 '3'/'4' 的 mov al,imm8 污染 EAX → LBA/dst 双推进错误 → 内核镜像重叠错位入 RAM (仅 14% 字节正确); ③ 复制段 mov esi 缺 0x66 前缀 (顺带解开'删 buffer 检查即挂'旧谜)。详见 decision_log 2026-09-26 三条。\n下一步: P1-T8 (test_framework 集成) 为 P1 唯一 pending 项; boot 已通, cap/ipc/proc 内核集成层可启动。"
   },
   "env_prerequisites": {
     "install_root": "D:\\envTools",
@@ -219,18 +219,18 @@
         {
           "id": "P1-T4",
           "name": "QEMU 启动 + Hello Synapse!",
-          "status": "in_progress",
+          "status": "completed",
           "estimate": "30 min",
-          "blocker": "GDT 0x18 (64-bit CS) L bit 缺失 + limit 编码错 → 远跳后 CPU 停留在 32-bit 兼容模式，REX 前缀被忽略、jmp rax 路径损坏。2026-09-25 修复: GDT[0x18] = 0x00AF9A000000FFFF (L=1, G=1, limit=0xFFFFF)。待重新跑 QEMU 验证 kernel 'A','B' 出现在 dbg501 + 'Hi' 出现在 serial。",
+          "actual_approach": "2026-09-26 全链路验证通过。三个根因修复: ① GDT[0x18] L bit (09-25); ② 内核栈 0xF0000→0x60008 (0xF0000-0xFFFFF 是 QEMU isa-bios ROM, 写入被静默忽略→push/retf 弹垃圾→三重故障; 且入口 RSP 需满足 Rust ABI rsp%16==8); ③ stage2 加载循环双 bug: debug16 标记 '3'(0x33)/'4'(0x34) 的 mov al,imm8 污染 EAX → LBA += 51 (应 127)、dst += 0x6800 (应 0xFE00) → 内核镜像重叠错位写入 RAM (仅 14% 字节正确, 崩在 0x207143); 复制段 mov esi 缺 0x66 前缀 (这也是'删掉 buffer 检查就无法启动'之谜的真相)。修复后 21/21 块回读与镜像逐字节一致。",
           "deliverables": [
-            "串口输出 'Hello, Synapse!' (UART 16550, COM1 0x3F8, 38400 8N1)",
-            "build_disk.py 64-bit 段含 UART init + 逐字发送",
-            "GDT[0x18] = 64-bit 代码段 (L=1)"
+            "串口输出 '[INFO] Hello, Synapse!' + '[boot] _start64: long mode + 4-level paging active' (UART 16550, COM1 0x3F8, 38400 8N1)",
+            "build_disk.py stage2 (950B): 加载循环 + 16→32→64 trampoline + 每块 buffer 回读诊断 + V/W/X RAM 回读",
+            "GDT[0x18] = 64-bit 代码段 (L=1); 内核栈 0x60008"
           ],
           "verify": [
-            "QEMU -nographic 终端显示 'Hello, Synapse!'",
-            "EXIT_CODE=181",
-            "dbg501 出现 kernel 写入的 'A','B'"
+            "QEMU isa-debug-exit 退出码 107 (val 0xB5 → ((0xB5&0x7F)<<1)|1)",
+            "serial 显示 '[INFO] Hello, Synapse!' (log crate 经 KernelLogger)",
+            "dbg501 = 'ABCDEF' (kernel boot_marker 全程无崩溃)"
           ]
         },
         {
@@ -238,13 +238,15 @@
           "name": "log 宏 + panic_handler 完整版",
           "status": "completed",
           "estimate": "1 h",
+          "actual_approach": "2026-09-26 真机 (QEMU) 验收: 临时触发嵌套 panic → serial 输出 '[PANIC] panicked at kernel\\src\\main.rs:92:9' + 位置 + 4 帧 backtrace; llvm-nm 符号化确认帧链 panic_fmt → verify_backtrace::inner → … → _start64, 全部有效。验证后已还原。",
           "deliverables": [
             "kernel/src/logger.rs (log::Log impl)",
-            "kernel/Cargo.toml (+log dep)"
+            "kernel/Cargo.toml (+log dep)",
+            "panic_handler: 消息+位置+rbp 链栈回转 (≤32 帧, 带对齐/范围/单调性防御)"
           ],
           "verify": [
-            "故意触发 panic 后看到函数名+行号",
-            ".cargo/config.toml 设置 -C force-frame-pointers=yes"
+            "故意触发 panic 后看到函数名+行号 (2026-09-26 通过)",
+            ".cargo/config.toml 设置 -C force-frame-pointers=yes (已加, cfg(target_os=none))"
           ]
         },
         {
@@ -446,6 +448,21 @@
       "date": "2026-09-26",
       "decision": "进程模型实现为独立 crate synapse-proc (proc/)，依赖 cap+ipc；Exited/Faulted → Zombie 需显式 release_resources() 两步走；spawn 配额划拨采用'按子上限在父账预留、reap 归还'语义；pid 单调分配不复用",
       "reason": "① 两步走忠实还原 Doc 02 §5.3 资源释放顺序（页帧→CapTable→agent_id→pid），前两步必须等集成层实际释放完成才能进 Zombie，纯状态层不能假设；② 划拨预留使'子配额≤父剩余'在多子进程场景下持续成立（防止 N 个子进程各自通过独立检查后合计超父配额）；③ pid 不复用规避陈旧 pid 混淆（与 ObjRef generation 同一威胁模型，但 pid 无 generation 字段——单调 u32 在 4G spawn 内不回绕，够用）；④ MAX_PROCS=128 为实现层常量可调。孤儿过继后配额归还在 init 账上（原父已亡），饱和减法防回绕，精确核算列为 TBD。"
+    },
+    {
+      "date": "2026-09-26",
+      "decision": "内核栈从 0xF0000 迁至 0x60008 (stage2 64-bit 段 mov esp,0x60008, 2×push+retf 后 _start64 入口 RSP=0x60008)",
+      "reason": "0xF0000-0xFFFFF 在 QEMU 是 isa-bios ROM 映射区, CPU 写入被静默忽略 (读回仍是 ROM 内容) → push 不落盘, retf 弹出 ROM 垃圾 → 三重故障 (无 IDT, #DF 后重启, -no-reboot 下表现为退出码 0)。0x60000 位于页表区 (止于 0x16000) 与 EBDA/VGA (0x9FC00) 之间的空闲 RAM。入口 RSP 对齐满足 Rust ABI 约定 (函数入口 rsp%16==8)。教训: 裸机栈选址必须核对 QEMU 内存映射, 不能只看'低 1MB 空闲'。"
+    },
+    {
+      "date": "2026-09-26",
+      "decision": "stage2 加载循环根因修复: ① 移除 lba/dst 推进算术之间的 debug16 标记 ('1'~'6'); ② 复制段 mov esi,0x10000 补 0x66 前缀; 并在 build_disk.py 写入警示注释",
+      "reason": "① debug16 的 mov al,imm8 污染 EAX: marker '3'(0x33) 夹在 movzx eax,bx 与 add [0x6008],eax 之间 → LBA += 51 (应 127); marker '4'(0x34) 夹在 shl eax,9 之前 → dst += 0x6800 (应 0xFE00)。后果: 每块以错误 LBA 读盘 + 重叠错位写 RAM, 最终镜像仅 ~14% 字节正确 (仿真逐字节复现 W=105dc3cc/X=554889e5/V=d65052e8 三个实测值), 内核在 0x207143 (#BP, uart outb 被错位数据覆盖) 确定性崩溃。此前'RAM 单 dword -7 字节偏移损坏'与'X 恰好正确'均为巧合表象 (554889e5 是常见函数 prologue)。② 无前缀时 BE 00 00 只是 mov si,0, ESI 高位全靠前面诊断代码的 66 BE 残留凑出 0x10000——这正是旧谜'删掉 buffer 检查就无法启动'的真相; 修复后复制段自洽, 诊断代码可自由增删。教训: 手写汇编的诊断插桩绝不能落在寄存器活跃区间内; 插桩前先列 register liveness。"
+    },
+    {
+      "date": "2026-09-26",
+      "decision": "boot 验收基线确立: QEMU 退出码 107 (isa-debug-exit val 0xB5) + serial '[INFO] Hello, Synapse!' + dbg501 'ABCDEF'; boot_marker/回读诊断暂保留至 P1 收尾",
+      "reason": "P1-T4/P1-T5 均真机验收通过: 21/21 块 buffer 回读与镜像逐字节一致; 临时嵌套 panic 验证 backtrace 输出 4 帧, llvm-nm 符号化 panic_fmt → inner → … → _start64 全部有效后还原。0xB5 退出码约定: QEMU 取 val 低 7 位 → ((0xB5&0x7F)<<1)|1=107, CI (xtask/ GitHub Actions) 以 107 判绿。debugcon 双通道分工: 0x402=stage1/stage2 加载诊断 (与 SeaBIOS 共享, 混有其输出), 0x501=内核 boot_marker (纯净)。"
     }
   ]
 }
