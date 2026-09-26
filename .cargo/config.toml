@@ -1,2 +1,5 @@
+# 裸机 target（x86_64-bootloader.json, os=none）:
+# - force-frame-pointers: panic_handler 栈回转依赖 rbp 链（P1-T5 验收项）
+# - 旧 runner = "bootimage runner" 已随 bootimage 方案一并废弃（见 task.json decision_log 2026-09-25）
 [target.'cfg(target_os = "none")']
-runner = "bootimage runner"
+rustflags = ["-C", "force-frame-pointers=yes"]

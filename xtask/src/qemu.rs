@@ -49,6 +49,8 @@ pub fn build_args(serial_log: &Path, dc402: &Path, dc501: &Path) -> Vec<String> 
         "isa-debugcon,iobase=0x501,chardev=dc501".into(),
         "-chardev".into(),
         format!("file,id=dc501,path={}", dc501.display()),
+        "-device".into(),
+        "isa-debug-exit,iobase=0x502".into(),
         "-no-reboot".into(),
         "-monitor".into(),
         "none".into(),

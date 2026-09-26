@@ -13,50 +13,171 @@
 #![no_std]
 #![no_main]
 
+use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
-use core::arch::global_asm;
 
 pub mod serial;
+pub mod logger;
 
 // 把 trampoline 汇编链入二进制；`boot.S` 中 `.global _start` 提供链接器 entry。
 global_asm!(include_str!("boot.S"));
 
+// `core::fmt` 等格式化代码路径会调用 memset/memcpy/memcmp。
+// compiler_builtins rlib 在 x86_64-unknown-none 上是 “thin wrapper”，并不真提供这些
+// —— 我们必须自己填。ABI: rdi=dst, rsi=src, rdx=n，返回 dst。
+#[no_mangle]
+pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
+    let dst = s;
+    let val = c as u8;
+    let count = n;
+    core::arch::asm!(
+        "rep stosb",
+        inout("rdi") dst => _,
+        in("al") val,
+        inout("rcx") count => _,
+        options(preserves_flags, nostack),
+    );
+    dst
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn memcpy(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
+    let dst = d;
+    let src = s;
+    let count = n;
+    core::arch::asm!(
+        "rep movsb",
+        inout("rdi") dst => _,
+        inout("rsi") src => _,
+        inout("rcx") count => _,
+        options(preserves_flags, nostack),
+    );
+    dst
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
+    let mut result: i32 = 0;
+    core::arch::asm!(
+        "rep cmpsb",
+        "sete al",
+        "movzx eax, al",
+        "neg eax",  // 0 → 0, 1 → -1 (memcmp 返回负/正)
+        inout("rdi") a => _,
+        inout("rsi") b => _,
+        inout("rcx") n => _,
+        inout("eax") 0 => result,
+        options(preserves_flags, nostack),
+    );
+    result
+}
+
+/// 引导插桩：向 debugcon 0x501 写一个字节（定位启动崩溃点用，P1 收尾后可删）。
+fn boot_marker(ch: u8) {
+    unsafe {
+        asm!(
+            "out dx, al",
+            in("dx") 0x501u16,
+            in("al") ch,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
 /// Kernel 64-bit 入口（长模式 + 4 级页表已建、栈有效）。
 ///
-/// 由 `boot.S` trampoline 长跳过来；本函数是 Rust 64-bit 代码的真正起点。
+/// 由 `build_disk.py` stage2 trampoline（16→32→64）`retf` 过来；
+/// 本函数是 Rust 64-bit 代码的真正起点。入口时 `rsp = 0xEFFF8`（满足
+/// Rust ABI：入口 `rsp % 16 == 8`）。
 ///
 /// # Safety
 ///
-/// * 调用方必须保证：CPL=0、长模式已开、4 级页表已建、栈有效。
+/// * 调用方必须保证：CPL=0、长模式已开、4 级页表已建（0-4GB 恒等映射）、栈有效。
 /// * 本函数永不返回 (`-> !`)。
 #[no_mangle]
 pub extern "C" fn _start64() -> ! {
-    // 紧贴入口就写 debug-exit，看是否能跑通整个链路；UART 在串口测试
+    // 引导链路标记：debugcon 0x501 输出 'A','B'（与 stage2 的 0x402 诊断配合）
     unsafe {
-        core::arch::asm!(
+        asm!(
             "mov dx, 0x501",
-            "mov al, 0x41",      // 0x41 = 'A' for "Arrived in _start64"
+            "mov al, 0x41",      // 'A' = arrived in _start64
+            "out dx, al",
+            "mov al, 0x42",      // 'B' = first asm block executed
             "out dx, al",
             options(nostack, preserves_flags),
         );
     }
 
+    // P1-T5 真实路径：串口 + 全局 logger 初始化，之后走 log 宏
+    // 插桩: 'C'/'D'/'E'/'F' 标记各步骤（debugcon 0x501，定位崩溃用）
+    boot_marker(b'C');
     serial::init();
-    kprintln!("Hello, Synapse!");
+    boot_marker(b'D');
+    let _ = logger::init();
+    boot_marker(b'E');
 
-    // 进入低功耗停机；Phase 3 起改为调度器就绪队列等待。
+    log::info!("Hello, Synapse!");
+    kprintln!("[boot] _start64: long mode + 4-level paging active");
+    boot_marker(b'F');
+
+    // 通过 isa-debug-exit (iobase=0x502) 退出 QEMU。
+    // 注意：QEMU 只取 val 的低 7 位 → exit code = ((0xB5 & 0x7F) << 1) | 1 = 107
+    unsafe {
+        asm!(
+            "mov dx, 0x502",
+            "mov al, 0xB5",
+            "out dx, al",
+            options(nostack, preserves_flags),
+        );
+    }
+
+    // 不会到这里（上面的 out 已触发 QEMU 退出）
     loop {
-        x86_64::instructions::hlt();
+        unsafe {
+            asm!("hlt", options(nostack, preserves_flags));
+        }
     }
 }
 
-/// Panic handler。
+/// Panic handler（P1-T5 完整版）。
 ///
-/// P1-T2 版本：仅打印位置信息 + 死循环。
-/// P1-T5 升级为带栈回转的完整版。
+/// 输出：panic 消息 + 位置（文件:行:列）+ 基于 rbp 链的栈回转。
+/// 依赖 `.cargo/config.toml` 中 `-C force-frame-pointers=yes`。
+/// 回转打印的是裸地址，用 `rust-addr2line -e target/.../synapse-kernel -f 0xADDR`
+/// 可离线解析出函数名+行号。
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    x86_64::instructions::interrupts::disable();
+
     kprintln!("[PANIC] {}", info);
+    if let Some(loc) = info.location() {
+        kprintln!("  at {}:{}:{}", loc.file(), loc.line(), loc.column());
+    }
+
+    // ---- 帧指针栈回转: rbp → [rbp]=上一帧 rbp, [rbp+8]=返回地址 ----
+    kprintln!("backtrace (most recent call first):");
+    unsafe {
+        let mut rbp: usize;
+        asm!("mov {}, rbp", out(reg) rbp, options(nostack, preserves_flags));
+        for frame in 0..32usize {
+            // 合理性检查：帧指针必须 8 字节对齐且位于已映射的低 4GB
+            if rbp == 0 || rbp % 8 != 0 || rbp >= 0x1_0000_0000 - 16 {
+                break;
+            }
+            let next_rbp = *(rbp as *const usize);
+            let ret_addr = *((rbp + 8) as *const usize);
+            if ret_addr == 0 {
+                break;
+            }
+            kprintln!("  #{:02} 0x{:016x}", frame, ret_addr);
+            // 帧指针必须单调递增（栈向低地址增长），否则链已损坏
+            if next_rbp <= rbp {
+                break;
+            }
+            rbp = next_rbp;
+        }
+    }
+
     loop {
         x86_64::instructions::hlt();
     }

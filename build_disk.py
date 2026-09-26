@@ -16,7 +16,7 @@ stage 2 流程:
   32-bit : 段/栈 → 清零+填 4 级页表 (PML4@0x10000, PDPT@0x11000, PD0@0x12000,
            PD1@0x13000, 恒等映射 0-2GB) → CR4.PAE → CR3 → EFER.LME → CR0.PG
            → 远跳 64-bit
-  64-bit : 设 rsp=0xEFFF8 (满足 Rust ABI: 入口 rsp%16==8) → jmp _start64
+  64-bit : 设 esp=0x60008 (避开 isa-bios ROM 区; retf 后入口 rsp%16==8) → retf _start64
 
 低内存数据区约定:
   0x500 : 启动盘号 (stage 1 保存 BIOS DL)
@@ -115,13 +115,13 @@ def emit(data):
 
 def debug16(ch):
     """16-bit 模式 debug 写 (mov dx, imm16 = 3 字节)"""
-    emit(bytes([0xBA, 0x00, 0x05]))
+    emit(bytes([0xBA, 0x02, 0x04]))      # mov dx, 0x402 (isa-debugcon port)
     emit(bytes([0xB0, ch]))
     emit(bytes([0xEE]))
 
 def debug32(ch):
     """32/64-bit 模式 debug 写 (mov edx, imm32 = 5 字节)"""
-    emit(bytes([0xBA, 0x00, 0x05, 0x00, 0x00]))
+    emit(bytes([0xBA, 0x02, 0x04, 0x00, 0x00]))  # mov edx, 0x402
     emit(bytes([0xB0, ch]))
     emit(bytes([0xEE]))
 
@@ -173,6 +173,10 @@ assert 0 <= edd_past - (edd_jmp_off + 1) <= 127, 'EDD jump-over rel8 out of rang
 s2[edd_jmp_off]     = edd_past - (edd_jmp_off + 1)
 debug16(0x62)                      # 'b'
 
+# 重置 DS=0 (EDD 检查可能破坏 DS)
+emit(bytes([0x31, 0xC0]))          # xor ax, ax
+emit(bytes([0x8E, 0xD8]))          # mov ds, ax
+
 # ---- DAPS 初始化 (暂存区 0x10000; lba/总扇区数稍后 patch) ----
 emit(bytes([0xC6, 0x06, 0x00, 0x60, 0x10]))          # mov byte [0x6000], 0x10
 emit(bytes([0xC6, 0x06, 0x01, 0x60, 0x00]))          # mov byte [0x6001], 0
@@ -205,6 +209,8 @@ emit(bytes([0x89, 0xC3]))                # mov bx, ax        (bx = 本次扇区�
 emit(bytes([0x89, 0x1E, 0x0A, 0x05]))    # mov [0x50A], bx   (备份, 防 BIOS 破坏)
 emit(bytes([0xA3, 0x02, 0x60]))          # mov [0x6002], ax  (DAPS count)
 emit(bytes([0x29, 0x1E, 0x02, 0x05]))    # sub [0x502], bx   (剩余 -=)
+emit(bytes([0x31, 0xC0]))                # xor ax, ax        # 重置 DS=0
+emit(bytes([0x8E, 0xD8]))                # mov ds, ax        # (BIOS 可能破坏 DS)
 emit(bytes([0xBE, 0x00, 0x60]))          # mov si, 0x6000
 emit(bytes([0xB4, 0x42]))                # mov ah, 0x42
 emit(bytes([0x8A, 0x16, 0x00, 0x05]))    # mov dl, [0x500]
@@ -214,8 +220,25 @@ emit(bytes([0x0F, 0x82, 0x00, 0x00]))
 _rf_disp = read_fail - (read_fail_off + 6)
 assert -32768 <= _rf_disp <= 32767, f'jc read_fail rel16 out of range: {_rf_disp}'
 struct.pack_into('<h', s2, read_fail_off + 2, _rf_disp)
+# 重置 DS=0 (BIOS int13h 可能破坏 DS)
+emit(bytes([0x31, 0xC0]))                # xor ax, ax
+emit(bytes([0x8E, 0xD8]))                # mov ds, ax
 emit(bytes([0x8B, 0x1E, 0x0A, 0x05]))    # mov bx, [0x50A] (int13h 可能破坏 bx)
 debug16(0x65)                            # 'e' 本块读盘成功
+
+# 读 buffer 0x10000 前 4 字节并输出（诊断: 每块回读应与 kern[N*0xFE00] 一致）
+# 注：旧版"移除此代码会导致启动失败"之谜已解 —— 是复制段 mov esi 缺 0x66
+# 前缀, ESI 高位靠此处 66 BE 残留才凑巧正确; 前缀已修复, 本段仅留作诊断。
+emit(bytes([0x31, 0xC0]))                # xor ax, ax
+emit(bytes([0x8E, 0xD8]))                # mov ds, ax
+emit(bytes([0xBA, 0x02, 0x04]))          # mov dx, 0x402
+# 读 buffer[0..4] 两次 + buffer[0x7140..0x7144] 一次 (共 12 字节诊断输出)
+# 两次读 [0..4] 若不一致 → 内存在变 (异步 DMA?); 一致 → buffer 内容即如此
+for _esi in (0x10000, 0x10000, 0x17140):
+    emit(bytes([0x66, 0xBE]) + struct.pack('<I', _esi))  # mov esi, _esi
+    for _ in range(4):
+        emit(bytes([0x67, 0xAC]))          # lodsb
+        emit(bytes([0xEE]))                # out dx, al
 
 # ==== 16-bit 实模式复制: 暂存区 0x10000 → [0x504] ====
 # 用 32-bit 寻址 (rep movsd with addr32 前缀) + 段基址=0;
@@ -224,7 +247,11 @@ debug16(0x65)                            # 'e' 本块读盘成功
 emit(bytes([0x31, 0xC0]))                # xor ax, ax
 emit(bytes([0x8E, 0xD8]))                # mov ds, ax   (段基=0, 线性=偏移)
 emit(bytes([0x8E, 0xC0]))                # mov es, ax
-emit(bytes([0xBE, 0x00, 0x00, 0x01, 0x00]))      # mov esi, 0x10000 (源)
+# ⚠️ 必须带 0x66 前缀 (mov esi, imm32)！无前缀时 BE 00 00 只是 mov si,0，
+# 且后续 01 00 被解码为 add [bx+si],ax (向 0x7F 加 0, 侥幸无害)；
+# ESI 高 16 位只能靠前面诊断代码的 66 BE 残留 —— 这就是"删掉 buffer 检查
+# 就无法启动"之谜的真相。
+emit(bytes([0x66, 0xBE, 0x00, 0x00, 0x01, 0x00]))  # mov esi, 0x10000 (源)
 emit(bytes([0x66, 0x8B, 0x3E, 0x04, 0x05]))      # mov edi, [0x0504] (当前 dst, 线性)
 emit(bytes([0x0F, 0xB7, 0xCB]))          # movzx ecx, bx
 emit(bytes([0xC1, 0xE1, 0x07]))          # shl ecx, 7  (dword 数 = 扇区×128)
@@ -232,22 +259,35 @@ emit(bytes([0xFC]))                      # cld
 emit(bytes([0xF3, 0x66, 0x67, 0xA5]))      # addr32 rep movsd (32-bit data + 32-bit addr)
 debug16(0x66)                            # 'f' 本块复制完成
 
-debug16(0x31)                            # '1' after rep movsd, before mov bx
+# ---- lba/dst 推进 ----
+# ⚠️ 严禁在 movzx eax,bx 与两条 add 之间插入 debug16！
+# debug16 的 `mov al, imm8` 会污染 EAX 低字节。历史 bug（本镜像损坏之谜的
+# 根因）：marker '3'(0x33) 使 LBA += 51 (应为 127)，marker '4'(0x34) 经
+# shl 9 使 dst += 0x6800 (应为 0xFE00) → 各块以错误 LBA 读盘、以重叠错位
+# 方式写入 RAM，最终镜像仅 ~14% 字节正确，内核在 0x207143 (#BP) 崩溃。
 emit(bytes([0x8B, 0x1E, 0x0A, 0x05]))    # mov bx, [0x50A]
-debug16(0x32)                            # '2' after mov bx
 emit(bytes([0x66, 0x0F, 0xB7, 0xC3]))    # movzx eax, bx
-debug16(0x33)                            # '3' after movzx
 emit(bytes([0x66, 0x01, 0x06, 0x08, 0x60]))  # add [0x6008], eax (lba += count)
-debug16(0x34)                            # '4' after lba update
 emit(bytes([0x66, 0xC1, 0xE0, 0x09]))    # shl eax, 9
 emit(bytes([0x66, 0x01, 0x06, 0x04, 0x05]))  # add [0x0504], eax  (dst += count×512)
-debug16(0x35)                            # '5' after dst update
 emit(bytes([0x83, 0x3E, 0x02, 0x05, 0x00]))  # cmp word [0x502], 0
-debug16(0x36)                            # '6' after cmp, before jnz
 _jnz_off = len(s2)                       # jnz load_loop (near16, patch)
 emit(bytes([0x0F, 0x85, 0x00, 0x00]))
 struct.pack_into('<h', s2, _jnz_off + 2, load_loop - (_jnz_off + 6))
 debug16(0x63)                            # 'c' 内核加载完成
+
+# ==== 诊断: 加载完成后回读 RAM 关键 dword (定位损坏发生阶段) ====
+# 'V' + [0x200000] 4B | 'W' + [0x207140] 4B | 'X' + [0x20FE00] 4B (block1 首)
+for _marker, _addr in ((0x56, 0x200000), (0x57, 0x207140), (0x58, 0x20FE00)):
+    emit(bytes([0x31, 0xC0]))            # xor ax, ax
+    emit(bytes([0x8E, 0xD8]))            # mov ds, ax
+    emit(bytes([0xBA, 0x02, 0x04]))      # mov dx, 0x402
+    emit(bytes([0xB0, _marker]))         # mov al, marker
+    emit(bytes([0xEE]))                  # out dx, al
+    emit(bytes([0x66, 0xBE]) + struct.pack('<I', _addr))  # mov esi, addr
+    for _ in range(4):
+        emit(bytes([0x67, 0xAC]))        # lodsb
+        emit(bytes([0xEE]))              # out dx, al
 
 # ---- 开保护模式 (最终 trampoline; LGDT 已在循环前完成) ----
 emit(bytes([0x66, 0x0F, 0x20, 0xC0]))              # mov eax, cr0
@@ -272,13 +312,17 @@ emit(bytes([0x8E, 0xC0]))                # mov es, ax
 emit(bytes([0x8E, 0xE0]))                # mov fs, ax
 emit(bytes([0x8E, 0xE8]))                # mov gs, ax
 emit(bytes([0x8E, 0xD0]))                # mov ss, ax
-emit(bytes([0xBC, 0x00, 0x00, 0x0F, 0x00]))  # mov esp, 0xF0000
+emit(bytes([0xBC, 0x08, 0x00, 0x06, 0x00]))  # mov esp, 0x60008
+# 内核栈: 必须避开 0xF0000-0xFFFFF (QEMU isa-bios ROM 区, 写入被静默忽略 →
+# push/retf 弹到 ROM 垃圾 → 三重故障)。0x60000 处于页表(0x16000 结束)与
+# EBDA/VGA(0x9FC00) 之间的空闲 RAM。
+# 对齐: 2×push(8B) + retf 弹 8B 后, _start64 入口 RSP=0x60008 (满足 Rust ABI rsp%16==8)
 
 debug32(0x44)                            # 'D'
 
-# ---- 清零页表区 16KB @ 0x10000 ----
+# ---- 清零页表区 24KB @ 0x10000 (PML4+PDPT+PD0+PD1+PD2+PD3) ----
 emit(bytes([0xBF, 0x00, 0x00, 0x01, 0x00]))  # mov edi, 0x10000
-emit(bytes([0xB9, 0x00, 0x10, 0x00, 0x00]))  # mov ecx, 0x1000
+emit(bytes([0xB9, 0x00, 0x18, 0x00, 0x00]))  # mov ecx, 0x1800 (6144 dwords = 24KB)
 emit(bytes([0x31, 0xC0]))                # xor eax, eax
 clear_loop = len(s2)
 emit(bytes([0x89, 0x07]))                # mov [edi], eax
@@ -304,12 +348,22 @@ emit(bytes([0xB8, 0x00, 0x30, 0x01, 0x00]))
 emit(bytes([0x0D, 0x03, 0x00, 0x00, 0x00]))
 emit(bytes([0x89, 0x04, 0x25]))
 emit(struct.pack('<I', 0x11008))
+# PDPT[2] = PD2 @ 0x14000 | 3
+emit(bytes([0xB8, 0x00, 0x40, 0x01, 0x00]))
+emit(bytes([0x0D, 0x03, 0x00, 0x00, 0x00]))
+emit(bytes([0x89, 0x04, 0x25]))
+emit(struct.pack('<I', 0x11010))
+# PDPT[3] = PD3 @ 0x15000 | 3
+emit(bytes([0xB8, 0x00, 0x50, 0x01, 0x00]))
+emit(bytes([0x0D, 0x03, 0x00, 0x00, 0x00]))
+emit(bytes([0x89, 0x04, 0x25]))
+emit(struct.pack('<I', 0x11018))
 
 debug32(0x46)                            # 'F'
 
-# ---- 填 PD0+PD1: 1024 项 × 2MB 大页 = 恒等映射 0-2GB ----
+# ---- 填 PD0: 512 项 × 2MB 大页 = 恒等映射 0-1GB ----
 emit(bytes([0x31, 0xED]))                # xor ebp, ebp (高 32 位=0)
-emit(bytes([0xBF, 0x00, 0x20, 0x01, 0x00]))  # mov edi, 0x12000
+emit(bytes([0xBF, 0x00, 0x20, 0x01, 0x00]))  # mov edi, 0x12000 (PD0)
 emit(bytes([0x31, 0xC9]))                # xor ecx, ecx
 pd_loop = len(s2)
 emit(bytes([0x89, 0xC8]))                # mov eax, ecx
@@ -319,51 +373,100 @@ emit(bytes([0x89, 0x07]))                # mov [edi], eax
 emit(bytes([0x89, 0x6F, 0x04]))          # mov [edi+4], ebp
 emit(bytes([0x83, 0xC7, 0x08]))          # add edi, 8
 emit(bytes([0x41]))                      # inc ecx
-emit(bytes([0x81, 0xF9, 0x00, 0x04, 0x00, 0x00]))  # cmp ecx, 1024
+emit(bytes([0x81, 0xF9, 0x00, 0x02, 0x00, 0x00]))  # cmp ecx, 512
 emit(bytes([0x0F, 0x82]) + struct.pack('<i', pd_loop - (len(s2) + 6)))
+
+# ---- 填 PD1: 512 项 × 2MB 大页 = 恒等映射 1-2GB ----
+emit(bytes([0xBF, 0x00, 0x30, 0x01, 0x00]))  # mov edi, 0x13000 (PD1)
+pd_loop2 = len(s2)
+emit(bytes([0x89, 0xC8]))                # mov eax, ecx
+emit(bytes([0xC1, 0xE0, 0x15]))          # shl eax, 21
+emit(bytes([0x0D, 0x83, 0x00, 0x00, 0x00]))  # or eax, 0x83 (P+W+PS)
+emit(bytes([0x89, 0x07]))                # mov [edi], eax
+emit(bytes([0x89, 0x6F, 0x04]))          # mov [edi+4], ebp
+emit(bytes([0x83, 0xC7, 0x08]))          # add edi, 8
+emit(bytes([0x41]))                      # inc ecx
+emit(bytes([0x81, 0xF9, 0x00, 0x04, 0x00, 0x00]))  # cmp ecx, 1024
+emit(bytes([0x0F, 0x82]) + struct.pack('<i', pd_loop2 - (len(s2) + 6)))
+
+# ---- 填 PD2: 512 项 × 2MB 大页 = 恒等映射 2-3GB ----
+emit(bytes([0xBF, 0x00, 0x40, 0x01, 0x00]))  # mov edi, 0x14000 (PD2)
+pd_loop3 = len(s2)
+emit(bytes([0x89, 0xC8]))                # mov eax, ecx
+emit(bytes([0xC1, 0xE0, 0x15]))          # shl eax, 21
+emit(bytes([0x0D, 0x83, 0x00, 0x00, 0x00]))  # or eax, 0x83 (P+W+PS)
+emit(bytes([0x89, 0x07]))                # mov [edi], eax
+emit(bytes([0x89, 0x6F, 0x04]))          # mov [edi+4], ebp
+emit(bytes([0x83, 0xC7, 0x08]))          # add edi, 8
+emit(bytes([0x41]))                      # inc ecx
+emit(bytes([0x81, 0xF9, 0x00, 0x06, 0x00, 0x00]))  # cmp ecx, 1536
+emit(bytes([0x0F, 0x82]) + struct.pack('<i', pd_loop3 - (len(s2) + 6)))
+
+# ---- 填 PD3: 512 项 × 2MB 大页 = 恒等映射 3-4GB ----
+emit(bytes([0xBF, 0x00, 0x50, 0x01, 0x00]))  # mov edi, 0x15000 (PD3)
+pd_loop4 = len(s2)
+emit(bytes([0x89, 0xC8]))                # mov eax, ecx
+emit(bytes([0xC1, 0xE0, 0x15]))          # shl eax, 21
+emit(bytes([0x0D, 0x83, 0x00, 0x00, 0x00]))  # or eax, 0x83 (P+W+PS)
+emit(bytes([0x89, 0x07]))                # mov [edi], eax
+emit(bytes([0x89, 0x6F, 0x04]))          # mov [edi+4], ebp
+emit(bytes([0x83, 0xC7, 0x08]))          # add edi, 8
+emit(bytes([0x41]))                      # inc ecx
+emit(bytes([0x81, 0xF9, 0x00, 0x08, 0x00, 0x00]))  # cmp ecx, 2048
+emit(bytes([0x0F, 0x82]) + struct.pack('<i', pd_loop4 - (len(s2) + 6)))
 
 debug32(0x47)                            # 'G'
 
-# ---- CR4.PAE ----
+debug32(0x61)                            # debug: before CR4.PAE
+# ---- CR4: PAE + OSFXSR + OSXMMEXCPT ----
+# PAE(bit5)=1: 4级页表
+# OSFXSR(bit9)=1: 启用 SSE/SSE2
+# OSXMMEXCPT(bit10)=1: 启用 SSE 异常处理
 emit(bytes([0x0F, 0x20, 0xE0]))          # mov eax, cr4
-emit(bytes([0x0D, 0x20, 0x00, 0x00, 0x00]))  # or eax, 0x20
+emit(bytes([0x0D, 0x20, 0x06, 0x00, 0x00]))  # or eax, 0x620 (PAE+OSFXSR+OSXMMEXCPT)
+debug32(0x62)                            # debug: before write cr4
 emit(bytes([0x0F, 0x22, 0xE0]))          # mov cr4, eax
+debug32(0x63)                            # debug: CR4 written
 # ---- CR3 = PML4 ----
 emit(bytes([0xB8, 0x00, 0x00, 0x01, 0x00]))  # mov eax, 0x10000
 emit(bytes([0x0F, 0x22, 0xD8]))          # mov cr3, eax
+debug32(0x64)                            # debug: CR3 written
 # ---- EFER.LME ----
 emit(bytes([0xB9, 0x80, 0x00, 0x00, 0xC0]))  # mov ecx, 0xC0000080
 emit(bytes([0x0F, 0x32]))                # rdmsr
+debug32(0x65)                            # debug: rdmsr done
 emit(bytes([0x0D, 0x00, 0x01, 0x00, 0x00]))  # or eax, 0x100
 emit(bytes([0x0F, 0x30]))                # wrmsr
+debug32(0x66)                            # debug: EFER written
 # ---- CR0.PG (进长模式) ----
 emit(bytes([0x0F, 0x20, 0xC0]))          # mov eax, cr0
 emit(bytes([0x05, 0x00, 0x00, 0x00, 0x80]))  # or eax, 0x80000000
+debug32(0x67)                            # debug: before write cr0
+emit(bytes([0x0F, 0x22, 0xC0]))          # mov cr0, eax
+debug32(0x68)                            # debug: CR0 written (paging on)
+
+# ---- CR0: 清 EM(bit2) + TS(bit3) ----
+# 不清 EM → Rust 的 fninit 会 #UD（EM=1 时所有 x87/SSE 指令非法）
+emit(bytes([0x0F, 0x20, 0xC0]))          # mov eax, cr0
+emit(bytes([0x25, 0xF3, 0xFF, 0xFF, 0xFF]))  # and eax, 0xFFFFFFF3
 emit(bytes([0x0F, 0x22, 0xC0]))          # mov cr0, eax
 
 debug32(0x48)                            # 'H'
 
-# ---- 远跳 64-bit ----
-emit(bytes([0xEA]))
-lm64_placeholder = len(s2)
-emit(struct.pack('<I', 0))
-emit(struct.pack('<H', 0x18))
+# ---- 远跳 64-bit (push + retf) ----
+# 32-bit 兼容模式下 retf 弹 8 字节：EIP(32) + CS(32-slot, 低 16 有效)
+# 栈布局：[ESP+0]=start64(EIP) [ESP+4]=0x18(CS)
+# 注意：不能 push 多余的 0（那是 64-bit retf 才需要的高 32 位）
 
-# ==== 64-bit 入口 ====
-lm64_off = len(s2)
-struct.pack_into('<I', s2, lm64_placeholder, S2_BASE + lm64_off)
+emit(bytes([0x68]) + struct.pack('<I', 0x18))      # push 0x18 (64-bit code selector)
+emit(bytes([0x68]) + struct.pack('<I', start64))    # push start64 (EIP 32-bit)
+debug32(0x69)                                       # 'i' = about to retf
+emit(bytes([0xCB]))                                 # retf → 64-bit!
 
-debug32(0x4B)                            # 'K'
+# 兜底（正常不会到这里）
+emit(bytes([0xF4]))                                 # hlt
+emit(bytes([0xEB, 0xFD]))                           # jmp .
 
-# ---- 栈 + 跳入 Rust 内核 ----
-emit(bytes([0x48, 0xBC]) + struct.pack('<Q', 0x15008))   # mov rsp, 0x15008 (16-byte 对齐)
-debug32(0x4A)                            # 'J' 即将跳转
-debug32(0x4C)                            # 'L' jmp rax 之前
-emit(bytes([0x48, 0xB8]) + struct.pack('<Q', start64))   # mov rax, _start64
-emit(bytes([0xFF, 0xE0]))                                # jmp rax
-# 兜底
-emit(bytes([0xF4]))                                      # hlt
-emit(bytes([0xEB, 0xFD]))                                # jmp .
 
 # ---- GDT (代码之后, 8 字节对齐) ----
 while len(s2) % 8 != 0:
@@ -373,8 +476,8 @@ gdt_off = len(s2)
 emit(struct.pack('<Q', 0))                       # NULL
 emit(struct.pack('<Q', 0x00CF9A000000FFFF))      # 0x08: 32-bit code
 emit(struct.pack('<Q', 0x00CF92000000FFFF))      # 0x10: 32-bit data
-emit(struct.pack('<Q', 0x00AF9A000000FFFF))      # 0x18: 64-bit code (L=1, G=1, limit=0xFFFFF)
-emit(struct.pack('<Q', 0x00AF92000000FFFF))      # 0x20: 64-bit data (DPL=0)
+emit(struct.pack('<Q', 0x00AF9A0000000000))      # 0x18: 64-bit code (L=1, D=0, G=1)
+emit(struct.pack('<Q', 0x0000920000000000))      # 0x20: 64-bit data (DPL=0)
 
 gdt_ptr_off = len(s2)
 emit(struct.pack('<H', 39))
