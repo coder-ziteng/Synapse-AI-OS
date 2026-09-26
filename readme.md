@@ -39,7 +39,7 @@
 │  ipc/   Endpoint(同步) · Notification(异步) · 单拷贝路径    │
 │  proc/  进程表 · Agent 注册表 · spawn/exit/reap            │
 │  sched/ TCB 状态机 · runqueue · sleep 队列 · FR8 核算 · FR10 频率计数│
-│  kernel/ 引导链 · 页帧/堆 · GDT/TSS/IDT · PIC/PIT · TSC · kthread│
+│  kernel/ 引导链 · 页帧/堆 · GDT/TSS/IDT · PIC/PIT · TSC · kthread/switch_to│
 │  hal/   硬件抽象 Trait (Mmu/Interrupt/Timer/Serial)        │
 │  audit/ 审计事件流（骨架）                                 │
 └─────────────────────────────────────────────────────────┘
@@ -56,7 +56,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 | P0 | 环境与基线（nightly-2026-09-23 锁定 + QEMU + 工具链验证） | ✅ 完成 |
 | P1 | 裸机点亮与工程基建（三级 boot 链 · UART · log/panic 回溯 · CI · 测试框架） | ✅ 完成 (11/11) |
 | P2 | 内存 / 中断 / 异常（E820 · 页帧分配器 · 内核堆 · GDT/TSS/IST · IDT · PIC/PIT · TSC 校准） | ✅ 完成 (7/7) |
-| P3 | 多任务与调度（sched/ 纯逻辑 crate · switch_to 汇编 · 抢占模型 · Mutex · FR8/FR10 原语） | 🔄 进行中 (4/8)：T1 sched crate ✅ · T2 FR8 核算 ✅ · T3 FR10 频率计数 ✅ · T4 kthread 基建 ✅ 真机 27/27 |
+| P3 | 多任务与调度（sched/ 纯逻辑 crate · switch_to 汇编 · 抢占模型 · Mutex · FR8/FR10 原语） | 🔄 进行中 (5/8)：T1 sched crate ✅ · T2 FR8 核算 ✅ · T3 FR10 频率计数 ✅ · T4 kthread 基建 ✅ 真机 27/27 · T5 switch_to 汇编 ✅ 真机双线程往返 9/9 |
 | P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 未开始 |
 | P4.5 | PCI 枚举与中断用户态化 | 未开始 |
 | P5 | 外交工具与 Agent 雏形 | 未开始 |
