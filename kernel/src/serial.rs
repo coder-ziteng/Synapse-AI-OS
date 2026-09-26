@@ -51,17 +51,24 @@ impl SerialDevice for Uart16550 {
     }
 }
 
-/// 全局串口实例（延迟初始化）。
-static mut GLOBAL_SERIAL: Option<Uart16550> = None;
+/// 串口硬件初始化标记（原 `static mut GLOBAL_SERIAL: Option<Uart16550>` 已移除：
+/// `Uart16550` 是零尺寸标记类型，无实例状态可存，`static mut` 只剩"是否初始化过"
+/// 一个 bit 的语义，且触发 `static_mut_refs` 2024 弃用警告）。
+static SERIAL_INITIALIZED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
-/// 初始化全局串口（必须在首次使用前调用）。
+/// 初始化全局串口（必须在首次使用前调用；重复调用幂等）。
 pub fn init() {
-    unsafe {
-        GLOBAL_SERIAL = Some(Uart16550);
-    }
-    if let Some(ref mut s) = unsafe { GLOBAL_SERIAL.as_mut() } {
-        s.init();
-    }
+    use core::sync::atomic::Ordering;
+    SERIAL_INITIALIZED.store(true, Ordering::Relaxed);
+    // 真正的硬件初始化（16550 寄存器编程）在 trait init 内完成，关中断保护。
+    SerialDevice::init(&mut Uart16550);
+}
+
+/// 串口是否已初始化（诊断用）。
+pub fn is_initialized() -> bool {
+    use core::sync::atomic::Ordering;
+    SERIAL_INITIALIZED.load(Ordering::Relaxed)
 }
 
 /// 在关中断下访问串口，避免与中断处理路径竞争。

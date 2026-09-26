@@ -40,9 +40,15 @@ global_asm!(include_str!("boot.S"));
 // `core::fmt` 等格式化代码路径会调用 memset/memcpy/memcmp。
 // compiler_builtins rlib 在 x86_64-unknown-none 上是 “thin wrapper”，并不真提供这些
 // —— 我们必须自己填。ABI: rdi=dst, rsi=src, rdx=n，返回 dst。
+//
+// 签名必须与 C 运行时符号的期望原型一致（c_void/c_int/c_char），否则触发
+// `suspicious_runtime_symbol_definitions` lint；每个函数补文档满足 `-W missing-docs`。
+use core::ffi::{c_char, c_int, c_void};
+
+/// C 运行时 `memset`：把 `s` 起 `n` 字节填充为 `c`（取低 8 位），返回 `s`。
 #[no_mangle]
-pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
-    let dst = s;
+pub unsafe extern "C" fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void {
+    let dst = s as *mut u8;
     let val = c as u8;
     let count = n;
     core::arch::asm!(
@@ -52,13 +58,14 @@ pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
         inout("rcx") count => _,
         options(preserves_flags, nostack),
     );
-    dst
+    s
 }
 
+/// C 运行时 `memcpy`：从 `s` 向 `d` 拷贝 `n` 字节（不允许重叠），返回 `d`。
 #[no_mangle]
-pub unsafe extern "C" fn memcpy(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
-    let dst = d;
-    let src = s;
+pub unsafe extern "C" fn memcpy(d: *mut c_void, s: *const c_void, n: usize) -> *mut c_void {
+    let dst = d as *mut u8;
+    let src = s as *const u8;
     let count = n;
     core::arch::asm!(
         "rep movsb",
@@ -67,19 +74,23 @@ pub unsafe extern "C" fn memcpy(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
         inout("rcx") count => _,
         options(preserves_flags, nostack),
     );
-    dst
+    d
 }
 
+/// C 运行时 `memcmp`：比较 `a`/`b` 起 `n` 字节。
+///
+/// C 语义：相等返回 0，不等返回首个差异字节的差值（负/正）。
+/// 注意：不能用 `rep cmpsb + sete + neg` —— 那样"相等"会返回 -1，
+/// 导致 String/slice 的 PartialEq（底层走 memcmp）对相等内容判为不等。
+/// （与 P1-T8 basic_boot.rs 中发现并修复的 bug 同源。）
 #[no_mangle]
-pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
-    // C 语义：相等返回 0，不等返回首个差异字节的差值（负/正）。
-    // 注意：不能用 `rep cmpsb + sete + neg` —— 那样"相等"会返回 -1，
-    // 导致 String/slice 的 PartialEq（底层走 memcmp）对相等内容判为不等。
-    // （与 P1-T8 basic_boot.rs 中发现并修复的 bug 同源。）
+pub unsafe extern "C" fn memcmp(a: *const c_void, b: *const c_void, n: usize) -> c_int {
+    let a = a as *const u8;
+    let b = b as *const u8;
     let mut i = 0;
     while i < n {
-        let x = *a.add(i) as i32;
-        let y = *b.add(i) as i32;
+        let x = *a.add(i) as c_int;
+        let y = *b.add(i) as c_int;
         if x != y {
             return x - y;
         }
@@ -88,8 +99,9 @@ pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     0
 }
 
+/// C 运行时 `strlen`：返回 NUL 结尾字符串 `s` 的长度（不含 NUL）。
 #[no_mangle]
-pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
+pub unsafe extern "C" fn strlen(s: *const c_char) -> usize {
     let mut len = 0;
     while *s.add(len) != 0 {
         len += 1;
@@ -97,8 +109,14 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
     len
 }
 
+/// C 运行时 `memmove`：从 `s` 向 `d` 拷贝 `n` 字节（允许重叠），返回 `d`。
+///
+/// 重叠方向判定：`d < s` 或 `d` 完全落在 `s` 区间之后 → 正向拷贝安全；
+/// 否则（`d` 与 `s` 重叠且 `d > s`）必须反向拷贝防止先写后读。
 #[no_mangle]
-pub unsafe extern "C" fn memmove(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
+pub unsafe extern "C" fn memmove(d: *mut c_void, s: *const c_void, n: usize) -> *mut c_void {
+    let d_u8 = d as *mut u8;
+    let s_u8 = s as *const u8;
     if (d as usize) < (s as usize) || (d as usize) >= (s as usize).wrapping_add(n) {
         // 不重叠或 d 在 s 之前：正向拷贝
         memcpy(d, s, n)
@@ -107,7 +125,7 @@ pub unsafe extern "C" fn memmove(d: *mut u8, s: *const u8, n: usize) -> *mut u8 
         let mut i = n;
         while i > 0 {
             i -= 1;
-            *d.add(i) = *s.add(i);
+            *d_u8.add(i) = *s_u8.add(i);
         }
         d
     }
@@ -267,6 +285,19 @@ fn panic(info: &PanicInfo) -> ! {
             }
             rbp = next_rbp;
         }
+    }
+
+    // panic 也要产出**确定性退出码**（否则 QEMU 挂死在下面的 hlt 循环，
+    // CI/一键脚本只能靠超时判定失败）。
+    // isa-debug-exit (iobase=0x502)：exit code = (val << 1) | 1
+    //   val=0xB1 → 355 = kernel panic 出口（区别于成功路径 0xB5 → 363）
+    unsafe {
+        asm!(
+            "mov dx, 0x502",
+            "mov al, 0xB1",
+            "out dx, al",
+            options(nostack, preserves_flags),
+        );
     }
 
     loop {

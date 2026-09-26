@@ -616,6 +616,12 @@
       "alternatives_rejected": "①仅口头约定不写入 rule.md——多窗口/多智能体协作下无强制力；②README 由单一窗口专职维护——违背并行开发模式且单点滞后；③用 CHANGELOG.md 替代——新成员入口应是 README 本身，CHANGELOG 可开源后再加。",
       "date": "2026-09-26",
       "window": "claude/design-pure-review"
+    },
+    {
+      "date": "2026-09-26",
+      "scope": "QEMU 退出码契约 + 内核编译警告清零 + startAIOS.ps1 UTF-8",
+      "decision": "确立 isa-debug-exit 退出码契约：363=(0xB5<<1)|1 成功收尾（smoke 全过后写 0x502）；355=(0xB1<<1)|1 kernel panic 确定性出口（panic handler 打印消息+回溯后写 0x502 再进 hlt 循环）。startAIOS.ps1 三分支判定：363→OK，355→panic-exit 失败（不必等超时），其他→exit-code 失败。同时清零内核 bin 全部 11 个编译警告：5 个 C shim（memset/memcpy/memcmp/strlen/memmove）签名改为 C 原型（c_void/c_int/c_char）消除 suspicious_runtime_symbol_definitions + 补文档消除 missing-docs；serial.rs 移除 static mut GLOBAL_SERIAL（Uart16550 是 ZST 标记无实例状态，改 AtomicBool SERIAL_INITIALIZED）消除 static_mut_refs。startAIOS.ps1 控制台/管道/读日志统一 UTF-8 修复中文乱码。",
+      "alternatives_rejected": "① panic 后仅 hlt 循环：QEMU 进程残留，CI 只能靠超时判定失败（P2-T7 调试期实际踩中，需手工 taskkill）；② panic 复用 363：成功/失败不可区分；③ 保留 u8 指针签名的 C shim + #[allow] 压 lint：掩盖真实的 ABI 原型不匹配（strlen 期望 *const i8）；④ GLOBAL_SERIAL 用 UnsafeCell 包装：Option<ZST> 无状态可存，AtomicBool 语义更诚实。验证：临时注入 panic → exit=355 + serial [PANIC] ✓；正常路径 363 + smoke 62/62 + markers 完整 ✓；host 115/115、P1-T8 套件 4/4 无回归 ✓。"
     }
   ],
   "current_task": "P1-T8",

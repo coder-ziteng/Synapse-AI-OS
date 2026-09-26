@@ -9,6 +9,7 @@
 #
 #  判定标准 (xtask run 自身永远 exit 1，不可作为依据):
 #    1. QEMU 退出码 = 363  ((0xB5<<1)|1, isa-debug-exit 正常收尾)
+#       QEMU 退出码 = 355  ((0xB1<<1)|1, kernel panic 确定性出口 — 直接判失败)
 #    2. logs\serial.log 出现 "N/N checks passed" 且无 [PANIC]
 #    3. logs\debugcon-kernel.log boot marker 序列完整 (打印供人工核对)
 # ============================================================
@@ -21,6 +22,13 @@ param(
 # 注意: 用 Continue 而非 Stop —— PS 5.1 下 cargo/python 写 stderr（编译警告等）
 # 一旦被重定向就会变成 NativeCommandError 误中断脚本；成败判定全部走 $LASTEXITCODE。
 $ErrorActionPreference = 'Continue'
+
+# serial.log 是 UTF-8，PS 5.1 控制台默认按 ANSI/GBK 解码 → 中文乱码（鈫?/鏃堕挓）。
+# 控制台输出编码 + 管道编码统一切 UTF-8；读文件处再加 -Encoding UTF8。
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch { }
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
@@ -79,13 +87,14 @@ if ($runOut -match 'QEMU exited with exit code: (\d+)') { $qemuExit = [int]$Matc
 Write-Step '[3/3] 结果判定'
 $fail = @()
 
-# 1) QEMU 退出码
+# 1) QEMU 退出码 (363=正常收尾, 355=kernel panic 确定性出口)
 if ($qemuExit -eq 363) { Write-Ok 'QEMU 退出码 = 363 (正常收尾)' }
-else { Write-Bad "QEMU 退出码 = $qemuExit (期望 363)"; $fail += 'exit-code' }
+elseif ($qemuExit -eq 355) { Write-Bad 'QEMU 退出码 = 355 (kernel panic 出口 — 回溯见 serial.log)'; $fail += 'panic-exit' }
+else { Write-Bad "QEMU 退出码 = $qemuExit (期望 363=成功 / 355=panic)"; $fail += 'exit-code' }
 
 # 2) 串口日志: smoke 全通过 + 无 panic
 if (Test-Path $serialLog) {
-    $serial = Get-Content $serialLog -Raw
+    $serial = Get-Content $serialLog -Raw -Encoding UTF8
     if ($serial -match '(\d+)/\1 checks passed') { Write-Ok "smoke 测试: $($Matches[0])" }
     else { Write-Bad 'serial.log 未出现 "N/N checks passed"'; $fail += 'smoke' }
     if ($serial -match '\[PANIC\]') { Write-Bad '检测到 [PANIC]，回溯见 serial.log'; $fail += 'panic' }
@@ -102,7 +111,7 @@ if (Test-Path $dbg501Log) {
 # ---------- 串口日志摘要 ----------
 if (Test-Path $serialLog) {
     Write-Host "`n----- serial.log (末尾 $Tail 行) -----" -ForegroundColor Yellow
-    Get-Content $serialLog -Tail $Tail | ForEach-Object { Write-Host "  $_" }
+    Get-Content $serialLog -Tail $Tail -Encoding UTF8 | ForEach-Object { Write-Host "  $_" }
     Write-Host '--------------------------------------' -ForegroundColor Yellow
 }
 
