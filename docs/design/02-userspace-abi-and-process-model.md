@@ -136,6 +136,23 @@ pub struct UserMemoryRegion {
 ```
 - 缺页处理：命中合法 region → 分配页帧并映射；未命中 → SIGSEGV 等价物（杀进程）。
 
+> **UPDATE（P4-T3, 2026-09-27, DECIDED）**：实现落点 = `synapse-vma` 纯逻辑 crate（`vma/src/{lib,table}.rs`）。
+> - `RegionFlags` 手动位组合（`READ=1/WRITE=2/EXEC=4/GROWABLE=8`，`contains/union` const fn），零依赖；
+> - `RegionKind = Code|Data|Stack|Heap|Mapped`；
+> - `RegionTable` 固定 `[Option<UserMemoryRegion>; MAX_REGIONS=32]` + `len`，纯逻辑 `insert/lookup/remove/grow/clear/iter`；
+> - `grow(start, new_start, new_end)` 校验 GROWABLE + 单调延展（`new_start <= old.start && new_end >= old.end`，否则 `Shrink`）+ 不与其他区域重叠；
+> - 结构校验：`validate()` = 页对齐 + 非空 + `start >= NULL_GUARD_END (0x1000)`；
+> - 宿主端 20 个单元测试覆盖 insert/lookup/overlap (含端点相邻允许)/NULL guard/unaligned/empty/full/remove/grow(heap-up/stack-down/non-growable/overlap/notfound)/clear。
+>
+> 内核缺页路径 = `kernel/src/paging.rs::handle_user_fault`（P4-T3）：
+> - error_code 解析 → VMA lookup → 权限校验（write/fetch/read ↔ VMA flags）；
+> - 命中合法 region → `zeroed_frame()` + `AddressSpace::map_page`（按 VMA flags 设置 US / W / NX），返回原 ip = 重执 faulting 指令；
+> - 未命中 / 权限违例 / NULL 守卫 / demand 未武装 → **kill 骨架**（SIGSEGV 等价）：`kill_count` 累加 + 记录 CR2 + 消费 `KILL_SINK_RIP`（单次 sink，用于 smoke 探针接住）；无 sink 时返回 0 走调用方 panic（真实内核 fault）。
+>
+> #PF handler trampoline 同步强化（P4-T3 顺带）：原实现让 inner clobber caller-saved GPR（含 `rax`），faulting 指令以 rax 作地址操作数时（如 `mov rax, [rax]`）重执读到 rax 自身字节。修复 = 入口 push 9 个 caller-saved（rax/rcx/rdx/rsi/rdi/r8-r11），inner 返回后 pop 复原；resume RIP 借 callee-saved r12 跨调用传递。
+>
+> **x86 ring-0 限制**（实测发现）：supervisor 模式忽略叶级 R/W 位——从 ring-0 写"RX"页不会 fault。kill 骨架的"权限违例"分支因此在 ring-0 不可探针触发，vma-smoke 改用 `handle_user_fault` 直接调用（`error_code=P=1|W=1` + R-only VMA + armed sink）验证。`probe_expect_kill_write` 保留供 T5+ ring-3 smoke 使用。
+
 ---
 
 ## 4. 系统调用 ABI

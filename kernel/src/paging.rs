@@ -42,6 +42,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use log::info;
 
 use crate::page_frame::{alloc_frame, free_frame, with_page_frames, PhysicalAddr, FRAME_SIZE};
+use crate::sync::SpinLock;
+use synapse_vma::{RegionFlags, RegionTable, UserMemoryRegion, VmaError, NULL_GUARD_END};
 
 // ---------------------------------------------------------------------------
 // 页表项位（AMD64 Manual Vol.2 §5 Paging）
@@ -375,6 +377,231 @@ impl Drop for AddressSpace {
 }
 
 // ---------------------------------------------------------------------------
+// P4-T3: Demand paging (#PF-driven VMA hit → 分配帧, 映射, 清零) + kill 骨架
+// ---------------------------------------------------------------------------
+
+/// #PF error_code 位（AMD64 Vol.2 §4.7）。
+/// 0 = 页未映射（P=0，按需分页路径）；1 = 页已映射但权限违例（保护路径）。
+pub const PF_ERR_PRESENT: u64 = 1 << 0;
+/// 1 = 写访问（与 P 组合区分按需分页与 CoW 等写保护场景）。
+pub const PF_ERR_WRITE: u64 = 1 << 1;
+/// 1 = 来自 ring-3 用户态（区别 ring-0 内核 bug 与用户态合法缺页）。
+pub const PF_ERR_USER: u64 = 1 << 2;
+/// 1 = 取指访问（与 X 位 / NX 守卫相关）。
+pub const PF_ERR_FETCH: u64 = 1 << 4;
+
+/// VMA 表（单例 skeleton：进程表尚未接 proc，T5+ 改成 per-process）。
+static DEMAND_TABLE: SpinLock<RegionTable> = SpinLock::new(RegionTable::new());
+/// 武装中的 AddressSpace 裸指针（0 = demand 未武装）。
+static DEMAND_AS: AtomicU64 = AtomicU64::new(0);
+/// kill-skeleton resume RIP（0 = 未武装，单次有效）。
+static KILL_SINK_RIP: AtomicU64 = AtomicU64::new(0);
+/// kill-skeleton 捕获的 CR2。
+static KILL_CAUGHT_ADDR: AtomicU64 = AtomicU64::new(0);
+static KILL_CAUGHT_VALID: AtomicU64 = AtomicU64::new(0);
+/// kill-skeleton 触发次数（smoke 断言用）。
+static KILL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// 注册一条用户 VMA。失败返回 [`VmaError`]。
+pub fn demand_register(region: UserMemoryRegion) -> Result<usize, VmaError> {
+    DEMAND_TABLE.lock().insert(region)
+}
+
+/// 取当前 kill-skeleton 触发次数（smoke 断言）。
+pub fn kill_count() -> u64 {
+    KILL_COUNT.load(Ordering::SeqCst)
+}
+
+/// 武装 demand-paging 上下文：#PF 将按 VMA 命中情况分配帧并映射到 `as`。
+///
+/// # Safety
+/// `as_ptr` 必须指向一个存活的 [`AddressSpace`]，且在 disarm 前不得被 drop 或
+/// 独占借用——单核 MVP 的契约（T5+ 接 proc 后改为 per-process 当前 AS）。
+pub unsafe fn demand_arm(as_ptr: *mut AddressSpace) {
+    DEMAND_AS.store(as_ptr as u64, Ordering::SeqCst);
+}
+
+/// disarm + 清空 VMA 表（smoke 收尾）。下一帧 #PF 走 panic 路径。
+pub fn demand_disarm() {
+    DEMAND_AS.store(0, Ordering::SeqCst);
+    DEMAND_TABLE.lock().clear();
+}
+
+/// 武装 kill-sink resume RIP（smoke 直接调 handle_user_fault 时的 sentinel）。
+pub fn arm_kill_sink(rip: u64) {
+    KILL_SINK_RIP.store(rip, Ordering::SeqCst);
+}
+
+/// kill-skeleton 探测读：touch `addr` 期望 #PF 走 kill 路径并被 sink 接住，
+/// 返回捕获的 CR2（与 `probe_expect_pf` 对称，但走 VMA miss/permission 路径）。
+///
+/// # Safety
+/// 同 [`probe_expect_pf`]。
+pub unsafe fn probe_expect_kill(addr: u64) -> Option<u64> {
+    KILL_CAUGHT_VALID.store(0, Ordering::SeqCst);
+    KILL_CAUGHT_ADDR.store(0, Ordering::SeqCst);
+    asm!(
+        "lea rax, [rip + 2f]",
+        "mov [{slot}], rax",
+        "mov rax, [{a}]",
+        "2:",
+        slot = in(reg) &KILL_SINK_RIP as *const AtomicU64 as u64,
+        a = in(reg) addr,
+        out("rax") _,
+        options(nostack),
+    );
+    let leftover = KILL_SINK_RIP.swap(0, Ordering::SeqCst);
+    if leftover != 0 {
+        return None;
+    }
+    if KILL_CAUGHT_VALID.load(Ordering::SeqCst) == 1 {
+        Some(KILL_CAUGHT_ADDR.load(Ordering::SeqCst))
+    } else {
+        None
+    }
+}
+
+/// kill-skeleton 探测写：touch `[addr] = 1` 期望触发 #PF(P=1|W) → 写权限
+/// 不足走 kill 路径。
+///
+/// **限制**：x86-64 ring-0 访问忽略叶级 R/W 位（supervisor 永远可写），故 ring-0
+/// 探测永远不会 fault——此原语仅供 **ring-3 用户态 smoke 复用**（T5+ syscall
+/// 跳用户态后再用）。ring-0 的权限违例 kill 请走 [`handle_user_fault`] 直接调用。
+///
+/// # Safety
+/// 同 [`probe_expect_pf`]。
+#[allow(dead_code)]
+pub unsafe fn probe_expect_kill_write(addr: u64) -> Option<u64> {
+    KILL_CAUGHT_VALID.store(0, Ordering::SeqCst);
+    KILL_CAUGHT_ADDR.store(0, Ordering::SeqCst);
+    asm!(
+        "lea rax, [rip + 2f]",
+        "mov [{slot}], rax",
+        "mov rax, 1",
+        "mov [{a}], rax",
+        "2:",
+        slot = in(reg) &KILL_SINK_RIP as *const AtomicU64 as u64,
+        a = in(reg) addr,
+        out("rax") _,
+        options(nostack),
+    );
+    let leftover = KILL_SINK_RIP.swap(0, Ordering::SeqCst);
+    if leftover != 0 {
+        return None;
+    }
+    if KILL_CAUGHT_VALID.load(Ordering::SeqCst) == 1 {
+        Some(KILL_CAUGHT_ADDR.load(Ordering::SeqCst))
+    } else {
+        None
+    }
+}
+
+/// idt.rs `#PF` 回调 ②（P4-T3）：按需分页 + kill 骨架。
+///
+/// 返回非 0 = resume RIP（按需分页成功 → 重执原指令；或 kill sink 被武装 → 恢复点）；
+/// 返回 0 = 落到调用方 panic（内核级真实 fault）。
+pub(crate) fn handle_user_fault(cr2: u64, error_code: u64, ip: u64) -> u64 {
+    let user_mode = error_code & PF_ERR_USER != 0;
+    let in_window = (USER_REGION_START..USER_REGION_END).contains(&cr2);
+
+    // Ring-0 + 内核区地址 → 与本机制无关，落到内核 panic（真实内核 bug）
+    if !in_window && !user_mode {
+        return 0;
+    }
+
+    // NULL 守卫（Doc 02 §3.1：0..0x1000 永不被映射）+ 用户态越界访问
+    if cr2 < NULL_GUARD_END || !in_window {
+        return kill_path(cr2, error_code, ip, "guard/out-of-window");
+    }
+
+    let va = cr2 & !(FRAME_SIZE as u64 - 1);
+    let as_ptr = DEMAND_AS.load(Ordering::SeqCst);
+
+    // VMA 查找（短临界区，拷贝后立即释放锁，避免 logging/sleep 在锁内）
+    let region = {
+        let table = DEMAND_TABLE.lock();
+        table.lookup(cr2).copied()
+    };
+    let Some(region) = region else {
+        return kill_path(cr2, error_code, ip, "no VMA");
+    };
+    if as_ptr == 0 {
+        return kill_path(cr2, error_code, ip, "demand unarmed");
+    }
+
+    // 权限校验（error_code → VMA flags）
+    let write = error_code & PF_ERR_WRITE != 0;
+    let fetch = error_code & PF_ERR_FETCH != 0;
+    if fetch && !region.flags.contains(RegionFlags::EXEC) {
+        return kill_path(cr2, error_code, ip, "exec on non-X");
+    }
+    if write && !region.flags.contains(RegionFlags::WRITE) {
+        return kill_path(cr2, error_code, ip, "write on non-W");
+    }
+    if !fetch && !write && !region.flags.contains(RegionFlags::READ) {
+        return kill_path(cr2, error_code, ip, "read on non-R");
+    }
+    // P=1（已映射但权限不足）：本机制叶权限 = VMA 权限，所有情况已被上述 3 条覆盖；
+    // 到达此处 = 未处理的 P=1（如 CoW/smith）→ 杀骨架
+    if error_code & PF_ERR_PRESENT != 0 {
+        return kill_path(cr2, error_code, ip, "protection (P=1)");
+    }
+
+    // 按需映射：分配并清零帧（防信息泄漏），按 VMA flags 设置叶权限
+    let Some(frame) = zeroed_frame() else {
+        log::error!("[vma] demand paging OOM at cr2={:#x}", cr2);
+        return 0;
+    };
+    let mut flags = PT_USER;
+    if region.flags.contains(RegionFlags::WRITE) {
+        flags |= PT_WRITABLE;
+    }
+    if !region.flags.contains(RegionFlags::EXEC) {
+        flags |= PT_NX;
+    }
+    // SAFETY: demand_arm 契约——as_ptr 存活且当前核独占（单核 MVP）
+    let as_ref = unsafe { &mut *(as_ptr as *mut AddressSpace) };
+    match as_ref.map_page(va, frame, flags) {
+        Ok(()) => {
+            info!(
+                "[vma] demand-mapped {:#x} -> frame {:#x} ({:?}, leaf flags {:#x})",
+                va, frame, region.kind, flags
+            );
+            ip // 重执 faulting 指令
+        }
+        Err(MapError::AlreadyMapped) => {
+            // 竞争（已被另一路径映射）：释放刚分配的帧，重试
+            free_frame(frame);
+            ip
+        }
+        Err(e) => {
+            free_frame(frame);
+            log::error!("[vma] map_page failed: {:?} at {:#x}", e, va);
+            0
+        }
+    }
+}
+
+fn kill_path(cr2: u64, error_code: u64, ip: u64, reason: &'static str) -> u64 {
+    KILL_COUNT.fetch_add(1, Ordering::SeqCst);
+    KILL_CAUGHT_ADDR.store(cr2, Ordering::SeqCst);
+    KILL_CAUGHT_VALID.store(1, Ordering::SeqCst);
+    let resume = KILL_SINK_RIP.swap(0, Ordering::SeqCst);
+    if resume != 0 {
+        info!(
+            "[vma] kill-skeleton SIGSEGV-equivalent ({}): cr2={:#x} err={:#x} ip={:#x}; sink armed -> resumed (smoke)",
+            reason, cr2, error_code, ip
+        );
+    } else {
+        info!(
+            "[vma] kill-skeleton SIGSEGV-equivalent ({}): cr2={:#x} err={:#x} ip={:#x}; sink unarmed -> panic",
+            reason, cr2, error_code, ip
+        );
+    }
+    resume
+}
+
+// ---------------------------------------------------------------------------
 // 真机 smoke（P4-T2 verify：新建 AS → CR3 切换 → 内核继续跑 → 用户页读写 →
 // 未映射访问 #PF；+ FR8 页帧账本归零）
 // ---------------------------------------------------------------------------
@@ -515,4 +742,161 @@ pub fn paging_smoke() {
     );
 
     info!("[paging-smoke] {}/{} checks passed", total, total);
+}
+
+/// P4-T3 真机 smoke：VMA 注册 → 按需分页 → 权限违例/未注册 → kill 骨架
+/// → NULL 守卫 → FR8 归零。在 `_start64` 的 paging_smoke 之后调用。
+pub fn vma_smoke() {
+    info!("[vma-smoke] start");
+    let mut total: u32 = 0;
+    let used_pre = with_page_frames(|a| a.used_frames());
+    let _ = unsafe { enable_nxe() };
+
+    // 表级守卫（Doc 02 §3.1：0..0x1000 永不被映射）+ 结构校验委派
+    check!(
+        total,
+        "register NULL-region rejected (NullGuard)",
+        demand_register(UserMemoryRegion::new(
+            0,
+            0x2000,
+            RegionFlags::RW,
+            synapse_vma::RegionKind::Data,
+        )) == Err(VmaError::NullGuard)
+    );
+    check!(
+        total,
+        "register unaligned region rejected",
+        demand_register(UserMemoryRegion::new(
+            USER_REGION_START + 1,
+            USER_REGION_START + 0x1000,
+            RegionFlags::RX,
+            synapse_vma::RegionKind::Code,
+        )) == Err(VmaError::Unaligned)
+    );
+
+    // 合法注册（多页 code 区 + 单页 data 区——data 区 +2MB 偏移确保分配独立 PT）
+    let code_base = USER_REGION_START;
+    let data_base = USER_REGION_START + 0x20_0000;
+    demand_register(UserMemoryRegion::new(
+        code_base,
+        code_base + 0x2000,
+        RegionFlags::RX,
+        synapse_vma::RegionKind::Code,
+    ))
+    .expect("[vma-smoke] register code");
+    demand_register(UserMemoryRegion::new(
+        data_base,
+        data_base + 0x1000,
+        RegionFlags::RW,
+        synapse_vma::RegionKind::Data,
+    ))
+    .expect("[vma-smoke] register data");
+    info!("[vma-smoke] 2 VMAs registered");
+
+    // 新建 AS + 激活 + 武装 demand 上下文
+    let mut as2 = AddressSpace::new().expect("[vma-smoke] frames for AS");
+    let old_cr3 = cr3_read();
+    unsafe {
+        as2.activate();
+        demand_arm(&mut as2 as *mut AddressSpace);
+    }
+    check!(total, "AS2 active (CR3 = new PML4)", cr3_read() == as2.pml4_phys());
+
+    // 按需分页：code 段首页首次读 → 缺页 → 分配 + 零页 + 映射 → 重执读到 0
+    check!(
+        total,
+        "code page 0 not present before first touch",
+        as2.translate(code_base).is_none()
+    );
+    let v0 = unsafe { (code_base as *const u64).read_volatile() };
+    let tr0 = as2.translate(code_base);
+    check!(
+        total,
+        "demand read mapped code page 0 (zeroed, frame valid)",
+        v0 == 0
+            && tr0.is_some()
+            && tr0.unwrap() % FRAME_SIZE as u64 == 0
+            && tr0.unwrap() != 0
+    );
+
+    // 多页同区域：code 段第二页同样按需分页（同一 PT）
+    let _v1 = unsafe { ((code_base + 0x1000) as *const u64).read_volatile() };
+    check!(
+        total,
+        "demand read mapped code page 1",
+        as2.translate(code_base + 0x1000).is_some()
+    );
+
+    // 按需写分页：data 段首次写 → 缺页(W) → W 映射 → 写入并读回
+    let sentinel = 0x5A5A_A5A5_1234_5678u64;
+    unsafe { (data_base as *mut u64).write_volatile(sentinel) };
+    check!(
+        total,
+        "demand write roundtrip on data page",
+        unsafe { (data_base as *const u64).read_volatile() } == sentinel
+    );
+
+    // 权限违例 → kill 骨架：从 ring-0 测试受 x86 限制（R/W 位 supervisor-忽略），
+    // 改用直接策略调用：error_code=P=1|W=1 命中 R-only Code VMA → 写权限不足 → kill
+    let k0 = kill_count();
+    let sentinel_p = 0x5EED_0002u64;
+    arm_kill_sink(sentinel_p);
+    let r_perm = handle_user_fault(code_base, PF_ERR_PRESENT | PF_ERR_WRITE, 0x1234);
+    check!(
+        total,
+        "permission violation (P=1|W=1 on R-only VMA) -> kill (sink resumed)",
+        r_perm == sentinel_p && kill_count() == k0 + 1
+    );
+
+    // 未注册地址（用户窗口内）→ kill 骨架（实际 #PF 路径）
+    let unreg = USER_REGION_START + 0x100_0000; // +16MB
+    let caught_r = unsafe { probe_expect_kill(unreg) };
+    check!(
+        total,
+        "unregistered user-window VA triggers kill skeleton",
+        caught_r == Some(unreg) && kill_count() == k0 + 2
+    );
+
+    // 已映射的 RW 页读 → 不应触发 kill（无 fault）
+    let caught_no = unsafe { probe_expect_kill(data_base) };
+    check!(
+        total,
+        "no false fault on mapped RW data page",
+        caught_no.is_none() && kill_count() == k0 + 2
+    );
+
+    // 直接策略测试：用户态 NULL 解引用 → kill（sink 接住）
+    let sentinel_rip = 0x5EED_0001u64;
+    arm_kill_sink(sentinel_rip);
+    let r_null_user = handle_user_fault(0x800, PF_ERR_USER, 0x1234);
+    check!(
+        total,
+        "user-mode NULL deref -> kill (sink resumed)",
+        r_null_user == sentinel_rip && kill_count() == k0 + 3
+    );
+    // ring-0 NULL → 内核 fault 策略（0 = panic 路径），kill 计数不变
+    let r_null_kernel = handle_user_fault(0x800, 0, 0x1234);
+    check!(
+        total,
+        "ring-0 NULL fault -> kernel-fault policy (0 = panic path)",
+        r_null_kernel == 0 && kill_count() == k0 + 3
+    );
+
+    // 收尾：disarm → 解映射需求页 → 归还帧 → 切回旧 CR3 → drop AS → FR8 归零
+    demand_disarm();
+    for va in [code_base, code_base + 0x1000, data_base] {
+        let pa = as2.unmap_page(va).expect("[vma-smoke] unmap demand page");
+        free_frame(pa);
+    }
+    unsafe { cr3_write(old_cr3) };
+    check!(total, "old CR3 restored", cr3_read() == old_cr3);
+    drop(as2);
+    let used_post = with_page_frames(|a| a.used_frames());
+    check!(
+        total,
+        "FR8 ledger balanced (used pre == post)",
+        used_post == used_pre
+    );
+
+    info!("[vma-smoke] {}/{} checks passed", total, total);
 }

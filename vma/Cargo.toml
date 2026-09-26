@@ -1,0 +1,18 @@
+[package]
+name        = "synapse-vma"
+version     = "0.1.0"
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace      = true
+description = "Synapse 用户内存区域表（VMA-like）纯逻辑：insert/lookup/重叠拒绝/GROWABLE 增长（架构无关，宿主可测；P4-T3）"
+publish     = false
+
+[lib]
+path = "src/lib.rs"
+
+# 零依赖：纯 no_std，固定数组实现（不使用 alloc），与 cap/ipc/proc/sched 同一纪律
+[dependencies]
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

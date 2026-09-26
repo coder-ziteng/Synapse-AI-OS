@@ -245,6 +245,11 @@ pub extern "C" fn _start64() -> ! {
     paging::paging_smoke();
     boot_marker(b'f');
 
+    // P4-T3 VMA / demand paging smoke：VMA 注册 → 按需分页 → 权限违例/未注册 → kill 骨架 → NULL 守卫 → FR8 归零
+    boot_marker(b'g');
+    paging::vma_smoke();
+    boot_marker(b'h');
+
     // 通过 isa-debug-exit (iobase=0x502) 退出 QEMU。
     // QEMU isa-debug-exit 实现为 exit((val << 1) | 1)（无掩码），
     // 所以 val=0xB5 → exit code = (0xB5 << 1) | 1 = 363。

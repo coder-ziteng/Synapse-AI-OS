@@ -47,3 +47,7 @@ path = "../proc"
 # ===== P3-T4 (2026-09-26): 调度纯逻辑 crate 接入（kthread 基建）=====
 [dependencies.synapse-sched]
 path = "../sched"
+
+# ===== P4-T3 (2026-09-27): 用户内存区域表（VMA）纯逻辑 crate 接入 =====
+[dependencies.synapse-vma]
+path = "../vma"
