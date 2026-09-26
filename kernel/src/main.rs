@@ -32,6 +32,7 @@ pub mod pic;
 pub mod pit;
 pub mod clock;
 pub mod kthread;
+pub mod paging;
 pub mod bootstrap;
 pub mod smoke;
 
@@ -238,6 +239,11 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'c');
     kthread::kthread_switch_smoke();
     boot_marker(b'd');
+
+    // P4-T2 分页 smoke：AddressSpace 新建 → CR3 切换 → 用户页读写 → #PF 期望故障 → FR8 归零
+    boot_marker(b'e');
+    paging::paging_smoke();
+    boot_marker(b'f');
 
     // 通过 isa-debug-exit (iobase=0x502) 退出 QEMU。
     // QEMU isa-debug-exit 实现为 exit((val << 1) | 1)（无掩码），
