@@ -138,8 +138,7 @@ impl SceneGraph {
     pub fn add(&mut self, node: SceneNode) {
         self.nodes.push(node);
         // 稳定排序：相同 z_order 保持插入顺序（先入先画）
-        self.nodes
-            .sort_by_key(|n| z_order_of(n));
+        self.nodes.sort_by_key(z_order_of);
     }
 
     /// 节点数

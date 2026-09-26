@@ -11,9 +11,10 @@ use crate::types::{Color, Vec3};
 /// 表情枚举（6 种基础 + 1 个空闲态）
 ///
 /// 与设计文档 §4.3 一致。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Expression {
     /// 中性（默认）
+    #[default]
     Neutral,
     /// 高兴
     Happy,
@@ -25,12 +26,6 @@ pub enum Expression {
     Alert,
     /// 休眠
     Asleep,
-}
-
-impl Default for Expression {
-    fn default() -> Self {
-        Self::Neutral
-    }
 }
 
 /// 2D 虚拟人

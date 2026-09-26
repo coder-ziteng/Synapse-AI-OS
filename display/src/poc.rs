@@ -51,8 +51,10 @@ pub fn run(options: &PocOptions) -> Result<f64, String> {
     let mut scene = SceneGraph::new();
 
     // 虚拟人：屏幕左下，主舞台
-    let mut avatar = Avatar::default();
-    avatar.position = Vec3::new(-280.0, 40.0, 0.0);
+    let mut avatar = Avatar {
+        position: Vec3::new(-280.0, 40.0, 0.0),
+        ..Default::default()
+    };
     avatar.set_expression(options.expression);
     scene.add(SceneNode::Avatar(avatar));
 
