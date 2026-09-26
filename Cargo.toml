@@ -9,6 +9,7 @@ members = [
     "abi",
     "audit",
     "user",
+    "kint",
     "xtask",
 ]
 
