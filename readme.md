@@ -61,7 +61,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 | P4.5 | PCI 枚举与中断用户态化 | 未开始 |
 | P5 | 外交工具与 Agent 雏形 | 未开始 |
 | P6 | SMP / 存储栈 / IOMMU / 本地推理 / 跨 OS 外交 | 远期 |
-| S6 预研 | 显示栈 PoC（tiny-skia 渲染管线 · Bento Grid + Liquid Glass 玄武视觉 · 赛博朋克虚拟人表情状态机，Doc 07） | ✅ PoC 完成 (S6-T0 v2)：19 tests 绿 · 1080p 整帧 ~105ms |
+| S6 预研 | 显示栈 PoC（tiny-skia 渲染管线 · Bento Grid + Liquid Glass 玄武视觉 · 赛博朋克虚拟人表情状态机，Doc 07） | ✅ PoC 完成 (S6-T0 v2)：19 tests 绿 · 1080p 整帧 ~105ms；内核侧 `bootanim/` 已在 VBE 1024×768 上还原 HTML 时间轴（SETTLED + blit_settled 架构，QMP screendump 多时间点 QA） |
 
 ## 4. 快速开始
 
