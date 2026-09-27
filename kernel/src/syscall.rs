@@ -339,8 +339,16 @@ fn dispatch_inner(frame: &SyscallFrame) -> i64 {
             unsafe { crate::umem::sys_munmap(as_ptr, addr, len) }
         }),
         other => {
-            log::warn!("[syscall] unimplemented syscall {:?} (num={})", other.id(), frame.num);
-            E_NOT_IMPLEMENTED
+            match other {
+                Syscall::IpcSend { .. } => crate::ipc::k_ipc_send(frame),
+                Syscall::IpcRecv { .. } => crate::ipc::k_ipc_recv(frame),
+                Syscall::IpcReply { .. } => crate::ipc::k_ipc_reply(frame),
+                Syscall::IpcTrySend { .. } => crate::ipc::k_ipc_try_send(frame),
+                _ => {
+                    log::warn!("[syscall] unimplemented syscall {:?} (num={})", other.id(), frame.num);
+                    E_NOT_IMPLEMENTED
+                }
+            }
         }
     }
 }

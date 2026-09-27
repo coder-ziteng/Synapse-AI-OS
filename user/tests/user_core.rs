@@ -219,8 +219,8 @@ fn exit_alias_matches_proc_exit() {
 fn abi_query_value_matches_constants() {
     assert_eq!(abi_query_value(), ((ABI_MAJOR as u64) << 16) | (ABI_MINOR as u64));
     assert_eq!(ABI_MAJOR, 0);
-    // P4-T6：minor 1→2（错误码/Timespec/prot 位入 abi crate，向后兼容新增）
-    assert_eq!(ABI_MINOR, 2);
+    // P4-T6：1→2（错误码/Timespec/prot 位入 crate）；P4-T7：2→3（-11..-15）。
+    assert_eq!(ABI_MINOR, 3);
 }
 
 #[test]

@@ -1,16 +1,17 @@
-//! P4-T6 syscall 测试程序（initramfs `hello`）。
+//! P4-T6/T7 syscall 测试程序（initramfs `hello`）。
 //!
-//! 从 P4-T1 三段式占位升级为**6 syscall 全路径验证**（task.json P4-T6
+//! 从 P4-T1 三段式占位升级为**7 syscall 全路径验证**（task.json P4-T6/T7
 //! verify：成功路径 + 每个错误路径负错误码断言）：
 //!
 //! | # | syscall | 覆盖 |
 //! | --- | --- | --- |
-//! | 1 | `abi_query`(18) | 返回 `(MAJOR<<16)|MINOR` = 0x2（0.2） |
+//! | 1 | `abi_query`(18) | 返回 `(MAJOR<<16)|MINOR` = 0x3（0.3） |
 //! | 2 | `yield`(25) | 成功返回 0（接 P3 调度器） |
 //! | 3 | `gettime`(30) | MONOTONIC 成功 + nsec 值域 + 两次调用单调不减；WALL → -10；未知钟 → -5；坏指针/只读页 → -2 |
 //! | 4 | `mmap`(40) | 内核选址 RW/RX/GROWABLE + 显式地址；写读回环；len=0/未对齐/越窗/重叠 → -2；W+X/无 R/未知 prot 位 → -7；未知 flags 位 → -10 |
 //! | 5 | `munmap`(41) | 精确解除成功；重复/部分/未登记 → -5；未对齐/len=0 → -2 |
-//! | 6 | `process_exit`(21) | code=0 终结（内核 KERNEL_FRAME iretq 接力 elf_continuation） |
+//! | 6 | `ipc_try_send`(3) / `ipc_send`(0) / `ipc_recv`(1) | T7a：try_send 无 receiver → Queued 0；cptr=0/越界/n_caps 超限 → -1；blocking send/recv 在 boot 围栏下 → -4 |
+//! | 7 | `process_exit`(21) | code=0 终结（内核 KERNEL_FRAME iretq 接力 elf_continuation） |
 //!
 //! 失败语义：任何 assert 失败 → panic（=abort）→ ring-3 停机循环触发
 //! #GP/#UD → 内核 panic → QEMU exit **355**（区别于全过 363）。
@@ -26,8 +27,8 @@ use core::panic::PanicInfo;
 
 use synapse_abi::{
     abi_query_value, SyscallId, Timespec, CLOCK_MONOTONIC, CLOCK_WALL, E_INVALID_ADDR,
-    E_NO_MEMORY, E_NOT_FOUND, E_NOT_IMPLEMENTED, E_PERMISSION, MAP_GROWABLE, PROT_EXEC,
-    PROT_READ, PROT_WRITE,
+    E_INVALID_CAP, E_NO_MEMORY, E_NOT_FOUND, E_NOT_IMPLEMENTED, E_PERMISSION, E_WOULD_BLOCK,
+    MAP_GROWABLE, PROT_EXEC, PROT_READ, PROT_WRITE,
 };
 use synapse_user::invoke;
 
@@ -130,7 +131,52 @@ pub extern "C" fn _start() -> ! {
     assert_eq!(sys!(SyscallId::Munmap, [a3 as u64, 0x1000, 0, 0, 0, 0]), 0, "munmap a3");
     assert_eq!(sys!(SyscallId::Munmap, [a4 as u64, 0x1000, 0, 0, 0, 0]), 0, "munmap a4");
 
-    // ---- 6. process_exit(0)：内核 KERNEL_FRAME iretq 接力 elf_continuation
+    // ---- 6. IPC 内核接线 smoke（P4-T7a）：init 自带 ep cap slot 1（bootstrap mint）
+//      围栏优先：blocking send/recv 在 boot thread → -4（per-CPU 单 kstack
+//      + boot 是系统最后防线，user-mode 双进程 IPC 阻塞由 T9 per-thread kstack
+//      解决，本节只验证非阻塞路径 + 错误路径）。
+//      错误路径：cptr=0 → -1；cptr=200 → -1；n_caps 越界 → -1。
+    let ep_cap: u64 = 1; // bootstrap 固定：init 的 ep 根 cap slot（NULL=0 之后第一个 alloc）
+    let mut snd = [0u8; 16];
+    snd[..5].copy_from_slice(b"hello");
+    // 6.1 围栏：blocking send 在 boot thread → E_WOULD_BLOCK
+    assert_eq!(
+        sys!(SyscallId::IpcSend, [ep_cap, &mut snd as *mut _ as u64, 5, 0, 0, 0]),
+        E_WOULD_BLOCK,
+        "send blocking on boot -> -4"
+    );
+    // 6.2 围栏：blocking recv 空队列在 boot thread → E_WOULD_BLOCK
+    assert_eq!(
+        sys!(SyscallId::IpcRecv, [ep_cap, &mut snd as *mut _ as u64, 0, 0, 0, 0]),
+        E_WOULD_BLOCK,
+        "recv blocking on boot -> -4"
+    );
+    // 6.3 错误路径：cptr=0 → E_INVALID_CAP
+    assert_eq!(
+        sys!(SyscallId::IpcTrySend, [0, &mut snd as *mut _ as u64, 5, 0, 0, 0]),
+        E_INVALID_CAP,
+        "try_send cptr=0 -> -1"
+    );
+    // 6.4 错误路径：cptr 越界 → E_INVALID_CAP
+    assert_eq!(
+        sys!(SyscallId::IpcTrySend, [200, &mut snd as *mut _ as u64, 5, 0, 0, 0]),
+        E_INVALID_CAP,
+        "try_send cptr=200 -> -1"
+    );
+    // 6.5 错误路径：n_caps > MAX_TRANSFER → E_INVALID_CAP
+    assert_eq!(
+        sys!(SyscallId::IpcTrySend, [ep_cap, &mut snd as *mut _ as u64, 5, 0, 99, 0]),
+        E_INVALID_CAP,
+        "try_send n_caps=99 -> -1"
+    );
+    // 6.6 try_send 非阻塞路径 → 0（无 receiver，Queued；MVP 围栏下不读不复制）
+    let r = sys!(
+        SyscallId::IpcTrySend,
+        [ep_cap, &mut snd as *mut _ as u64, 5, 0, 0, 0]
+    );
+    assert_eq!(r, 0, "try_send queued -> 0");
+
+    // ---- 7. process_exit(0)：内核 KERNEL_FRAME iretq 接力 elf_continuation
     unsafe { invoke(SyscallId::ProcessExit.num(), [0, 0, 0, 0, 0, 0]) };
 
     // 不应到这里（exit 不回用户态）

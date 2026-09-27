@@ -217,6 +217,15 @@ pub struct UserMemoryRegion {
 | -8 | `E_FROZEN` | 目标进程已冻结（freeze / thaw / IPC 到冻结进程）|
 | -9 | `E_ZOMBIE` | 目标进程已退出（需先 reap）|
 | -10 | `E_NOT_IMPLEMENTED` | syscall 未实现（预留）|
+| -11 | `E_ABI_MISMATCH` | 用户态与内核 ABI 版本不兼容（消息头 version 校验，Doc 03 §3.1）|
+| -12 | `E_OBJECT_RETIRED` | 对象已撤销 / 退休（generation 不匹配，Doc 01 §4.2）|
+| -13 | `E_QUOTA_EXCEEDED` | 进程资源配额耗尽（§5.5）|
+| -14 | `E_PEER_DIED` | IPC 对端进程已退出（Doc 03 §5.1 对端死亡唤醒规则）|
+| -15 | `E_TIMEOUT` | 操作超时（带超时变体预留，Doc 03 §9：Phase 5+）|
+
+> **UPDATE（P4-T7，2026-09-27）**：-11..-15 为追加条目——cap crate `CapError`
+> 与 Doc 03 §5.1 自始使用这 5 个扩展码，本表原仅列 -1..-10（滞后）。按
+> "扩展追加表尾"原则补齐；`synapse_abi` 0.3 起提供全部 15 个常量。
 
 **设计原则**：
 - 错误码数量控制在 127 以内（7-bit，便于序列化）；

@@ -135,10 +135,13 @@ fn decode_rejects_out_of_range_narrow_args() {
 }
 
 // ---------- P4-T6：错误码 / Timespec / prot·flags 位 ----------
+// ---------- P4-T7：扩展错误码 -11..-15 ----------
 
 #[test]
 fn error_codes_are_distinct_negative_range() {
-    // Doc 02 §4.3 全集 = 10 个，值域 [-10, -1]，互不重复
+    // Doc 02 §4.3 全集 = 15 个，值域 [-15, -1]，互不重复。
+    // 前 10 个由 P4-T6 引入；-11..-15 由 P4-T7 补齐（与 cap crate CapError
+    // / Doc 03 §5.1 对齐，详见 abi/src/lib.rs 错误码段注记）。
     let codes = [
         E_INVALID_CAP,
         E_INVALID_ADDR,
@@ -150,10 +153,15 @@ fn error_codes_are_distinct_negative_range() {
         E_FROZEN,
         E_ZOMBIE,
         E_NOT_IMPLEMENTED,
+        E_ABI_MISMATCH,
+        E_OBJECT_RETIRED,
+        E_QUOTA_EXCEEDED,
+        E_PEER_DIED,
+        E_TIMEOUT,
     ];
-    assert_eq!(codes.len(), 10);
+    assert_eq!(codes.len(), 15);
     for (i, c) in codes.iter().enumerate() {
-        assert_eq!(*c, -(i as i64) - 1, "错误码应按文档顺序 -1..-10");
+        assert_eq!(*c, -(i as i64) - 1, "错误码应按文档顺序 -1..-15");
     }
 }
 
@@ -209,10 +217,11 @@ fn decode_gettime_and_mmap_args() {
 }
 
 #[test]
-fn abi_minor_bumped_to_2() {
-    // P4-T6：错误码/Timespec/prot 位入 crate = 向后兼容新增 → minor 1→2
-    assert_eq!(ABI_MINOR, 2);
-    assert_eq!(abi_query_value(), 0x2);
+fn abi_minor_bumped_to_3() {
+    // P4-T6：1→2（错误码/Timespec/prot 位入 crate）；P4-T7：2→3（补 -11..-15）。
+    // minor 增量 = 向后兼容新增；旧 -1..-10 编号不变，附带 5 个新码。
+    assert_eq!(ABI_MINOR, 3);
+    assert_eq!(abi_query_value(), 0x3);
 }
 
 #[test]

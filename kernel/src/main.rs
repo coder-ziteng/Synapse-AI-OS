@@ -41,6 +41,7 @@ pub mod ring3;
 pub mod initrd;
 pub mod elfload;
 pub mod umem;
+pub mod ipc;
 
 // 把 trampoline 汇编链入二进制；`boot.S` 中 `.global _start` 提供链接器 entry。
 global_asm!(include_str!("boot.S"));
@@ -267,6 +268,12 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'g');
     kthread::kthread_mutex_smoke();
     boot_marker(b'h');
+
+    // P4-T7 IPC 内核接线 smoke：A/B 双 kthread 阻塞 send/recv/reply 端到端
+    // + cap transfer + try_send + 错误路径（marker u/v，与现有 a..t / o..r 错开）
+    boot_marker(b'u');
+    ipc::kthread_ipc_smoke();
+    boot_marker(b'v');
 
     // P3-T8 集成收尾 smoke：FR8 TSC 核算 + 页账本 + FR10 冻结/频率计数全链路
     //（合并注：原用 marker i/j，与 P4-T4 init_syscall 撞号 → 迁 s/t）

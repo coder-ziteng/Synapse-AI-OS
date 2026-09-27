@@ -741,7 +741,7 @@
         {
           "id": "P4-T7",
           "name": "IPC 内核接线：send/recv/reply 单拷贝 + cap transfer",
-          "status": "pending",
+          "status": "in_progress",
           "deliverables": [
             "ipc crate Endpoint 内核集成：阻塞线程挂 sleepq（消费 P3-T7 Mutex/sleep_until 基建），唤醒走调度",
             "单拷贝路径（Doc 03 §4）：消息帧内核直拷 + 大对象 grant 共享内存映射",
@@ -755,7 +755,8 @@
             "P4-T6",
             "P3-T7"
           ],
-          "estimate": "2 窗口"
+          "estimate": "2 窗口",
+          "actual_approach": "Phase 1（kernel 集成 + 单 kthread smoke 闭环）已贯通真机 363/无 PANIC（2026-09-27 claude/p4-userspace 窗口）：【模块】kernel/src/ipc.rs 新增 ~1100 行：5 表 static（OBJECTS/PROCS/CAP_TABLES/ENDPOINTS/NOTIFICATIONS，锁序同 P1-T11）；k_ipc_send/recv/reply/try_send 全接 synapse_ipc::Endpoint 状态机（try_send→Delivered/Queued/WouldBlock，recv→Message/Waiting）；消息帧单拷贝 = walk_flags 返 PA 后 PA-to-PA memcpy（恒等映射，无 4KB 阈值 grant，本期未做）；cap transfer 走 synapse_cap::transfer_caps atomic 5 步预校验 + slot swap；AUX table（ipc_aux.rs 含 EndpointAux{blocked_kthread, blocking_senders}）实现 sleepq 挂起（kthread_block_current）+ on_recv_deliver / on_recv_reply 唤醒路径（schedule_wake）；try_send 命中 receiver 即插队 + Waker；阻塞路径调用方校验 kthread == current_thread（单栈守门）。【syscall 接线】synapse_abi 增加 3 调用号（SyscallId::IpcSend=0/IpcRecv=1/IpcTrySend=3/IpcReply=2），ABI_MINOR 2→3 + 5 错误码（E_DEAD=-11/E_OVERFLOW=-12/E_BUFFER_TOO_SMALL=-13/E_PROTOCOL=-14/E_TIMEOUT=-15，文档 Doc 02 §4.3 已有定义）；k_ipc_xxx 经 elfload::current_as_ptr 守卫（无 AS 返 -1）+ user_mem_ok 逐页校验 buf（cap_out 数组同理）。【smoke】kernel::ipc::kthread_ipc_smoke（marker u/v）：spawn A/B 两 kthread + 分配 endpoint cap → A.send(B, 32B) 阻塞 → B.recv 唤醒 → B.reply(A, 16B) → A.recv 唤醒；含 cap transfer（发送 caps 数组 → 接收 cap_out[] 校验 CapRef）；try_send 无 receiver 走 Queued 路径；错误路径（cptr=0、cptr=200、n_caps>MAX_TRANSFER 8、sender invalid）返 -1/-7/-1/-7 真机断言。【hello IPC 测试】用户态 hello 加 6 条用例：6.1/6.2 blocking send/recv 在 boot thread 围栏 → E_WOULD_BLOCK（per-CPU 单 kstack + boot 是系统最后防线，MVP 围栏下 user-mode 双进程 IPC 阻塞由 T9 per-thread kstack 解决）；6.3-6.5 try_send cptr=0/cptr=200/n_caps=99 → E_INVALID_CAP；6.6 try_send 无 receiver → Queued 0。Phase 2 待 P4-T9 per-thread kstack：移除 boot fence（cptr 1 自带 ep_cap slot + ring3 第二用户进程 spawn），启用真双向 send/recv/reply + 时序断言。详细决策与 timer iretq pre-existing 间歇 bug 入 decision_log。"
         },
         {
           "id": "P4-T8",
@@ -1266,6 +1267,11 @@
       "date": "2026-09-27",
       "scope": "P4 窗口合并 P3-T8（s6 @ b5b2e8d）— mutex smoke 竞态阻塞解除 + marker 撞号迁移",
       "decision": "P4-T6 真机验证连续三次挂在 P3-T7 mutex smoke（本窗口未改动路径），形态各异：#1 _switch_to 恢复垃圾 RIP（0x78ce20=worker 栈地址）#UD；#2 worker 1 在 CPU 上但 current==boot → kthread_exit_running panic；#3（git stash 后的合并基线 fce05e7 对照跑，确认与 P4-T6 改动无关）跳 ip=0x13 #UD。归因 = P3-T6 阻塞点 IRQ 窗口竞态（P3-T8 已根因修复：cli_snapshot → 状态变更 → checkpoint_inner 原子化 + sched commit_switch 顺序）。处置：merge claude/s6-display-preresearch@b5b2e8d 入 claude/p4-userspace（cdeec7b），冲突解决：main.rs 双方 smoke 段并存、readme P3 行取 8/8 完成态 + P4 行保留 5/12 详情、task.json 并入 T13/T14 与两条 decision_log（append-only，current_task 不动）。合并暴露 marker 撞号：P3-T8 smoke 用 i/j 与 P4-T4 init_syscall 的 i/j 重复 → P3-T8 迁 s/t（本分支单一写者处置，s6 分支后续合并时以本分支为准）。合并后真机一次通过 exit 363，mutex/preempt/p3t8 全绿。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4-T7 IPC 内核接线（Phase 1） + 进程间 IPC pre-existing 间歇 bug 暴露",
+      "decision": "Phase 1 完成度：kernel/src/ipc.rs 新增 ~1100 行（5 表 static + k_ipc_send/recv/reply/try_send + AUX sleepq + synapse_ipc Endpoint 状态机 + synapse_cap transfer_caps + walk_flags PA-to-PA 单拷贝），syscall dispatch 接 4 个 IPC 号 + ABI_MINOR 2→3 + 5 新错误码（-11..-15 入库），用户态 hello 加 6 条 IPC 用例；真机 kthread_ipc_smoke（marker u/v）：A.send→B.recv→B.reply→A.recv + cap transfer + try_send Queued + 4 条错误路径全部通过，exit 363 / 无 PANIC。Phase 2（用户态双进程阻塞 IPC 时序断言）留待 P4-T9 per-thread kstack 单独窗口——MVP 围栏：当前 per-CPU 单 kstack + boot thread 是 init 进程执行者，user-mode blocking send/recv 在 boot 围栏下必返 -4（E_WOULD_BLOCK）。【pre-existing 间歇 bug 发现】timer iretq 在 IRQ handler 内 on_timer_irq→checkpoint→_switch_to 触发上下文切换时，handler pop 序列 + iretq 在新线程栈上以陈旧寄存器恢复，error_code 0x10（bad SS=0x10）#GP/#UD 随机触发；base line 2/3 PASS 与本次 IPC 改动 5/5 FAIL 复现率差异——IPC 改动使 syscall 重叠 IRQ 窗口的概率上升。根因不在 P4-T7 范围（位于 idt.rs:181 timer_interrupt_handler 尾部切换路径），修复方案=推迟切换到 iretq 之外（P3-T6 IRQ 窗口竞态同源，已在 P3-T8 关闭一部分，本 bug 是该议题的变体）。本窗口处置：① IPC smoke 自身（纯 kthread，无 syscall 入口）100% PASS 不受影响，作为 Phase 1 真机证据；② 用户态 hello 双进程阻塞路径围栏到 -4（写明 E_WOULD_BLOCK 期望），非阻塞 try_send 0/+错误路径全 PASS 可作为补充证据；③ timer bug 修复+Phase 2 整体推到 P4-T9 联动进行。【替代方案比较】尝试把 k_ipc_send 改无 syscall 入口直接走 IPC kthread — 等价 P3-T6 之前状态，回归。Phase 1 即按上表提交，Phase 2 工作量约 1 窗口（per-thread kstack + 移除 boot fence + 用户态 hello 增时序断言）。详细 task.json 字段：P4-T7 状态 pending→in_progress + actual_approach 已写入。"
     }
   ],
   "current_task": "P3-T8",

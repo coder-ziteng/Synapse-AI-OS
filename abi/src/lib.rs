@@ -36,7 +36,9 @@ pub const ABI_MAJOR: u16 = 0;
 ///
 /// 0.2（P4-T6）：错误码常量（§4.3）、clock_id、Timespec、mmap prot/flags
 /// 位常量首次进入 crate 本体；syscall 号表与 decode 语义不变。
-pub const ABI_MINOR: u16 = 2;
+/// 0.3（P4-T7）：补齐扩展错误码 -11..-15（与 cap crate `CapError` /
+/// Doc 03 §5.1 IPC 错误语义对齐；Doc 02 §4.3 表同步追加）。
+pub const ABI_MINOR: u16 = 3;
 
 /// `abi_query`（#18）返回值：`(major << 16) | minor`。
 ///
@@ -49,8 +51,11 @@ pub const fn abi_query_value() -> u64 {
 // 错误码（Doc 02 §4.3）—— syscall 返回值 rax < 0 时的全集
 // ============================================================================
 //
-// 规格差异注记（P4-T6）：task.json deliverable 写"15 个错误码"，Doc 02 §4.3
-// 实际定义 10 个——以文档为准实现 10 个，差异记入 decision_log。
+// 规格差异注记（P4-T6，P4-T7 修订）：task.json deliverable 写"15 个错误码"，
+// Doc 02 §4.3 原表仅列 -1..-10。P4-T7 查明：cap crate `CapError` 与 Doc 03
+// §5.1（IPC 错误语义）实际使用 -11..-15（AbiMismatch/ObjectRetired/
+// QuotaExceeded/PeerDied/Timeout），Doc 02 表滞后——按"扩展新错误码追加到
+// 表尾"原则补齐 15 个并 UPDATE Doc 02 §4.3。
 
 /// 无效 CapRef（不在进程 capability 表中 / 已撤销）。
 pub const E_INVALID_CAP: i64 = -1;
@@ -72,6 +77,16 @@ pub const E_FROZEN: i64 = -8;
 pub const E_ZOMBIE: i64 = -9;
 /// syscall 未实现（预留号 / 延后交付路径）。
 pub const E_NOT_IMPLEMENTED: i64 = -10;
+/// 用户态与内核 ABI 版本不兼容（消息头 version 校验，Doc 03 §3.1）。
+pub const E_ABI_MISMATCH: i64 = -11;
+/// 对象已撤销 / 退休（generation 不匹配，Doc 01 §4.2）。
+pub const E_OBJECT_RETIRED: i64 = -12;
+/// 进程资源配额耗尽（Doc 02 §5.5）。
+pub const E_QUOTA_EXCEEDED: i64 = -13;
+/// IPC 对端进程已退出（Doc 03 §5.1 对端死亡唤醒规则）。
+pub const E_PEER_DIED: i64 = -14;
+/// 操作超时（带超时变体预留，Doc 03 §9：Phase 5+）。
+pub const E_TIMEOUT: i64 = -15;
 
 // ============================================================================
 // gettime（#30）常量与输出结构

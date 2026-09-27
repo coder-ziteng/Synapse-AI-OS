@@ -203,6 +203,9 @@ pub fn elf_load_smoke() -> ! {
     // 3. 记录 continuation 所需状态
     OLD_CR3.store(crate::paging::cr3_read(), Ordering::SeqCst);
     AS_PTR.store(&mut as_user as *mut AddressSpace as u64, Ordering::SeqCst);
+    // P4-T7a：当前 syscall 服务进程 = init（pid 1）。MVP 单进程；T9 per-thread kstack
+    // 后切换为按运行线程上下文查 pid。
+    crate::ipc::set_current_pid(crate::kstate::INIT.0);
 
     // 4. 武装 KERNEL_FRAME（process_exit #21 → iretq 回 elf_continuation）
     // SAFETY: elf_continuation 是 extern "C" -> ! 的 ring-0 入口；ksp/krflags
