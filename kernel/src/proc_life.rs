@@ -179,6 +179,18 @@ pub unsafe fn terminate_current(kind: Option<FaultKind>, code: i32) -> ! {
         cr3_write(kcr3);
     }
 
+    // 2.5 P4-T13（R12 + Doc 03 §5.1）退出时在途 IPC 唤醒：撤销能力/回收
+    //     资源**之前**先唤醒所有阻塞在垂死进程相关 Endpoint 上的线程
+    //     （SEND_CANCEL = E_PEER_DIED）+ 摘除其排队 send。端点发现依赖
+    //     垂死进程 CapTable，必须赶在 k_destroy_cap_table 之前。
+    let woken = crate::ipc::cancel_inflight_for(pid.0, agent.0);
+    if woken > 0 {
+        info!(
+            "[proc_life] pid={} exit: woke {} in-flight IPC waiters (R12)",
+            pid.0, woken
+        );
+    }
+
     // 3. 物理资源回收：umem → AS 叶页 → AS drop → CapTable。
     let as_ptr = proc_ext::take_user_as(pid);
     if as_ptr != 0 {

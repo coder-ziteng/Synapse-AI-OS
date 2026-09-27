@@ -50,6 +50,8 @@ pub mod block;
 pub mod init;
 pub mod ipc_pong_smoke;
 pub mod audit;
+pub mod uaccess;
+pub mod capsys;
 
 // 把 trampoline 汇编链入二进制；`boot.S` 中 `.global _start` 提供链接器 entry。
 global_asm!(include_str!("boot.S"));
@@ -318,6 +320,13 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'q');
     paging::vma_smoke();
     boot_marker(b'r');
+
+    // P4-T13 Phase 4 安全回归专项：非法 cptr/过期 generation/attenuation-only/
+    // revoke 级联/E_OBJECT_RETIRED 稳定性/表满注入/伪造 agent_id/重复回收
+    //（marker y/z；ring0 直跑，须在 ring3_smoke 前——之后 boot 栈帧被冻结）
+    boot_marker(b'y');
+    capsys::security_smoke();
+    boot_marker(b'z');
 
     // P4-T4 Ring3 切换 smoke：用户态 _start → syscall abi_query 往返 → CPL==3 断言
     // → continuation 链式接力 P4-T5 elf_load_smoke（exit 363 在 elf_continuation 发出）

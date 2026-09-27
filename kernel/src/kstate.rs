@@ -175,6 +175,34 @@ pub fn k_destroy_cap_table(pid: Pid) {
     CAP_TABLES.lock()[cap_slot(pid)] = None;
 }
 
+/// P4-T13 跨表撤销级联：遍历**全部**进程 CapTable，对每个引用 `obj` 的槽
+/// 跑 cap crate `revoke_cascade`（不动点迭代，沿 parent 链含跨代派生），
+/// 返回累计释放的槽数。
+///
+/// 锁纪律：单持 CAP_TABLES 一把锁扫全表（无嵌套；调用方进入前须已放
+/// OBJECTS——`begin_revoke` 先行，保证级联窗口内新解析即刻 -12）。
+/// 同表内多个引用槽：每轮取首个匹配 cptr 级联（cascade 会顺带清掉其
+/// 派生），循环直到该表无匹配——已清槽再 cascade 返 InvalidCap，忽略。
+pub fn k_revoke_cascade_global(obj: ObjRef) -> usize {
+    let mut g = CAP_TABLES.lock();
+    let mut total = 0usize;
+    for slot in g.iter_mut().flatten() {
+        loop {
+            // 找首个引用 obj 的槽（borrow 分段：先查后改，避免双可变借用）
+            let hit: Option<CapRef> = slot
+                .iter()
+                .find(|(_, cap)| cap.obj == obj)
+                .map(|(cptr, _)| cptr);
+            let Some(cptr) = hit else { break };
+            match slot.revoke_cascade(cptr) {
+                Ok(n) => total += n,
+                Err(_) => break, // 已被上一轮级联清掉 → 该表完成
+            }
+        }
+    }
+    total
+}
+
 /// 在 pid 表中铸造根 capability（`parent = None`，init 铸造路径，Doc 01 §4）。
 pub fn k_mint_root(pid: Pid, obj: ObjRef, rights: Rights) -> Result<CapRef, CapError> {
     record_syscall_rate(pid); // FR10：cap 操作类 syscall 计数
@@ -250,8 +278,8 @@ fn rate_ready() -> bool {
     crate::kthread::sched_ready()
 }
 
-/// 记一次 syscall 维事件（cap 操作类后端共用）。
-fn record_syscall_rate(pid: Pid) {
+/// 记一次 syscall 维事件（cap 操作类后端共用；capsys P4-T13 起跨模块调用）。
+pub(crate) fn record_syscall_rate(pid: Pid) {
     if !rate_ready() {
         return;
     }
