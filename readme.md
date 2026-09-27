@@ -75,6 +75,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 
 ```powershell
 .\startAIOS.ps1              # 构建 → QEMU 无头运行 → 三重自动判定
+.\startAIOS-GUI.ps1          # 构建 → QEMU GTK 窗口（查看开机动画）
 .\startAIOS.ps1 -Test        # 运行 QEMU 内测试套件（P1-T8）
 .\startAIOS.ps1 -BuildOnly   # 只构建 kernel_hd.img
 ```
