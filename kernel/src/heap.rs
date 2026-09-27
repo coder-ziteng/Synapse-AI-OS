@@ -190,6 +190,12 @@ pub fn init_heap(pool_pages: usize) {
     g.init(pool_pages);
 }
 
+/// 堆池占用页数（FR8 页账本 boot 补记用；未初始化 = 0）。
+pub fn pool_pages() -> usize {
+    let g = HEAP.lock();
+    (g.pool_end - g.pool_start) / page_frame::FRAME_SIZE
+}
+
 /// 内核全局分配器（实现 `GlobalAlloc` trait）。
 pub struct KernelAllocator;
 

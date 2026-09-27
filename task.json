@@ -4,8 +4,8 @@
   "last_update": "2026-09-27",
   "session": {
     "current_phase": "P3",
-    "current_task": "P3-T7",
-    "status": "pending",
+    "current_task": "P3-T8",
+    "status": "completed",
     "notes": "2026-09-25: 设计文档纯设计审查完成 (claude/design-pure-review 分支)。\nDoc 01~06 全部升级为 PROPOSED 完成，添加决策汇总表。Phase 4/5/6+ 核心设计收敛。\n\n2026-09-25: 需求评审 §6 Phase 4 硬性闸门设计缺口补全完成 (f253114, 92f7201, 53b89b1)。\n- Doc 01 §4.2: 对象生命周期状态机 + generation 校验 + 进程退出回收顺序\n- Doc 02 §4.5: ABI 版本策略 (abi_query + 消息头 version + rights 只追加) + 5 新错误码\n- Doc 02 §5.5: 每进程资源配额模型 (Quota struct + 管理规则 + FR8 关系)\n- Doc 02 §5.1/§3.2: MVP-3 单线程约束 + PCID 可选优化说明\n- Doc 03 §5.1: IPC 错误语义 + 对端死亡处理规则\n- Doc 04: Phase 5 MVP 范围约束 (仅 API Channel)\n- Doc 06 §2.1: 服务层依赖级别 (P0/P1/P2) + 各阶段首期承诺\n\n需求评审 §6 的 12 项 Phase 4 闸门决策：11 项已收敛，1 项 (基准测试配置) 属测试/CI 范畴。\n\n2026-09-25: CI/xtask 落地完成 (d3c4994)。P1-T4 boot 调试发现：\n- QEMU trace 显示 #PF @ IP=0x2068dc CR2=0xC0000080\n- IP=0x2068dc 在 raw_cpuid 库代码中，不在 _start64 (0x200d90)\n- rsp 被破坏（应为 0x15008，实际 0xC0000072）\n- stage2 debugcon 输出到 'L' (jmp rax 前) 后无 'AB' 从 _start64\n- 结论：stage2 的 jmp rax 未成功到达 _start64，或到达后 rsp 被破坏\n- 可能原因：stage2 页表/栈设置问题，或 _start64 入口约定不符\n- 内核 ELF 有 Xen PVH note (entry=0x200018)，但 QEMU -kernel 未走 PVH\n下一步：P1-T5 (log + panic handler) 不依赖 boot，可并行推进。\n\n2026-09-25: P1-T6 (HAL SerialDevice trait) + P1-T7 (UART HAL化) 完成。HAL 提供零成本抽象 + cfg(test) fake impl。\n\nP1-T5 (log + logger) 完成。内核集成 log crate，KernelLogger 输出到串口。\n\n2026-09-26: synapse-cap crate 落地 (cap/)。能力子系统核心全部实现并宿主测试通过 (22 tests)：\n- error.rs: CapError 15 错误码 + errno 映射 (-1..-15, Doc 02 §4.3/§4.5)\n- rights.rs: 权限位掩码 (零依赖手写 bitflags, 保留位掩掉防 ABI 漂移)\n- types.rs: CapRef=u8 / ObjRef{index,generation} / Capability{obj,rights,badge,parent} / ObjKind 10 类\n- table.rs: 256 槽 CapTable (slot 0 NULL trap) + delegate(attenuation-only, 需 GRANT) + revoke_cascade(不动点迭代, 无递归)\n- object.rs: ObjectTable 1024 槽 + generation 历史独立于槽位 (防复用复活) + Live→Revoking→Retired→Freed 状态机\n- quota.rs: Quota/DEFAULT_QUOTA/QuotaUsage charge-release (O(1), 超限 QuotaExceeded 不阻塞) + spawn 划拨校验 (Doc 02 §5.5)\n- transfer.rs: atomic all-or-nothing 跨进程转移 (5 步预检查零副作用, MAX_TRANSFER=8, Doc 03 §5)\n- 附带修复: Doc 01 §4.2 E_OBJECT_RETIRED errno -10→-12 (与 Doc 02 对齐); Doc 03 §5.1 transfer 表满 E_PERMISSION→E_NO_MEMORY; Doc 01 free_top u8→u16\n下一步: 内核集成层 (Spinlock 包装 + syscall 绑定) 待 boot 打通后接入。\n\n2026-09-26: synapse-ipc crate 落地 (ipc/)。IPC 核心宿主测试通过 (14 tests)：\n- header.rs: IpcHeader repr(C) 20B 固定 ABI (version/header_len 前向兼容, flags 严格 0) + AgentId 数值盖章 (字符串↔数值映射归 init, Doc 01 §7) + validate (AbiMismatch/-11, cap 数超限/-1, payload>min(quota,4KB)/-13)\n- path.rs: 三档传输路径分类 (≤32B 寄存器直传 / ≤4KB kmap 单拷贝 / >4KB grant 描述符, Doc 03 §4.3)\n- notification.rs: 位图 u64 OR 聚合 + 读清 poll (Doc 03 §6.2, O(1))\n- endpoint.rs: 单接收者同步端点环形队列 (32 深) + try_send(Delivered/Queued/WouldBlock) + cancel_sender 对端死亡摘除 (FIFO 保持, 等待接收者不受扰, Doc 03 §5.1)\n调度/kmap memcpy/cap 安装留给内核集成层；synapse-ipc 已验证可链入 x86_64-bootloader.json 目标。\n\n2026-09-26: synapse-proc crate 落地 (proc/)。进程模型核心宿主测试通过 (14 tests)：\n- process.rs: ProcessTable(128 槽) + Pcb + 状态机 Created→Running⇄Blocked→Exited/Faulted→Zombie→reap (Doc 02 §5.3)；spawn 六步校验链 (仅 init 可 spawn/agent 查重/配额划拨预留)；exit/fault 返回 DeathSignal (集成层投递 death_endpoint)；孤儿过继 init；freeze/thaw 行为围栏 (E_FROZEN -8)；pid 单调分配不复用；配额 carve/uncarve (spawn 预留、reap 归还)\n- agent.rs: 内核侧数值 agent_id 唯一性注册表 (字符串映射归 init 用户态, Doc 01 §7)\n- grant.rs: spawn 初始 caps 安装复用 transfer_caps atomic 语义 (衰减+GRANT 校验+零副作用回滚)\n资源释放顺序契约 (页帧→CapTable→agent_id→pid) 前两步归集成层、后两步在 reap。三 crate 累计 50 宿主测试全绿，均可链入 x86_64-bootloader.json。\n\n2026-09-26: P1-T4 boot 链路全通 + P1-T5 真机验收 (claude/design-pure-review 分支)。QEMU 退出码 107, serial '[INFO] Hello, Synapse!', dbg501 'ABCDEF', 21/21 块加载回读与镜像一致, panic backtrace 4 帧符号化有效。三个根因: ① 内核栈误放 0xF0000 (QEMU isa-bios ROM 区, CPU 写入被静默忽略→retf 弹垃圾→三重故障), 移至 0x60008 并满足 Rust ABI 入口 rsp%16==8; ② stage2 加载循环 debug16 标记 '3'/'4' 的 mov al,imm8 污染 EAX → LBA/dst 双推进错误 → 内核镜像重叠错位入 RAM (仅 14% 字节正确); ③ 复制段 mov esi 缺 0x66 前缀 (顺带解开'删 buffer 检查即挂'旧谜)。详见 decision_log 2026-09-26 三条。\n下一步: P1-T8 (test_framework 集成) 为 P1 唯一 pending 项; boot 已通, cap/ipc/proc 内核集成层可启动。\n[claude/design-pure-review | P1-T4 host cores] abi/ crate (10/10 测试, clippy 干净, kernel 目标 OK) + audit/ crate (6/6 测试, clippy 干净, kernel 目标 OK) 完成；工作区 cap+ipc+proc+abi+audit 共 66/66 全绿。Doc 02 §0/§4.2 syscall 计数 18→19 已修正。\n[claude/design-pure-review | P1-T4 host cores] user/ crate (30/30 测试, clippy 干净, kernel 目标 OK) 完成；工作区 cap+ipc+proc+abi+audit+user 共 96/96 全绿。19 个 syscall 帧编码器 + 类型化包装器 + CapRef(u16) 严格校验 + decode 闭环验证。\n[claude/design-pure-review | P1-T4 host cores] kint/ crate (14/14 测试, clippy 干净) 完成；工作区 cap+ipc+proc+abi+audit+user+kint 共 110/110 全绿。MockKernelState + dispatch(frame) → i64 把 6 个纯逻辑 crate 粘合 为宿主可测的 syscall 分发器。\n\n2026-09-26: P3-T2 (FR8 资源核算原语) 完成。sched crate 增 Tcb.cpu_time + Scheduler.account_cpu/total_cpu（CPU 维度守恒记账）+ accounting.rs PageLedger（per-process 页账本，drain 清算泄漏供 FR9 审计）。sched 46/46，workspace 161/161 全绿，内核构建不受影响。下一步: P3-T3 (FR10 冻结/频率计数) 或 P3-T4 (kthread 栈+CpuContext)，二者可并行。\n\n2026-09-26: P3-T3 (FR10 冻结/频率计数原语) 完成。rate.rs RateTable：per-process syscall/IPC 固定窗口计数 + 粘性超限标志（enforcement 留用户态监督树）；freeze/thaw 验证强化（冻结线程永不被调度、thaw 恢复原优先级触发抢占）。sched 56/56，workspace 171/171，clippy 零警告。下一步: P3-T4 (内核侧 kthread 栈 + CpuContext，真机 smoke)。\n\n2026-09-26: P3-T4 (内核侧 kthread 基建) 完成。kernel/src/kthread.rs：CpuContext（8 字 callee-saved，映射 sched ContextSlot）+ 5 帧栈（1 guard 毒化 + 16KB）+ SCHED 全局 SpinLock + boot 线程收编 + kthread_create 预置统一 ret 首切上下文（trampoline/entry-in-rbx，P3-T5 直接消费）。真机三重判定全绿：363 / 62+27 checks / markers …ZIab。顺带修复 P2 潜伏 bug：page_frame.free_contiguous_frames 帧号当地址传 → used 漂移+帧 0 污染（kthread 栈释放首次真机触发暴露），已修复+回归测试。下一步: P3-T5 (switch_to 手写汇编，消费 kthread_create 预置的上下文)。\n\n2026-09-27: P3-T5 完成 — switch_to 手写汇编真机贯通（exit 363, markers …Iabcd, 62/62+27/27+9/9）。首跑 #DF 双根因（-> ! 死代码删除 + current 陈旧自切换）修复入 decision_log。下一步 P3-T6 抢占模型接线（IRQ0 置 need_resched + 中断返回边界调度）。\n\n2026-09-27: P3-T6 完成 — 抢占模型接线真机贯通（exit 363, markers …Iabcdef, 62/62+27/27+9/9+9/9 preempt smoke；106 switches / 7 IRQ 抢占）。两个真机挂死根因（trampoline 缺 sti → IF=0 永久化；最后线程退出后 Switch{prev:None} 无保存目标 → IDLE_SCRATCH）与 xv6 式 handler 尾部切换取向入 decision_log。下一步 P3-T7（Mutex 睡眠锁 + sleep_until 定时唤醒，kthread_block_current 已备好阻塞原语）。"
   },
   "env_prerequisites": {
@@ -562,7 +562,7 @@
         {
           "id": "P3-T8",
           "name": "Phase 3 集成收尾：FR8/FR10 内核接线 + 全量验证",
-          "status": "pending",
+          "status": "completed",
           "deliverables": [
             "FR8：切换路径注入 TSC 增量到 sched 记账；页分配器接入 per-proc 页数计数",
             "FR10：kstate 进程 freeze/thaw 走 sched 原语；syscall/IPC 计数器挂 endpoint/proc 路径",
@@ -576,7 +576,9 @@
             "P3-T3",
             "P3-T7"
           ],
-          "estimate": "1 窗口"
+          "estimate": "1 窗口",
+          "completed_at": "2026-09-27",
+          "actual_approach": "FR8 接线：① TSC 增量记账——LAST_TSC(AtomicU64) 运行段起点，阻塞点/IRQ/checkpoint 三处结算入口 account_tsc_interval（best-effort 保守：关中断决策窗口不入账，current=None 只推进时间戳），_switch_to 恢复侧重置基线；② 页账本——alloc_frames_accounted/free_frames_accounted（账本失败回滚帧），kthread 栈记 owner_pid（KthreadMeta 新字段，spawn 入账/reap 归还），kthread_init 时堆池 256 页补记 pid 0。FR10 接线：① 进程级 freeze/thaw——kstate::k_freeze_process/k_thaw_process = proc 表 frozen 位（IPC 入站拒绝 CapError::Frozen）+ KTHREADS 按 owner_pid 分组调 sched freeze/thaw 原语；② 频率计数——k_mint_root/k_transfer/k_install_initial 三个 cap syscall 后端 + k_ep_try_send（sender agent 经 AgentRegistry 反查 pid）记 record_syscall/record_ipc，超限置粘性标志 + warn；sched_ready() 防御门（集成 smoke 早于 kthread_init）。SCHED 锁与 kstate 锁永不嵌套（顺序获取，模块头锁序文档更新）。真机修复两个并发 bug：【A】阻塞点『摘出 CPU→关中断』IRQ 窗口竞态——旧结构先 with_sched 置 current=None 再进 checkpoint 内 cli，窗口期定时器 IRQ 以 me=None 检查点：schedule 可能选中刚摘出的线程为 next，保存段把物理线程的活寄存器写入 IDLE_SCRATCH 废弃、其 ctx 槽停留陈旧内容，未来恢复跳垃圾 RIP——非确定性 #UD（ip=0x3/栈地址、失败位置漂移），同为历史 mutex smoke M_ITERS≥2000 #UD/#DF 之谜根因。修复：阻塞点入口 cli_snapshot()（快照 IF→cli），『摘出→决策→切换』整段对 IRQ 原子；checkpoint 重构为 checkpoint_inner(dummy_prev, if_on)（调用方负责关中断，中断上下文传 false 由 iret 恢复）。【B】sched commit_switch push-prev-before-peek 顺序 bug——RR 语义下 HIGH current 时间片到期轮转给 DEFAULT 等待者时，commit 先把 prev(HIGH) 回队、后校验 peek==next，prev 入队即成新队头 → BadState panic（preempt smoke 真机复现；T6 时代靠时序运气未触发）。修复：先校验+摘 next 再回队 prev（决策形态保留 RR 语义不变，新增宿主回归测试）。M_ITERS 1000→2000 加压（竞态修复后两连绿，留作回归防线）。已知限制文档化：阻塞点『唯一执行者进入阻塞』→ Idle fall-through（sched 状态与物理执行脱钩，后续阻塞点 panic），smoke 用 t8_wait_ticks yield 循环规避；P4 引入 idle 线程根治。验证证据（三重判定三连绿）：exit=363、无 PANIC、boot markers A..Z Iabcdefghij 完整；串口 checks：integration 62/62 + T4 28/28（含 FR8 账本 3 项）+ T5 9/9 + T6 9/9 (switches=109/irq-preempt=9) + T7 9/9（M_ITERS=2000，sleep 100ms 误差 0 tick）+ p3t8 23/23（A: TSC 守恒 Δtotal==Δboot+w0+w1 cycles 级、B: 页账本 alloc/free/drain 零泄漏、C: 线程级+进程级 freeze/thaw + IPC 入站 Frozen 拒绝、D: 双维频率计数粘性超限+clear、E: 子进程全量 reap、F: 队列静默+帧归还）；宿主 cargo test --workspace --exclude synapse-kernel 28 套件全绿（sched 57/57，含新增回归 commit_switch_pops_next_before_pushing_prev）。"
         },
         {
           "id": "S6-T0",
@@ -837,6 +839,44 @@
           "deps": [
             "P4-T10",
             "P4-T11"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P4-T13",
+          "name": "Capability syscall 接线（invoke/delegate/revoke）+ Phase 4 安全回归专项",
+          "status": "pending",
+          "deliverables": [
+            "cap_invoke(10)/cap_delegate(11)/cap_revoke(12) 内核接线：CapTable O(1) 校验 + generation 匹配（旧句柄稳定返回 E_OBJECT_RETIRED，Phase 4 退出标准第 4 条）+ revoke cascade（复用 cap crate 不动点迭代）+ delegate attenuation-only",
+            "用户指针校验统一路径（评审 §5 契约「地址」行）：长度/对齐/溢出/区间重叠/跨页授权检查，mmap 与 IPC 缓冲区校验共用一套 helper",
+            "进程退出时在途 IPC 唤醒（R12 + Doc 03 §5.1）：退出顺序 = 撤销能力 → 唤醒所有阻塞在其相关 Endpoint 的线程 → 回收资源（页帧→CapTable→agent_id→pid）",
+            "安全回归测试组（评审 §2.6/§8 测试矩阵）：非法 cptr、过期 generation、权限降级绕过、跨页用户缓冲区、长度溢出、重复回收、伪造 agent_id、cap table 满/内存耗尽故障注入——违例仅自身进程失败（fault+death notification），内核不 panic"
+          ],
+          "verify": [
+            "真机：capability 撤销后旧句柄稳定返回 E_OBJECT_RETIRED；安全回归 N/N 全绿；三重判定（exit=363+无 PANIC）",
+            "宿主：cap/proc/ipc 纯逻辑 crate 回归全绿"
+          ],
+          "deps": [
+            "P4-T7",
+            "P4-T9"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P4-T14",
+          "name": "NFR2 基准落地（IPC/上下文切换 p50/p95/p99）+ idle 线程根治",
+          "status": "pending",
+          "deliverables": [
+            "闸门 10 收口：固定 QEMU 版本/vCPU/内存/关串口日志的基准配置 + 统计脚本（xtask bench 子命令），寄存器直传与 4KB 单拷贝 round-trip 延迟 p50/p95/p99，对照 Doc 03 §8 预算（<1µs / <3µs），结果落 logs/",
+            "上下文切换基准：两可运行线程连续切换耗时（首次冷启动不入样）；脚本供 T12 PCID 前后对比复用",
+            "idle 线程根治（P3-T8 遗留已知限制）：调度器无可运行线程时切入 idle 线程（hlt 等待 IRQ），替换 smoke 中 t8_wait_ticks yield 循环规避，消除阻塞点 Idle fall-through panic 路径"
+          ],
+          "verify": [
+            "真机：基准数据写入 task.json actual_approach + logs/；fast path round-trip 对照 Doc 03 §8 预算给出结论",
+            "真机：全线程阻塞场景 idle 承接、定时器 IRQ 唤醒恢复执行，无 fall-through panic"
+          ],
+          "deps": [
+            "P4-T7"
           ],
           "estimate": "1 窗口"
         }
@@ -1199,6 +1239,22 @@
       "date": "2026-09-27",
       "scope": "P4-T5 静态 ELF 加载器 + initramfs — 全链路贯通（顺带补登 P4-T4 状态）",
       "decision": "设计决策：1) initramfs 进内存方案 — 内核无磁盘驱动（P6 才有），选择扩展 stage2 现有连续加载循环：cpio 追加在 kernel.bin 之后的磁盘扇区，total_sectors 从 ksectors 改为 ksectors+ird_sectors（零汇编循环改动，仅 bump u16 立即数），initrd_base = 0x200000 + ksectors*512 是构建期常量，stage2 在 32-bit PM（平坦段、分页未开）直接写 0x20100 {base,size} 引导记录；位置在 E820 buffer（0x20000..0x200AC）之后的低 1MB 保留区内。page_frame init 步骤 2.5 消费该记录把 initrd 区间出账（否则分配器把 cpio 页清零复用 → 归档破坏）。2) smoke 链式接力 — ring3 smoke 的 return_continuation 由 iretq 直达不返回 main，故其尾部直接调 elf_load_smoke()，由 elf_continuation 负责 exit 363；内核栈复用安全（ksp 均为死帧区域）。3) cpio 写器放 xtask（构建期工具，零运行时依赖纪律），用 [dev-dependencies] synapse-elf 做写↔读闭环测试；解析器放 synapse-elf（内核运行期消费）。4) 用户栈入口约定：rustc 生成的 extern \"C\" fn _start 按函数入口 rsp%16==8（call 语义）做栈对齐假设，iretq 直达无 call 压栈，故 RSP = ELF_STACK_TOP - 8。真机暴露两 bug 修复（T4 手写 stub 不触栈、不再进用户态，故 T4 未暴露）：A) swapgs 收支不平衡 — syscall 入口 swapgs 把 GS.base 切到 &PER_CPU，process_exit 的 handle_process_exit 走 iretq-to-continuation 跳过 sysretq 侧平衡 swapgs；continuation 再 iretq 进新用户上下文时 ring-3 GS.base=内核指针、KERNEL_GS_BASE=旧垃圾 → 用户第一次 syscall 入口 swapgs 把垃圾装入 GS.base → mov rsp,gs:[0] 得垃圾栈指针 → syscall_entry_asm 首条 push r14（0x20aef1）即 fault，异常递送在同栈再失败 → #DF。修复：handle_process_exit 的 iretq 前补 swapgs，恢复 boot 约定（GS.base=用户值、KERNEL_GS_BASE=&PER_CPU），continuation 为普通 ring-0 代码不经 gs:[] 取数；纪律写入 syscall.rs 模块头（绕过 sysretq 的路径必须自行配平）。B) syscall 返回未还原 user RSP — sysretq 不弹 RSP，原实现 pop 7 寄存器后 add rsp,24 停在 kstack_top 就 sysretq，用户态带着内核栈顶指针返回；T4 手写 stub 全程不触栈故 不可见，真实 rustc ELF（invoke() 的 pop rbp）立刻 #PF（fault_addr=0x3a9010 即内核栈区，用户 AS 未映射）。修复：add rsp,24 改 mov rsp,r12（r12=user_RSP，SysV callee-saved，dispatch 保证还原）。真机验收：exit 363、serial [elf-smoke] 全 ok 无 PANIC（abi_query count=2 = ring3 smoke 1 + hello 1）、debugcon m/n（initrd_init）+ stage12 'D'（引导记录写入）、宿主 elf 18/18 + xtask 11/11（含 cpio 写读闭环）。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P3-T8 集成收尾——真机非确定性 #UD 竞态根因修复（阻塞点 IRQ 窗口）+ sched commit_switch 顺序 bug",
+      "decision": "两个独立 bug 同轮修复：【A】kthread 阻塞点重构为 cli_snapshot() → 状态变更 → checkpoint_inner(dummy_prev, if_on)：关中断责任上移到调用方，『摘出→决策→切换』整段对定时器 IRQ 原子。旧结构在 with_sched(current=None) 与 checkpoint 内 cli 之间留 IRQ 窗口，窗口期 on_timer_irq 以 me=None 检查点把物理线程活寄存器存入 IDLE_SCRATCH 废弃、ctx 槽陈旧，恢复跳垃圾 RIP（#UD ip=0x3/栈地址、位置漂移）——亦解释历史 M_ITERS≥2000 mutex smoke 非确定性 #UD/#DF（悬案归因闭环，M_ITERS 提回 2000 加压）。【B】sched::commit_switch 改为先校验 peek==next 并摘除、再回队 prev：RR 到期时 HIGH current 轮转给 DEFAULT 等待者的合法决策形态下，旧顺序 push(prev) 后队头变 prev → 误报 BadState（preempt smoke 真机 panic）。调度决策语义（schedule() 的 RR/抢占规则）保持不变，仅修 commit 端顺序，宿主新增回归测试锁定。",
+      "alternatives": "① schedule() 改严格优先级（队头劣于 current 时 KeepCurrent）——同样能避开 BadState 且调度语义更优，但改变 T4/T6 smoke 依赖的决策形态、属策略变更超出 bugfix 范围，弃（留作 P4 调度器演进议题）；② 阻塞点内联 cli 不抽 cli_snapshot——四处重复，弃。",
+      "refs": [
+        "kernel/src/kthread.rs (cli_snapshot/checkpoint_inner/阻塞点×4/M_ITERS=2000)",
+        "sched/src/scheduler.rs (commit_switch 顺序 + 回归测试)",
+        "logs/serial.log 三连绿：62/62+28/28+9/9+9/9+9/9+23/23"
+      ]
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4 看板跨分支同步 + 缺口审查（claude/s6-display-preresearch 窗口）",
+      "decision": "本分支 task.json 落后于 claude/p4-userspace（P4 已于该分支分解 T1~T12 并完成 T1~T5）。经用户确认执行「同步 + 缺口审查」：(1) P4 phase（含 T1~T5 done 状态与全部 deliverables/verify/actual 字段）按 p4 分支原文并入本分支看板，P0~P3 保留本地较新状态（P3-T8 completed）；decision_log 采用 p4 分支 53 条为基底 + 追加本地独有 P3-T8 条目，保持跨窗口可合并。(2) 缺口审查对照评审 §6 十二闸门 / §7 Phase 4 退出标准 / §2.6+§8 安全与测试矩阵，发现三类缺口并追加任务：P4-T13 = cap_invoke/delegate/revoke syscall 接线 + 安全回归专项（原 T1~T12 中 Capability 三个 syscall 无显式归属；「撤销后旧句柄稳定报错」「伪造 agent_id」「跨页缓冲区」等退出标准/安全矩阵无承载任务）；P4-T14 = 闸门 10 IPC/切换基准配置与统计脚本 + P3-T8 遗留 idle 线程根治（T12 仅含 PCID 切换耗时对比，无 NFR2 完整基准口径）。(3) 不修改 p4 分支已写的 T6~T12 文本（降低跨窗口 merge 冲突面），T13/T14 应排在 T12 全量回归之前完成——由 p4 窗口合并本条目后自行编排。(4) README §3 进度表 P4 行仍为「未开始」，更新权归 p4 窗口（单一写者），本窗口不动 readme.md（其工作区另有 S6 未提交改动）。"
     }
   ],
   "current_task": "P3-T8",

@@ -259,13 +259,18 @@ pub extern "C" fn _start64() -> ! {
     // P3-T6 抢占模型 smoke：3 worker 并发计数/打印 + 时间片抢占 + yield/sleep/exit
     //（s6 分支上暂时注释——保留原状；marker e/f 归 P3-T6）
     boot_marker(b'e');
-    // kthread::kthread_preempt_smoke();
+    kthread::kthread_preempt_smoke();
     boot_marker(b'f');
 
     // P3-T7 Mutex 睡眠锁 + sleep_until_ms 真机 smoke
     boot_marker(b'g');
     kthread::kthread_mutex_smoke();
     boot_marker(b'h');
+
+    // P3-T8 集成收尾 smoke：FR8 TSC 核算 + 页账本 + FR10 冻结/频率计数全链路
+    boot_marker(b'i');
+    kthread::kthread_p3t8_smoke();
+    boot_marker(b'j');
 
     // P4-T2 分页 smoke：AddressSpace 新建 → CR3 切换 → 用户页读写 → #PF 期望故障 → FR8 归零
     //（合并注：原用 marker e/f，与 P3-T6 撞号 → 迁 o/p）

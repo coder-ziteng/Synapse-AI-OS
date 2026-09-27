@@ -19,6 +19,8 @@
 //! `OBJECTS → PROCS → CAP_TABLES → ENDPOINTS → NOTIFICATIONS`。
 //! `transfer_caps` 要求 src/dst/objects 同一临界区（cap crate 文档约定）——
 //! 由 [`k_transfer`] / [`k_install_initial`] 统一按锁序获取。
+//! `kthread::SCHED` 锁**不与本模块任何锁嵌套**（FR10 频率计数路径均为
+//! 顺序获取：先放 kstate 锁，再进 SCHED）。
 //!
 //! ## 大对象初始化注意
 //!
@@ -167,6 +169,7 @@ pub fn k_destroy_cap_table(pid: Pid) {
 
 /// 在 pid 表中铸造根 capability（`parent = None`，init 铸造路径，Doc 01 §4）。
 pub fn k_mint_root(pid: Pid, obj: ObjRef, rights: Rights) -> Result<CapRef, CapError> {
+    record_syscall_rate(pid); // FR10：cap 操作类 syscall 计数
     with_cap_table(pid, |t| {
         let cap = synapse_cap::Capability::root(obj, rights);
         t.alloc(cap)
@@ -185,6 +188,7 @@ pub fn k_transfer(
     if src == dst {
         return Err(CapError::InvalidCap);
     }
+    record_syscall_rate(src); // FR10：cap 操作类 syscall 计数（调用方 = src）
     let objs_g = OBJECTS.lock();
     let objs = objs_g.as_ref().expect(UNINIT);
     let mut tables = CAP_TABLES.lock();
@@ -199,12 +203,79 @@ pub fn k_install_initial(
     child: Pid,
     items: &[GrantItem],
 ) -> Result<[CapRef; MAX_INITIAL_CAPS], CapError> {
+    record_syscall_rate(parent); // FR10：cap 操作类 syscall 计数（调用方 = parent）
     let objs_g = OBJECTS.lock();
     let objs = objs_g.as_ref().expect(UNINIT);
     let mut tables = CAP_TABLES.lock();
     let (pi, ci) = (cap_slot(parent), cap_slot(child));
     let (p_ref, c_ref) = two_slots(&mut tables, pi, ci)?;
     install_initial_caps(p_ref, c_ref, items, objs)
+}
+
+// ---------- FR10 频率计数（P3-T8 接线） ----------
+//
+// 数据源挂点（Doc 02 §5.4 行为围栏）：
+// * **syscall 维** — cap 操作类 syscall 的内核后端（[`k_mint_root`] /
+//   [`k_transfer`] / [`k_install_initial`]）入口按调用方 pid 计数；
+// * **IPC 维** — [`k_ep_try_send`] 按 sender agent → pid（AgentRegistry
+//   反查）计数；未注册 agent（内核内部投递）不计数。
+//
+// 超限只置**粘性标志** + warn 日志（处置策略——freeze/审计事件——留给
+// 监督树，sched `rate.rs` 模块头约定）；时间基 = PIT tick（100Hz）。
+// 防御门：SCHED 未就绪（集成 smoke 早于 kthread_init）静默跳过。
+
+/// FR10 计数前置门：调度器（持 RateTable）已初始化。
+fn rate_ready() -> bool {
+    crate::kthread::sched_ready()
+}
+
+/// 记一次 syscall 维事件（cap 操作类后端共用）。
+fn record_syscall_rate(pid: Pid) {
+    if !rate_ready() {
+        return;
+    }
+    let now = crate::pit::tick_count();
+    let over = crate::kthread::with_sched(|s| s.rate_mut().record_syscall(pid.0, now));
+    if over == Ok(true) {
+        log::warn!("[kstate] FR10: pid {} syscall rate OVER LIMIT (sticky flag set)", pid.0);
+    }
+}
+
+/// 记一次 IPC 维事件（sender agent 经 AgentRegistry 反查 pid）。
+fn record_ipc_rate(sender: AgentId) {
+    if !rate_ready() {
+        return;
+    }
+    let Some(pid) = with_procs(|t| t.agents.lookup(sender)) else { return };
+    let now = crate::pit::tick_count();
+    let over = crate::kthread::with_sched(|s| s.rate_mut().record_ipc(pid.0, now));
+    if over == Ok(true) {
+        log::warn!("[kstate] FR10: pid {} IPC rate OVER LIMIT (sticky flag set)", pid.0);
+    }
+}
+
+/// FR10：移除进程频率条目（进程 reap 路径调用；无条目容忍）。
+pub fn k_rate_unregister(pid: Pid) {
+    if !rate_ready() {
+        return;
+    }
+    let _ = crate::kthread::with_sched(|s| s.rate_mut().unregister(pid.0));
+}
+
+// ---------- FR10 进程级冻结/解冻（proc 表 × sched 原语双接线） ----------
+
+/// 冻结进程：proc 表 `frozen` 置位（IPC 入站 / spawn 拒绝）+ 其全部
+/// 线程经 sched `freeze` 原语摘出调度。返回冻结的线程数。
+pub fn k_freeze_process(pid: Pid) -> Result<usize, CapError> {
+    with_procs(|t| t.freeze(pid))?;
+    Ok(crate::kthread::freeze_threads_of_pid(pid.0))
+}
+
+/// 解冻进程：proc 表 `frozen` 复位 + 其全部线程 sched `thaw` 回就绪队列。
+/// 返回解冻的线程数。
+pub fn k_thaw_process(pid: Pid) -> Result<usize, CapError> {
+    with_procs(|t| t.thaw(pid))?;
+    Ok(crate::kthread::thaw_threads_of_pid(pid.0))
 }
 
 /// 从同一数组取两个不同槽的可变引用（任一为空 → `NotFound`）。
@@ -230,13 +301,21 @@ fn two_slots<'a>(
 // ---------- IPC 实体操作（ENDPOINTS / NOTIFICATIONS 锁包装） ----------
 
 /// 对某 Endpoint 对象非阻塞发送（对象须为已接线的 Endpoint，否则 `InvalidCap`）。
+///
+/// FR10 接线：发送后按 sender agent 反查 pid 记一次 IPC 频率事件
+/// （ENDPOINTS 锁已释放再进 PROCS/SCHED——顺序获取，不嵌套）。
 pub fn k_ep_try_send(obj: ObjRef, req: SendRequest) -> Result<SendOutcome, CapError> {
-    let mut eps = ENDPOINTS.lock();
-    let ep = eps
-        .get_mut(obj.index as usize)
-        .and_then(|s| s.as_mut())
-        .ok_or(CapError::InvalidCap)?;
-    ep.try_send(req)
+    let sender = req.sender;
+    let r = {
+        let mut eps = ENDPOINTS.lock();
+        let ep = eps
+            .get_mut(obj.index as usize)
+            .and_then(|s| s.as_mut())
+            .ok_or(CapError::InvalidCap)?;
+        ep.try_send(req)
+    };
+    record_ipc_rate(sender);
+    r
 }
 
 /// 对某 Endpoint 对象接收（`Waiting` 时集成层应将线程置 Blocked——MVP 无调度器，
