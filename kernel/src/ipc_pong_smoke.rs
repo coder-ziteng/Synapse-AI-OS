@@ -51,7 +51,6 @@ use crate::paging::AddressSpace;
 static PONG_CHILD_PID: AtomicU64 = AtomicU64::new(0);
 static PONG_OLD_CR3: AtomicU64 = AtomicU64::new(0);
 static PONG_OLD_RSP0: AtomicU64 = AtomicU64::new(0);
-static PONG_CHILD_AS_PTR: AtomicU64 = AtomicU64::new(0);
 static PONG_BASE_USED: AtomicU64 = AtomicU64::new(0);
 static PONG_DEATH_CAP: AtomicU64 = AtomicU64::new(0);
 static PONG_DONE: AtomicBool = AtomicBool::new(false);
@@ -130,7 +129,6 @@ pub fn ipc_pong_smoke() -> ! {
 
     // 5. load ipc-pong ELF into child AS
     let (mut child_as, entry, stack_top) = crate::elfload::load_elf_into_as("ipc-pong");
-    PONG_CHILD_AS_PTR.store(&mut child_as as *mut AddressSpace as u64, Ordering::SeqCst);
     // syscall 分发层走 current_as_ptr() 取激活的用户 AS——必须指向子进程 AS，
     // 否则 ipc_try_send 的 user_mem_ok walk_flags 会读错页表 → E_INVALID_ADDR。
     crate::elfload::set_current_as_ptr(&mut child_as as *mut AddressSpace as u64);
@@ -202,6 +200,8 @@ fn do_pong_spawn() -> Result<Pid, synapse_cap::CapError> {
     };
 
     let child_pid = crate::kstate::with_procs(|t| t.spawn(INIT_PID, params))?;
+    // FR9 审计：Spawn 事件（ipc-pong 子进程；init_continuation 全链断言锚点）。
+    crate::audit::process_spawn(INIT_PID.0, child_pid.0, agent);
     PONG_DEATH_CAP.store(death_cap as u64, Ordering::SeqCst);
     Ok(child_pid)
 }
@@ -248,9 +248,12 @@ extern "C" fn ipc_pong_continuation() -> ! {
 
     // 4. 清理子进程资源
     let child_pid = Pid(PONG_CHILD_PID.load(Ordering::SeqCst) as u32);
-    let as_ptr = PONG_CHILD_AS_PTR.load(Ordering::SeqCst) as *mut AddressSpace;
+    // 单所有者契约：take_user_as 转移 AS 所有权。ipc-pong 正常 process_exit 已被
+    // proc_life::terminate_current take + drop 清理（registry 槽已清 0）→ 此处 take
+    // 返回 null 跳过。P4-T11 真机教训：持裸指针副本再 drop 会二次 dealloc
+    // owned_tables Vec → free-list 自环 → 后续首次堆分配挂死。
+    let as_ptr = crate::proc_ext::take_user_as(child_pid) as *mut AddressSpace;
 
-    // ipc-pong 走 process_exit（Exited）——非 fault terminate，此处负责清理 AS
     if !as_ptr.is_null() {
         let child_as = unsafe { &mut *as_ptr };
         // 清理 ipc-pong ELF 段（重走解析，确定性）

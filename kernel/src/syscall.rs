@@ -356,6 +356,20 @@ fn dispatch_inner(frame: &SyscallFrame) -> i64 {
                 // SAFETY: spawned child 上下文，KERNEL_FRAME 已武装。
                 unsafe { crate::proc_life::terminate_current(None, code) }
             }
+            // FR9 审计：legacy 路径（init / 集成 smoke）的 exit 事件——
+            // terminate_current 路径在其内部自记，此处只补 legacy 分支。
+            // 必须在 handle_process_exit（永不返回）之前。
+            {
+                let pid = crate::proc_ext::current_pid();
+                let agent = crate::audit::agent_of_pub(pid);
+                crate::audit::process_ev(
+                    agent,
+                    synapse_audit::ProcOp::Exit,
+                    agent,
+                    u32::MAX,
+                    code,
+                );
+            }
             // SAFETY: smoke 上下文已武装 KERNEL_FRAME。
             unsafe { crate::ring3::handle_process_exit() }
         }

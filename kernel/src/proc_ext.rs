@@ -274,8 +274,11 @@ pub fn is_kstack_installed(pid: Pid) -> bool {
 // ---------------------------------------------------------------------------
 // 用户 AddressSpace 句柄（P4-T9c）
 //
-// 装载形态：`Box<AddressSpace>::into_raw` 后的裸指针，由 proc_life 负责回收
-// (`Box::from_raw` + drop)。slot 0 表示未装载。
+// 装载形态：指向调用方（smoke/spawn 函数）栈帧里 `AddressSpace` 值的裸指针
+// ——load_elf_into_as 按值返回，AS 存活于 continuation 链上游的冻结栈帧，
+// **不是堆对象**。proc_life 回收时只借用调方法 + `drop_in_place`（跑 Drop
+// 归还页表帧），严禁 `Box::from_raw`（会 dealloc 栈地址 → 堆 free-list 损坏）。
+// slot 0 表示未装载。
 // ---------------------------------------------------------------------------
 
 /// 写入 pid 的 user AS 指针（spawn 装载 ELF 后调）。覆盖：未防御性检测旧值，

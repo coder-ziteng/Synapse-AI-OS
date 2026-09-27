@@ -49,6 +49,7 @@ pub mod proc_life;
 pub mod block;
 pub mod init;
 pub mod ipc_pong_smoke;
+pub mod audit;
 
 // 把 trampoline 汇编链入二进制；`boot.S` 中 `.global _start` 提供链接器 entry。
 global_asm!(include_str!("boot.S"));
@@ -205,7 +206,7 @@ pub extern "C" fn _start64() -> ! {
     memory_map::memory_map_init();
     boot_marker(b'K');
 
-    // P4-T5 initramfs：读 stage2 写的 0x20100 {base,size} 记录 + cpio magic 校验。
+    // P4-T5 initramfs：读 stage2 写的 0x21000 {base,size} 记录 + cpio magic 校验。
     // 必须在 page_frame init 之前——分配器步骤 2.5 消费 initrd::region() 出账保留。
     boot_marker(b'm');
     initrd::initrd_init();
@@ -251,6 +252,11 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'Y');
     clock::calibrate();
     boot_marker(b'Z');
+
+    // P4-T11 FR9 审计事件流：全局 append-only 环形队列接线。
+    // 位置契约：calibrate 之后（时间戳有意义）、一切 smoke/IPC 之前
+    // （后续所有内核事件点均被覆盖；init_continuation 末尾做全链断言）。
+    audit::audit_init();
 
     // P4.5 预研：块设备驱动层 init（仅探测 virtio-blk 候选，不真实注册）。
     // 当前 stub：PCI 扫描 + log，不挂盘（系统仍从 initrd 启动）。

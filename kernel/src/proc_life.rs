@@ -29,7 +29,6 @@
 //! drop）。`KERNEL_CR3` 由 spawn_smoke 在第一次 `activate(child_as)` 前
 //! 写入（= 内核 AS 的 PML4）。
 
-use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -163,14 +162,14 @@ pub unsafe fn terminate_current(kind: Option<FaultKind>, code: i32) -> ! {
     // 1. Proc 表状态转换：exit/fault → Exited/Faulted，并抽取
     //    death_endpoint / parent / DeathSignal。fields 在转换前后不变，
     //    可同临界区内一气读完。
-    let (death_cap, parent, signal) = kstate::with_procs(|t| {
+    let (death_cap, parent, signal, agent) = kstate::with_procs(|t| {
         let sig = match kind {
             Some(k) => t.fault(pid, k, code),
             None => t.exit(pid, code),
         }
         .expect("terminate_current on live child");
         let pcb = t.get(pid).expect("pcb just transitioned");
-        (pcb.death_endpoint, pcb.parent, sig)
+        (pcb.death_endpoint, pcb.parent, sig, pcb.agent)
     });
 
     // 2. 切 CR3 回内核 AS（AddressSpace::drop 的 debug_assert 契约：
@@ -183,12 +182,17 @@ pub unsafe fn terminate_current(kind: Option<FaultKind>, code: i32) -> ! {
     // 3. 物理资源回收：umem → AS 叶页 → AS drop → CapTable。
     let as_ptr = proc_ext::take_user_as(pid);
     if as_ptr != 0 {
-        // SAFETY: as_ptr 由 Box::into_raw 产生，终止路径独占。
+        // SAFETY: as_ptr 指向 smoke 函数冻结栈帧里的 AddressSpace
+        //（load_elf_into_as 按值返回，存活在 continuation 链上游栈帧中），
+        // **不是堆对象**——不能用 Box::from_raw（会把栈地址丢给堆 dealloc
+        // → free-list 损坏 → 后续首次堆分配死循环，P4-T11 真机复现）。
+        // 正确姿势与 init_continuation 同款：借用调方法 + drop_in_place 只跑
+        // Drop（AddressSpace::drop 归还页表帧），不触碰堆分配器。
         unsafe {
             crate::umem::cleanup_all(as_ptr as *mut AddressSpace);
-            let mut boxed: Box<AddressSpace> = Box::from_raw(as_ptr as *mut AddressSpace);
-            let freed = boxed.free_all_user_pages();
-            drop(boxed);
+            let as_ref = &mut *(as_ptr as *mut AddressSpace);
+            let freed = as_ref.free_all_user_pages();
+            core::ptr::drop_in_place(as_ptr as *mut AddressSpace);
             info!(
                 "[proc_life] child pid={} AS cleaned, freed {} leaf pages",
                 pid.0, freed
@@ -203,6 +207,15 @@ pub unsafe fn terminate_current(kind: Option<FaultKind>, code: i32) -> ! {
     // 5. Death notification 投递：lock 序 CAP_TABLES → ENDPOINTS（先于 handle_process_exit，
     //    因后者永不返回）。
     deliver_death(parent, death_cap, pid, &signal, kind);
+
+    // 5b. FR9 审计：进程 exit/fault 事件（必须在 handle_process_exit 之前——
+    //     后者永不返回）。actor = 垂死进程自身 agent（步骤 1 已从 PCB 抽出，
+    //     此刻 PCB 已 Zombie，不能再走 agent_of 反查）。
+    {
+        use synapse_audit::ProcOp;
+        let op = if kind.is_some() { ProcOp::Fault } else { ProcOp::Exit };
+        crate::audit::process_ev(agent, op, agent, parent.0, code);
+    }
 
     // 6. KERNEL_FRAME iretq 接力回到续体（spawn_continuation / crash_continuation）。
     // SAFETY: KERNEL_FRAME 已武装。
@@ -297,10 +310,24 @@ fn deliver_death(parent: Pid, death_cap: u8, dying_pid: Pid, signal: &DeathSigna
 /// 失败返回原始 `CapError`（调用方映射为错误码）。成功后 Zombie → slot 释放 +
 /// agent_id 释放 + 父配额划拨归还。
 pub fn sys_reap(reaper: Pid, target: Pid) -> Result<(), CapError> {
+    // FR9 审计前置：reap 会释放 agent_id 注册 + PCB 槽——先抓 target agent。
+    let target_agent = kstate::with_procs(|t| {
+        t.get(target)
+            .map(|pcb| pcb.agent)
+            .unwrap_or(synapse_ipc::AgentId::UNSTAMPED)
+    });
     kstate::with_procs(|t| t.reap(reaper, target))?;
     // reap 成功后清理 per-process 资源（kstack + FR10 频率表）。
     proc_ext::uninstall_kstack(target);
     kstate::k_rate_unregister(target);
+    // FR9 审计：Reap 事件（actor = reaper；code = target pid）。
+    crate::audit::process_ev(
+        crate::audit::agent_of_pub(reaper.0),
+        synapse_audit::ProcOp::Reap,
+        target_agent,
+        reaper.0,
+        target.0 as i32,
+    );
     Ok(())
 }
 

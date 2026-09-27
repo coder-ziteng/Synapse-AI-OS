@@ -236,10 +236,12 @@ pub fn ipc_try_send_count() -> u64 {
 fn resolve_endpoint(pid: u32, cptr: u8, need: Rights) -> Result<(synapse_cap::ObjRef, u32), i64> {
     // slot 0 是 NULL trap。
     if cptr == 0 {
+        // FR9 审计：NULL cap 校验失败（目标未知 → UNKNOWN_OBJ 哨兵）。
+        crate::audit::cap_verify(pid, crate::audit::UNKNOWN_OBJ, need, false);
         return Err(E_INVALID_CAP);
     }
     // 锁序: OBJECTS → CAP_TABLES（与 kstate 约定一致）
-    crate::kstate::with_objects(|objs| {
+    let r = crate::kstate::with_objects(|objs| {
         crate::kstate::with_cap_table(synapse_proc::process::Pid(pid), |t| {
             let cap = match t.get(cptr) {
                 Ok(c) => c,
@@ -255,7 +257,15 @@ fn resolve_endpoint(pid: u32, cptr: u8, need: Rights) -> Result<(synapse_cap::Ob
                 Err(_) => Err(E_INVALID_CAP),
             }
         })
-    })
+    });
+    // FR9 审计：cap 校验事件（成功/失败都记）。**锁外 push**——AUDIT 是
+    // 叶子锁，agent_of 需 PROCS 锁，绝不允许在 OBJECTS/CAP_TABLES 临界区内
+    // 嵌套获取（锁序契约见 audit.rs 模块头）。
+    match &r {
+        Ok((obj, _)) => crate::audit::cap_verify(pid, *obj, need, true),
+        Err(_) => crate::audit::cap_verify(pid, crate::audit::UNKNOWN_OBJ, need, false),
+    }
+    r
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +520,8 @@ pub fn k_ipc_send(frame: &SyscallFrame) -> i64 {
             return E_PERMISSION;
         }
         Ok(SendOutcome::Delivered) => {
+            // FR9 审计：send 已被内核接受（Delivered 路径；label=req.label=0 MVP）。
+            crate::audit::ipc(pid, synapse_audit::IpcDir::Send, obj, 0);
             // receiver waiting：AUX.recv_waiter 取出 → 单拷贝 + cap transfer + 唤醒
             let receiver = {
                 let mut auxs = AUX.lock();
@@ -574,6 +586,8 @@ pub fn k_ipc_send(frame: &SyscallFrame) -> i64 {
             len as i64
         }
         Ok(SendOutcome::Queued) => {
+            // FR9 审计：send 已入队（Queued 路径）。
+            crate::audit::ipc(pid, synapse_audit::IpcDir::Send, obj, 0);
             // receiver 未等：AUX.senders 入队 + 自阻塞等 reply
             {
                 let mut auxs = AUX.lock();
@@ -643,6 +657,8 @@ pub fn k_ipc_try_send(frame: &SyscallFrame) -> i64 {
             return E_INVALID_CAP;
         }
         Ok(SendOutcome::Delivered) => {
+            // FR9 审计：try_send Delivered。
+            crate::audit::ipc(pid, synapse_audit::IpcDir::Send, obj, 0);
             // receiver waiting：AUX 登记 + 单拷贝 + 唤醒
             let receiver = {
                 let mut auxs = AUX.lock();
@@ -682,6 +698,9 @@ pub fn k_ipc_try_send(frame: &SyscallFrame) -> i64 {
             0
         }
         Ok(SendOutcome::Queued) => {
+            // FR9 审计：try_send Queued（★ P4-T11 真机验证锚点——ipc-pong
+            // 子进程 ring3 try_send 走此路径，init_continuation 断言该事件）。
+            crate::audit::ipc(pid, synapse_audit::IpcDir::Send, obj, 0);
             // 队未满：成功入队；登记 sender_wait（expects_reply=false 让 reply 走 -14）
             {
                 let mut auxs = AUX.lock();
@@ -728,6 +747,8 @@ pub fn k_ipc_recv(frame: &SyscallFrame) -> i64 {
             return E_NOT_FOUND;
         }
         Ok(RecvOutcome::Message(req)) => {
+            // FR9 审计：recv 取出消息（label 记录，payload 不记录）。
+            crate::audit::ipc(pid, synapse_audit::IpcDir::Recv, obj, req.label);
             // 反查 senders（按 agent），取出 sender_wait 拿到 as/payload_addr
             let sender = {
                 let mut auxs = AUX.lock();
@@ -840,6 +861,8 @@ pub fn k_ipc_reply(frame: &SyscallFrame) -> i64 {
     };
     // 截断到 sender 原 payload_len
     let reply_len = core::cmp::min(len, in_flight.sender_len);
+    // FR9 审计：reply 事件（in_flight 已取出 = 内核接受回复）。
+    crate::audit::ipc(pid, synapse_audit::IpcDir::Reply, obj, 0);
     let copy_res = unsafe { ipc_copy(user_as, msg, in_flight.sender_as, in_flight.sender_buf, reply_len) };
     let wake_res = kthread::kthread_unblock(in_flight.sender_thread);
     if if_on { x86_64::instructions::interrupts::enable(); }

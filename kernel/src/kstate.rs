@@ -178,10 +178,23 @@ pub fn k_destroy_cap_table(pid: Pid) {
 /// 在 pid 表中铸造根 capability（`parent = None`，init 铸造路径，Doc 01 §4）。
 pub fn k_mint_root(pid: Pid, obj: ObjRef, rights: Rights) -> Result<CapRef, CapError> {
     record_syscall_rate(pid); // FR10：cap 操作类 syscall 计数
-    with_cap_table(pid, |t| {
+    let r = with_cap_table(pid, |t| {
         let cap = synapse_cap::Capability::root(obj, rights);
         t.alloc(cap)
-    })
+    });
+    // FR9 审计：CapLifecycle(Mint)。**锁外 push**（AUDIT 叶子锁 + agent_of 需
+    // PROCS——不与 CAP_TABLES 嵌套）。delegate/revoke 事件随 P4-T13
+    // capability syscall 接线补齐。
+    if r.is_ok() {
+        let kind = with_objects(|o| o.check_live(obj)).unwrap_or(ObjKind::Endpoint);
+        crate::audit::cap_lifecycle(
+            pid.0,
+            synapse_audit::CapOp::Mint,
+            kind,
+            crate::audit::agent_of_pub(pid.0),
+        );
+    }
+    r
 }
 
 // ---------- 跨进程转移（transfer_caps 的锁包装） ----------

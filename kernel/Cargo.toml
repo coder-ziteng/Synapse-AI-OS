@@ -65,3 +65,7 @@ path = "../abi"
 # ===== P4-T5 (2026-09-27): ELF64 静态加载 + cpio newc initramfs 纯逻辑解析 =====
 [dependencies.synapse-elf]
 path = "../elf"
+
+# ===== P4-T11 (2026-09-27): FR9 审计事件流内核接线 =====
+[dependencies.synapse-audit]
+path = "../audit"

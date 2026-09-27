@@ -48,7 +48,6 @@ const ELF_STACK_PAGES: u64 = crate::elfload::ELF_STACK_PAGES;
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
 static INIT_OLD_CR3: AtomicU64 = AtomicU64::new(0);
 static INIT_OLD_RSP0: AtomicU64 = AtomicU64::new(0);
-static INIT_AS_PTR: AtomicU64 = AtomicU64::new(0);
 static INIT_BASE_USED: AtomicU64 = AtomicU64::new(0);
 
 /// P4-T10 init smoke：装载 init ELF 并在 pid=1 中执行（Root Agent）。
@@ -89,7 +88,6 @@ pub fn init_smoke() {
 
     // 4. 装载 init ELF → 用户 AS（Root Agent, pid=1）
     let (mut as_user, entry, stack_top) = crate::elfload::load_elf_into_as("init");
-    INIT_AS_PTR.store(&mut as_user as *mut AddressSpace as u64, Ordering::SeqCst);
     // syscall 分发层走 elfload::current_as_ptr() —— 指向 init AS
     crate::elfload::set_current_as_ptr(&mut as_user as *mut AddressSpace as u64);
     // PROC_EXT[1].user_as_ptr = init AS（init = pid=1）
@@ -176,6 +174,7 @@ fn verify_init_bootstrap_caps() {
 /// AS 页表帧）+ 验 FR8 归零 + 返回 main.rs 后续 smoke。
 #[no_mangle]
 extern "C" fn init_continuation() {
+    use synapse_proc::process::INIT_PID;
     use x86_64::instructions::segmentation::{CS, Segment};
 
     // 1. 确证 ring-0
@@ -200,7 +199,9 @@ extern "C" fn init_continuation() {
     // 3. 清理 init 用户态资源（mmap + ELF 段 + 栈 + AS）
     //    注意：init 是 Root Agent（pid=1），自身不 reap；此清理仅归还
     //    mmap 区域页帧 + AS 页表帧，为后续 hello 子进程腾出 frame budget。
-    let as_ptr = INIT_AS_PTR.load(Ordering::SeqCst) as *mut AddressSpace;
+    //    单所有者契约：take_user_as 取回 init_smoke 注册的 AS 并清槽（init 不走
+    //    terminate_current，正常必取回非零），Drop 恰好在此处发生一次。
+    let as_ptr = crate::proc_ext::take_user_as(INIT_PID) as *mut AddressSpace;
     if !as_ptr.is_null() {
         unsafe {
             let as_user = &mut *as_ptr;
@@ -252,6 +253,12 @@ extern "C" fn init_continuation() {
 
     info!("[init-smoke] PASS — init (Root Agent) ran abi_query + gettime + process_exit");
 
+    // 5. P4-T11 FR9 审计事件流真机验证：全链事件按序断言（种类/顺序/pid）。
+    //    位置契约：必须在启动链最末（init_continuation）——此时 ring3/elf/
+    //    spawn/crash/ipc-pong/init 全部事件点已入队。
+    verify_audit_trail();
+    info!("[audit-verify] PASS — FR9 audit trail verified (kind/order/pid)");
+
     // P4-T10 启动链收口：QEMU exit 363（成功路径）。
     // 通过 isa-debug-exit (iobase=0x502) 退出 QEMU。
     // QEMU isa-debug-exit 实现为 exit((val << 1) | 1)（无掩码），
@@ -271,4 +278,158 @@ extern "C" fn init_continuation() {
             asm!("hlt", options(nostack, preserves_flags));
         }
     }
+}
+
+// ============================================================================
+// P4-T11：FR9 审计事件流真机验证
+// ============================================================================
+
+/// 全链审计事件断言（init_continuation 末尾调用）。
+///
+/// 断言组（对应 task.json P4-T11 verify "按序取出审计事件断言 种类/顺序/pid"）：
+///
+/// 1. **零溢出**：`overflow == 0`（drop-oldest 未触发 → 全事件在册）；
+/// 2. **首事件** = `System(Startup)`（audit_init 在一切事件点之前）；
+/// 3. **时间戳单调不减**（monotonic_ns 契约）;
+/// 4. **Fault 事件存在**：crasher SegFault → `Process{Fault, parent=1}`；
+/// 5. **ipc-pong 有序子序列**（严格递增索引）：
+///    `Process{Spawn,parent=1}` → `CapVerify{SEND,ok}` → `Ipc{Send}` →
+///    `Process{Exit,code=0}` → `Process{Reap}` → `Process{Exit,agent=init}`
+///    ——覆盖 spawn/cap 校验/IPC/exit/reap 五类事件点的**因果顺序 + pid/agent 一致性**。
+fn verify_audit_trail() {
+    use synapse_audit::{AuditEvent, EventDetail, EventKind, IpcDir, ProcOp, SystemEvent};
+    use synapse_cap::Rights;
+    use synapse_ipc::AgentId;
+
+    /// drain 缓冲占位元素（drain 只覆盖前 got 条）。
+    const DUMMY: AuditEvent = AuditEvent {
+        kind: EventKind::System,
+        timestamp: 0,
+        actor: AgentId(0),
+        detail: EventDetail::System {
+            event: SystemEvent::Startup,
+            param: 0,
+        },
+    };
+
+    info!("[audit-verify] step 0: enter (pushed_total={})", crate::audit::pushed_total());
+
+    // 1. 零溢出（丢失可见性：overflow > 0 = 断言失败，容量或事件风暴问题）
+    let overflow = crate::audit::overflow();
+    assert_eq!(
+        overflow, 0,
+        "[audit-verify] queue overflowed: {overflow} events dropped (capacity too small?)"
+    );
+
+    // 一次性 drain 全量（Vec 堆缓冲，避免 continuation 栈上放 10KB 数组）
+    let n = crate::audit::len();
+    info!("[audit-verify] step 1: overflow={overflow} len={n}");
+    assert!(n > 0, "[audit-verify] audit queue empty — audit_init not called?");
+    let mut trail = alloc::vec![DUMMY; n];
+    info!("[audit-verify] step 2: trail allocated, draining");
+    let got = crate::audit::drain(&mut trail);
+    assert_eq!(got, n, "[audit-verify] drain count mismatch: {got} != {n}");
+    let trail = &trail[..got];
+
+    // 2. 首事件 = System(Startup)
+    assert!(
+        matches!(
+            trail[0].detail,
+            EventDetail::System { event: SystemEvent::Startup, .. }
+        ),
+        "[audit-verify] first event is not System(Startup): {:?}",
+        trail[0].kind
+    );
+
+    // 3. 时间戳单调不减
+    for w in trail.windows(2) {
+        assert!(
+            w[1].timestamp >= w[0].timestamp,
+            "[audit-verify] timestamp regression: {} -> {}",
+            w[0].timestamp,
+            w[1].timestamp
+        );
+    }
+
+    // 4. crasher Fault 事件存在（SegFault terminate → Process{Fault, parent=1}）
+    assert!(
+        trail.iter().any(|e| matches!(
+            e.detail,
+            EventDetail::Process { op: ProcOp::Fault, parent_pid: 1, .. }
+        )),
+        "[audit-verify] no Process(Fault) event for crasher"
+    );
+
+    // 5. ipc-pong 有序子序列（锚点扫描：逐个 Spawn 候选尝试匹配完整链）
+    info!("[audit-verify] step 3: structural asserts passed, scanning chain");
+    let init_agent = AgentId(1); // kstate_init 约定 init agent_id = 1
+    let mut matched: Option<(usize, usize, usize, usize, usize, usize, i32)> = None;
+    for (i, e) in trail.iter().enumerate() {
+        let EventDetail::Process {
+            op: ProcOp::Spawn,
+            parent_pid: 1,
+            code: child_pid,
+            agent: child_agent,
+            ..
+        } = e.detail
+        else {
+            continue;
+        };
+        // CapVerify{SEND, ok=true, actor=child} → Ipc{Send, actor=child} →
+        // Process{Exit, code=0, actor=child} → Process{Reap, code=child_pid} →
+        // Process{Exit, code=0, actor=init}
+        let find = |from: usize, pred: &dyn Fn(&AuditEvent) -> bool| -> Option<usize> {
+            (from..n).find(|&j| pred(&trail[j]))
+        };
+        let Some(j1) = find(i + 1, &|e: &AuditEvent| {
+            matches!(e.detail, EventDetail::CapVerify { ok: true, rights, .. }
+                if rights.contains(Rights::SEND))
+                && e.actor == child_agent
+        }) else { continue };
+        let Some(j2) = find(j1 + 1, &|e: &AuditEvent| {
+            matches!(e.detail, EventDetail::Ipc { dir: IpcDir::Send, .. })
+                && e.actor == child_agent
+        }) else { continue };
+        let Some(j3) = find(j2 + 1, &|e: &AuditEvent| {
+            matches!(e.detail, EventDetail::Process { op: ProcOp::Exit, code: 0, .. })
+                && e.actor == child_agent
+        }) else { continue };
+        let Some(j4) = find(j3 + 1, &|e: &AuditEvent| {
+            matches!(e.detail, EventDetail::Process { op: ProcOp::Reap, code, .. }
+                if code == child_pid)
+        }) else { continue };
+        let Some(j5) = find(j4 + 1, &|e: &AuditEvent| {
+            matches!(e.detail, EventDetail::Process { op: ProcOp::Exit, code: 0, .. })
+                && e.actor == init_agent
+        }) else { continue };
+        matched = Some((i, j1, j2, j3, j4, j5, child_pid));
+        break;
+    }
+    let (i, j1, j2, j3, j4, j5, child_pid) = matched.unwrap_or_else(|| {
+        panic!(
+            "[audit-verify] ipc-pong ordered subsequence not found: \
+             Spawn -> CapVerify(SEND,ok) -> Ipc(Send) -> Exit -> Reap -> init Exit"
+        )
+    });
+    info!(
+        "[audit-verify]   ok: chain Spawn#{i}(pid={child_pid}) -> CapVerify#{j1} \
+         -> IpcSend#{j2} -> Exit#{j3} -> Reap#{j4} -> initExit#{j5}"
+    );
+
+    // 6. 种类分布摘要（观测性；不断言具体值——kthread smoke 事件量随任务演进）
+    let (mut cap_v, mut cap_l, mut ipc_c, mut proc_c, mut sys_c) = (0, 0, 0, 0, 0);
+    for e in trail {
+        match e.kind {
+            EventKind::CapVerify => cap_v += 1,
+            EventKind::CapLifecycle => cap_l += 1,
+            EventKind::Ipc => ipc_c += 1,
+            EventKind::Process => proc_c += 1,
+            EventKind::System => sys_c += 1,
+        }
+    }
+    info!(
+        "[audit-verify]   ok: {n} events drained: CapVerify={cap_v} CapLifecycle={cap_l} \
+         Ipc={ipc_c} Process={proc_c} System={sys_c} (pushed_total={})",
+        crate::audit::pushed_total()
+    );
 }
