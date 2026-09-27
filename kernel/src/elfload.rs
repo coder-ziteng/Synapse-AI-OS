@@ -57,6 +57,15 @@ static AS_PTR: AtomicU64 = AtomicU64::new(0);
 static BASE_USED: AtomicU64 = AtomicU64::new(0);
 static SMOKE_DONE: AtomicBool = AtomicBool::new(false);
 
+/// 当前武装的用户 AS 裸指针（0 = 未武装）。
+///
+/// P4-T6：syscall 分发层（gettime/mmap/munmap）经此取激活的用户
+/// [`AddressSpace`]——单核 MVP 契约（smoke 窗口内唯一用户进程）；
+/// T9 进程表接线后改为 per-process 当前 AS。
+pub(crate) fn current_as_ptr() -> u64 {
+    AS_PTR.load(Ordering::SeqCst)
+}
+
 // ============================================================================
 // 提取 + 解析
 // ============================================================================
@@ -239,6 +248,15 @@ extern "C" fn elf_continuation() -> ! {
     assert!(n >= 1, "[elf-smoke] abi_query count = {n}, expected >= 1");
     info!("[elf-smoke]   ok: hello ran in ring-3, abi_query count = {n}");
 
+    // 2.5 P4-T6 证据：hello 真实跑过 mmap/munmap 成功路径（各 ≥ 2 / ≥ 1；
+    //     测试程序自律清理 ⇒ ACTIVE 应为 0，非 0 由下面 cleanup_all 兜底）
+    let (mok, merr, uok, uerr) = crate::umem::stats();
+    assert!(
+        mok >= 2 && uok >= 1,
+        "[elf-smoke] umem evidence: mmap_ok={mok} munmap_ok={uok}, expected >=2 / >=1"
+    );
+    info!("[elf-smoke]   ok: umem stats mmap {mok}ok/{merr}err, munmap {uok}ok/{uerr}err");
+
     // 3. CR3 → kernel AS
     let old_cr3 = OLD_CR3.load(Ordering::SeqCst);
     unsafe { crate::paging::cr3_write(old_cr3) };
@@ -249,6 +267,14 @@ extern "C" fn elf_continuation() -> ! {
     let as_ptr = AS_PTR.load(Ordering::SeqCst) as *mut AddressSpace;
     let mut freed = 0u64;
     // SAFETY: AS_PTR 由 smoke 写入且未被 drop；本函数是唯一后续使用者。
+    // 4.0 先兜底清理 hello 遗留的 mmap 区域（unmap+free+VMA 注销+arena 重置；
+    //     自律清理时为 no-op）——FR8 账本归零的前提。
+    unsafe { crate::umem::cleanup_all(as_ptr) };
+    assert_eq!(
+        crate::umem::active_count(),
+        0,
+        "[elf-smoke] umem ACTIVE not empty after cleanup_all"
+    );
     unsafe {
         for seg in parsed.loads() {
             let flags = leaf_flags(seg);

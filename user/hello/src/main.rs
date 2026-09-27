@@ -1,50 +1,146 @@
-//! 第一个静态用户态 ELF（P4-T1 交付物）。
+//! P4-T6 syscall 测试程序（initramfs `hello`）。
 //!
-//! 目标不是功能，而是**打通用户态工具链**：
-//! no_std + 自定义 target（`x86_64-synapse-user.json`）+ 专用链接脚本
-//! （`user/hello/linker.ld`，基址 0x4000_0000 = 1GB，见脚本头注释的
-//! 基址改址原因）→ 产出可被 P4-T5 内核 ELF 加载器
-//! 消费的 ET_EXEC 产物（xtask user 子命令做 ELF 头断言）。
+//! 从 P4-T1 三段式占位升级为**6 syscall 全路径验证**（task.json P4-T6
+//! verify：成功路径 + 每个错误路径负错误码断言）：
 //!
-//! 三段式主体（对齐 task.json P4-T1 deliverables）：
-//! 1. `abi_query` 占位：ABI 版本协商（内核侧接线在 P4-T6；当前 syscall
-//!    会落入内核未处理路径，返回值仅记录、不断言）；
-//! 2. `process_exit` 占位：请求内核终止本进程；
-//! 3. 死循环兜底：exit 未接线前 `hlt` 等待。注意 ring3 执行 `hlt` 会触发
-//!    #GP——这是**期望行为**（P4-T4 接线后走 fault 路径杀进程，不伤内核）。
+//! | # | syscall | 覆盖 |
+//! | --- | --- | --- |
+//! | 1 | `abi_query`(18) | 返回 `(MAJOR<<16)|MINOR` = 0x2（0.2） |
+//! | 2 | `yield`(25) | 成功返回 0（接 P3 调度器） |
+//! | 3 | `gettime`(30) | MONOTONIC 成功 + nsec 值域 + 两次调用单调不减；WALL → -10；未知钟 → -5；坏指针/只读页 → -2 |
+//! | 4 | `mmap`(40) | 内核选址 RW/RX/GROWABLE + 显式地址；写读回环；len=0/未对齐/越窗/重叠 → -2；W+X/无 R/未知 prot 位 → -7；未知 flags 位 → -10 |
+//! | 5 | `munmap`(41) | 精确解除成功；重复/部分/未登记 → -5；未对齐/len=0 → -2 |
+//! | 6 | `process_exit`(21) | code=0 终结（内核 KERNEL_FRAME iretq 接力 elf_continuation） |
 //!
-//! 内存约定：无栈溢出保护（P4-T3 VMA 提供 stack region + guard page 前，
-//! 本 bin 栈由加载方静态划定，只做叶调用级操作）。
+//! 失败语义：任何 assert 失败 → panic（=abort）→ ring-3 停机循环触发
+//! #GP/#UD → 内核 panic → QEMU exit **355**（区别于全过 363）。
+//!
+//! IllegalSyscall（未知号）路径不在本程序测——触发即被杀，无法继续后续
+//! 断言；由 ring3 stub（#999）覆盖，内核侧 illegal_syscall_count()==1 断言。
 
 #![no_std]
 #![no_main]
 
 use core::arch::asm;
 use core::panic::PanicInfo;
-use synapse_abi::SyscallId;
 
-/// 用户态入口（`user/linker.ld` 中 `ENTRY(_start)`，e_entry 指向此处）。
+use synapse_abi::{
+    abi_query_value, SyscallId, Timespec, CLOCK_MONOTONIC, CLOCK_WALL, E_INVALID_ADDR,
+    E_NO_MEMORY, E_NOT_FOUND, E_NOT_IMPLEMENTED, E_PERMISSION, MAP_GROWABLE, PROT_EXEC,
+    PROT_READ, PROT_WRITE,
+};
+use synapse_user::invoke;
+
+const RW: u64 = (PROT_READ | PROT_WRITE) as u64;
+const RX: u64 = (PROT_READ | PROT_EXEC) as u64;
+
+/// 便利宏：invoke(id, args) 简写。
+macro_rules! sys {
+    ($id:expr, [$($a:expr),* $(,)?]) => {
+        unsafe { invoke($id.num(), [$($a as u64),*]) }
+    };
+}
+
+/// 用户态入口（`user/hello/linker.ld` 中 `ENTRY(_start)`）。
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    // ① abi_query：返回 (ABI_MAJOR << 16) | ABI_MINOR（Doc 02 §4.2）。
-    let abi = unsafe { synapse_user::invoke(SyscallId::AbiQuery as u64, [0; 6]) };
-    let _abi_major = ((abi >> 16) & 0xFFFF) as u16;
-    let _abi_minor = (abi & 0xFFFF) as u16;
-    // P4-T10 起：major != synapse_abi::ABI_MAJOR → 拒绝运行。
-    // T1 阶段内核尚未接线 syscall 分发，不做断言。
+    // ---- 1. abi_query：版本协商（P4-T6 起 minor=2：错误码/Timespec/prot 位入 crate）
+    let v = sys!(SyscallId::AbiQuery, [0, 0, 0, 0, 0, 0]);
+    assert_eq!(v as u64, abi_query_value(), "abi_query value");
+    assert_eq!((v >> 16) as u16, synapse_abi::ABI_MAJOR, "abi major");
 
-    // ② exit 占位：请求内核终止本进程（接线在 P4-T6）。
-    unsafe { synapse_user::invoke(SyscallId::ProcessExit as u64, [0; 6]) };
+    // ---- 2. yield：调度器让出，成功返回 0
+    assert_eq!(sys!(SyscallId::Yield, [0, 0, 0, 0, 0, 0]), 0, "yield");
 
-    // ③ 死循环兜底。
+    // ---- 3. gettime
+    let mut ts1 = Timespec::default();
+    let r = sys!(SyscallId::GetTime, [CLOCK_MONOTONIC, &mut ts1 as *mut _ as u64, 0, 0, 0, 0]);
+    assert_eq!(r, 0, "gettime monotonic");
+    assert!(ts1.nsec < 1_000_000_000, "nsec range");
+    let mut ts2 = Timespec::default();
+    let r = sys!(SyscallId::GetTime, [CLOCK_MONOTONIC, &mut ts2 as *mut _ as u64, 0, 0, 0, 0]);
+    assert_eq!(r, 0, "gettime monotonic 2nd");
+    assert!((ts2.sec, ts2.nsec) >= (ts1.sec, ts1.nsec), "monotonic non-decreasing");
+    // 墙钟延后（RTC 未接）→ E_NOT_IMPLEMENTED
+    assert_eq!(
+        sys!(SyscallId::GetTime, [CLOCK_WALL, &mut ts2 as *mut _ as u64, 0, 0, 0, 0]),
+        E_NOT_IMPLEMENTED,
+        "gettime wall -> -10"
+    );
+    // 未知 clock_id → E_NOT_FOUND
+    assert_eq!(
+        sys!(SyscallId::GetTime, [7, &mut ts2 as *mut _ as u64, 0, 0, 0, 0]),
+        E_NOT_FOUND,
+        "gettime unknown clock -> -5"
+    );
+    // 坏指针（NULL guard 区，未映射）→ E_INVALID_ADDR
+    assert_eq!(sys!(SyscallId::GetTime, [CLOCK_MONOTONIC, 0x1000, 0, 0, 0, 0]), E_INVALID_ADDR, "gettime bad ptr -> -2");
+    // 只读页（本 ELF 代码段 RX 无 W）→ E_INVALID_ADDR
+    assert_eq!(sys!(SyscallId::GetTime, [CLOCK_MONOTONIC, 0x4000_0000, 0, 0, 0, 0]), E_INVALID_ADDR, "gettime RO ptr -> -2");
+
+    // ---- 4. mmap 成功路径
+    // 4a. 内核选址 RW 2 页 + eager 零页写读回环
+    let a1 = sys!(SyscallId::Mmap, [0, 0x2000, RW, 0, 0, 0]);
+    assert!(a1 >= 0x4100_0000, "mmap RW arena addr");
+    unsafe {
+        let p = a1 as *mut u64;
+        assert_eq!(p.read_volatile(), 0, "mmap eager zero page");
+        p.write_volatile(0xDEAD_BEEF_CAFE_1234);
+        assert_eq!(p.read_volatile(), 0xDEAD_BEEF_CAFE_1234, "mmap RW roundtrip");
+    }
+    // 4b. RX 1 页（可执行只读；W^X 合法组合）
+    let a2 = sys!(SyscallId::Mmap, [0, 0x1000, RX, 0, 0, 0]);
+    assert!(a2 >= a1 + 0x2000, "mmap RX addr above a1");
+    // 4c. RW + GROWABLE（堆语义 flag 透传 VMA）
+    let a3 = sys!(SyscallId::Mmap, [0, 0x1000, RW, MAP_GROWABLE, 0, 0]);
+    assert!(a3 >= a2 + 0x1000, "mmap GROWABLE addr");
+    // 4d. 显式地址（arena 上方 16MB 处，页对齐、无重叠）
+    let hint = ((a3 as u64 + 0x10_0000) & !0xFFF) as i64;
+    let a4 = sys!(SyscallId::Mmap, [hint as u64, 0x1000, RW, 0, 0, 0]);
+    assert_eq!(a4, hint, "mmap explicit addr honored");
+
+    // 4e. mmap 错误路径
+    assert_eq!(sys!(SyscallId::Mmap, [0, 0, RW, 0, 0, 0]), E_INVALID_ADDR, "mmap len=0 -> -2");
+    assert_eq!(sys!(SyscallId::Mmap, [0, 0x1001, RW, 0, 0, 0]), E_INVALID_ADDR, "mmap unaligned len -> -2");
+    assert_eq!(sys!(SyscallId::Mmap, [1, 0x1000, RW, 0, 0, 0]), E_INVALID_ADDR, "mmap unaligned addr -> -2");
+    assert_eq!(sys!(SyscallId::Mmap, [0x8000_0000u64, 0x1000, RW, 0, 0, 0]), E_INVALID_ADDR, "mmap out-of-window -> -2");
+    assert_eq!(sys!(SyscallId::Mmap, [a1 as u64, 0x1000, RW, 0, 0, 0]), E_INVALID_ADDR, "mmap overlap -> -2");
+    assert_eq!(
+        sys!(SyscallId::Mmap, [0, 0x1000, (PROT_WRITE | PROT_EXEC) as u64, 0, 0, 0]),
+        E_PERMISSION,
+        "mmap W+X -> -7"
+    );
+    assert_eq!(sys!(SyscallId::Mmap, [0, 0x1000, 0, 0, 0, 0]), E_PERMISSION, "mmap no-R -> -7");
+    assert_eq!(sys!(SyscallId::Mmap, [0, 0x1000, 0x80, 0, 0, 0]), E_PERMISSION, "mmap unknown prot bit -> -7");
+    assert_eq!(sys!(SyscallId::Mmap, [0, 0x1000, RW, 0x100, 0, 0]), E_NOT_IMPLEMENTED, "mmap unknown flags bit -> -10");
+    // 撞已映射页（本 ELF 代码段基址，无 VMA 但 map_page AlreadyMapped）→ -2
+    assert_eq!(sys!(SyscallId::Mmap, [0x4000_0000u64, 0x1000, RW, 0, 0, 0]), E_INVALID_ADDR, "mmap onto ELF text -> -2");
+    // 巨型 len 超 arena → E_NO_MEMORY（2GB 窗口装不下 1GB 请求）
+    assert_eq!(sys!(SyscallId::Mmap, [0, 0x4000_0000u64, RW, 0, 0, 0]), E_NO_MEMORY, "mmap huge len -> -3");
+
+    // ---- 5. munmap
+    assert_eq!(sys!(SyscallId::Munmap, [a1 as u64, 0x2000, 0, 0, 0, 0]), 0, "munmap a1");
+    assert_eq!(sys!(SyscallId::Munmap, [a1 as u64, 0x2000, 0, 0, 0, 0]), E_NOT_FOUND, "munmap twice -> -5");
+    assert_eq!(sys!(SyscallId::Munmap, [a2 as u64, 0x2000, 0, 0, 0, 0]), E_NOT_FOUND, "munmap len mismatch -> -5");
+    assert_eq!(sys!(SyscallId::Munmap, [a2 as u64 + 1, 0x1000, 0, 0, 0, 0]), E_INVALID_ADDR, "munmap unaligned -> -2");
+    assert_eq!(sys!(SyscallId::Munmap, [a2 as u64, 0, 0, 0, 0, 0]), E_INVALID_ADDR, "munmap len=0 -> -2");
+    assert_eq!(sys!(SyscallId::Munmap, [0x5000_0000u64, 0x1000, 0, 0, 0, 0]), E_NOT_FOUND, "munmap never-mapped -> -5");
+    // 自律清理（elf_continuation 断言 cleanup 后 ACTIVE=0 + FR8 归零）
+    assert_eq!(sys!(SyscallId::Munmap, [a2 as u64, 0x1000, 0, 0, 0, 0]), 0, "munmap a2");
+    assert_eq!(sys!(SyscallId::Munmap, [a3 as u64, 0x1000, 0, 0, 0, 0]), 0, "munmap a3");
+    assert_eq!(sys!(SyscallId::Munmap, [a4 as u64, 0x1000, 0, 0, 0, 0]), 0, "munmap a4");
+
+    // ---- 6. process_exit(0)：内核 KERNEL_FRAME iretq 接力 elf_continuation
+    unsafe { invoke(SyscallId::ProcessExit.num(), [0, 0, 0, 0, 0, 0]) };
+
+    // 不应到这里（exit 不回用户态）
     loop {
         unsafe { asm!("hlt") };
     }
 }
 
-/// panic = abort（target json 约定）：用户态 panic 直接停机循环，
-/// 由内核 fault/timeout 路径收尸（P4-T9）。不打印（无 stdout，
-/// 早期调试走 syscall 日志是后续任务）。
+/// panic = abort（target json 约定）：停机循环 → ring-3 `hlt` #GP →
+/// 内核 panic → QEMU exit 355（测试失败的确定性信号）。
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {

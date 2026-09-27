@@ -337,6 +337,37 @@ impl AddressSpace {
         }
     }
 
+    /// VA → (PA, 叶级 entry) 翻译（P4-T6：syscall 集成层的用户指针校验用）。
+    ///
+    /// 与 [`translate`](Self::translate) 同一走查，但额外返回命中的叶级
+    /// entry 原始位（4KB 页 = PT entry；2MB 大页 = PD entry）——调用方据此
+    /// 检查 `PT_USER` / `PT_WRITABLE` / `PT_NX`，实现 copy_to/from_user 的
+    /// 前置校验（拒绝而非 fault）。任一级 !present → `None`。
+    pub fn walk_flags(&self, va: u64) -> Option<(PhysicalAddr, u64)> {
+        unsafe {
+            let e0 = entry_read(self.pml4, ((va >> 39) & 0x1FF) as usize);
+            if e0 & PT_PRESENT == 0 {
+                return None;
+            }
+            let e1 = entry_read(e0 & PT_ADDR_MASK, ((va >> 30) & 0x1FF) as usize);
+            if e1 & PT_PRESENT == 0 {
+                return None;
+            }
+            let e2 = entry_read(e1 & PT_ADDR_MASK, ((va >> 21) & 0x1FF) as usize);
+            if e2 & PT_PRESENT == 0 {
+                return None;
+            }
+            if e2 & PT_HUGE != 0 {
+                return Some(((e2 & HUGE2M_ADDR_MASK) | (va & 0x1F_FFFF), e2));
+            }
+            let e3 = entry_read(e2 & PT_ADDR_MASK, ((va >> 12) & 0x1FF) as usize);
+            if e3 & PT_PRESENT == 0 {
+                return None;
+            }
+            Some(((e3 & PT_ADDR_MASK) | (va & 0xFFF), e3))
+        }
+    }
+
     /// VA → PA 翻译（4 级走查；PD 级支持 2MB 大页——内核共享区即大页）。
     /// 任一级 !present → `None`。不检查权限位（那是 CPU/#PF 的职责）。
     pub fn translate(&self, va: u64) -> Option<PhysicalAddr> {
@@ -408,6 +439,20 @@ static KILL_COUNT: AtomicU64 = AtomicU64::new(0);
 /// 注册一条用户 VMA。失败返回 [`VmaError`]。
 pub fn demand_register(region: UserMemoryRegion) -> Result<usize, VmaError> {
     DEMAND_TABLE.lock().insert(region)
+}
+
+/// 注销一条用户 VMA（按 start 精确匹配；P4-T6 munmap / 进程清理路径）。
+pub fn demand_unregister(start: u64) -> Option<UserMemoryRegion> {
+    DEMAND_TABLE.lock().remove(start)
+}
+
+/// 对 VMA 表执行只读闭包（单临界区；P4-T6 mmap 重叠检查用）。
+///
+/// 闭包内**不得**再调 [`demand_register`] / [`demand_unregister`]
+/// （SpinLock 不可重入，会死锁）。
+pub fn demand_with_table<R>(f: impl FnOnce(&RegionTable) -> R) -> R {
+    let table = DEMAND_TABLE.lock();
+    f(&table)
 }
 
 /// 取当前 kill-skeleton 触发次数（smoke 断言）。

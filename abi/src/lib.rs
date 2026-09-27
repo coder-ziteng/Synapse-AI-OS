@@ -33,7 +33,10 @@
 pub const ABI_MAJOR: u16 = 0;
 
 /// ABI minor 版本（向后兼容新增 syscall / 错误码 / rights 位时递增）。
-pub const ABI_MINOR: u16 = 1;
+///
+/// 0.2（P4-T6）：错误码常量（§4.3）、clock_id、Timespec、mmap prot/flags
+/// 位常量首次进入 crate 本体；syscall 号表与 decode 语义不变。
+pub const ABI_MINOR: u16 = 2;
 
 /// `abi_query`（#18）返回值：`(major << 16) | minor`。
 ///
@@ -41,6 +44,80 @@ pub const ABI_MINOR: u16 = 1;
 pub const fn abi_query_value() -> u64 {
     ((ABI_MAJOR as u64) << 16) | (ABI_MINOR as u64)
 }
+
+// ============================================================================
+// 错误码（Doc 02 §4.3）—— syscall 返回值 rax < 0 时的全集
+// ============================================================================
+//
+// 规格差异注记（P4-T6）：task.json deliverable 写"15 个错误码"，Doc 02 §4.3
+// 实际定义 10 个——以文档为准实现 10 个，差异记入 decision_log。
+
+/// 无效 CapRef（不在进程 capability 表中 / 已撤销）。
+pub const E_INVALID_CAP: i64 = -1;
+/// 无效用户态地址（未映射 / 权限违例 / 越出用户窗口）。
+pub const E_INVALID_ADDR: i64 = -2;
+/// 内核内存不足（页帧 / 堆耗尽）。
+pub const E_NO_MEMORY: i64 = -3;
+/// 非阻塞操作本会阻塞。
+pub const E_WOULD_BLOCK: i64 = -4;
+/// 目标不存在（进程 / endpoint / 映射区域）。
+pub const E_NOT_FOUND: i64 = -5;
+/// Agent ID 冲突（注册表重名）。
+pub const E_AGENT_ID_CONFLICT: i64 = -6;
+/// 权限拒绝（capability rights 不足 / mmap prot 非法组合）。
+pub const E_PERMISSION: i64 = -7;
+/// 目标进程已冻结（FR10 行为围栏）。
+pub const E_FROZEN: i64 = -8;
+/// 目标进程为僵尸态。
+pub const E_ZOMBIE: i64 = -9;
+/// syscall 未实现（预留号 / 延后交付路径）。
+pub const E_NOT_IMPLEMENTED: i64 = -10;
+
+// ============================================================================
+// gettime（#30）常量与输出结构
+// ============================================================================
+
+/// `clock_id`：单调钟（TSC 校准，自引导起的纳秒；P4-T6 唯一可用钟）。
+pub const CLOCK_MONOTONIC: u32 = 0;
+/// `clock_id`：墙钟（RTC；未接硬件前返回 [`E_NOT_IMPLEMENTED`]）。
+pub const CLOCK_WALL: u32 = 1;
+
+/// `gettime` 输出结构（Doc 02 §4.5：`repr(C)`、little-endian、16 字节；
+/// 新字段只允许追加尾部）。
+///
+/// 用户态不暴露 `rdtsc`：TSC 原始值仅内核可见，跨边界一律折算为
+/// sec/nsec（防侧信道 + 频率校准集中化）。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Timespec {
+    /// 秒。
+    pub sec: u64,
+    /// 纳秒余量（0..999_999_999）。
+    pub nsec: u64,
+}
+
+// ============================================================================
+// mmap（#40）prot / flags 位
+// ============================================================================
+//
+// 位值约定（P4-T6 定夺）：与内核 `synapse_vma::RegionFlags` 低位对齐
+// （READ=bit0 / WRITE=bit1 / EXEC=bit2 / GROWABLE=bit3），使 decode 出的
+// prot:u32 可零转换直通 VMA 层。注意与 Doc 01 capability `Rights` 的位值
+// **不同**（Rights READ=bit3/WRITE=bit4/EXEC=bit5）——Doc 02 "Rights 原始位
+// 低 3 位"表述有歧义，取 vma 约定并在 decision_log 记录。
+
+/// `prot` 位：可读。
+pub const PROT_READ: u32 = 1 << 0;
+/// `prot` 位：可写。
+pub const PROT_WRITE: u32 = 1 << 1;
+/// `prot` 位：可执行。
+pub const PROT_EXEC: u32 = 1 << 2;
+/// `prot` 合法位全集（含此集合外的位 → [`E_PERMISSION`]）。
+pub const PROT_MASK: u32 = PROT_READ | PROT_WRITE | PROT_EXEC;
+/// `flags` 位：区域可增长（stack 语义，透传 VMA `GROWABLE`）。
+pub const MAP_GROWABLE: u32 = 1 << 3;
+/// `flags` 合法位全集（含此集合外的位 → [`E_NOT_IMPLEMENTED`]，未实现语义）。
+pub const MAP_MASK: u32 = MAP_GROWABLE;
 
 /// syscall 号全集（Doc 02 §4.2 分配表 + §4.5 abi_query）。
 ///

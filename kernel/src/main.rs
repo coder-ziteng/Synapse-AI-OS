@@ -40,6 +40,7 @@ pub mod syscall;
 pub mod ring3;
 pub mod initrd;
 pub mod elfload;
+pub mod umem;
 
 // 把 trampoline 汇编链入二进制；`boot.S` 中 `.global _start` 提供链接器 entry。
 global_asm!(include_str!("boot.S"));
@@ -268,9 +269,10 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'h');
 
     // P3-T8 集成收尾 smoke：FR8 TSC 核算 + 页账本 + FR10 冻结/频率计数全链路
-    boot_marker(b'i');
+    //（合并注：原用 marker i/j，与 P4-T4 init_syscall 撞号 → 迁 s/t）
+    boot_marker(b's');
     kthread::kthread_p3t8_smoke();
-    boot_marker(b'j');
+    boot_marker(b't');
 
     // P4-T2 分页 smoke：AddressSpace 新建 → CR3 切换 → 用户页读写 → #PF 期望故障 → FR8 归零
     //（合并注：原用 marker e/f，与 P3-T6 撞号 → 迁 o/p）

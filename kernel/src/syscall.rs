@@ -4,17 +4,27 @@
 //!
 //! - 配置 MSR_STAR / MSR_LSTAR / MSR_FMASK / IA32_KERNEL_GS_BASE，
 //!   把 `syscall` 指令接到 [`syscall_entry_asm`]；
-//! - 实现最小 syscall 分发骨架：仅 `AbiQuery`（#18）返回 `(major<<16)|minor`，
-//!   其余号 → `-E_NOT_IMPLEMENTED` (=-10)。P4-T6 扩展；
+//! - **P4-T6 完整分发**：`synapse_abi::decode` 严格解码（未知号 / 窄参数
+//!   越界 → `None` = IllegalSyscall，杀进程，不静默截断）；实现
+//!   AbiQuery(#18) / ProcessExit(#21) / Yield(#25) / GetTime(#30) /
+//!   Mmap(#40) / Munmap(#41)，其余已定义号 → `E_NOT_IMPLEMENTED`；
+//! - 用户指针前置校验：[`user_mem_ok`] 走 [`AddressSpace::walk_flags`]
+//!   检查 present + PT_USER + PT_WRITABLE（拒绝而非 fault）；
 //! - per-CPU 数据 `PerCpu { kstack_top: u64 }` 通过 IA32_KERNEL_GS_BASE
 //!   寻址（单核 MVP 仅一个实例；Phase 5+ 多核时改为 per-core）；
 //! - 提供 [`init_syscall`] 在 boot 链路上调一次（在 `idt::init_idt` 之后）。
 //!
+//! ## 返回值写回纪律（asm glue 契约）
+//!
+//! `syscall_entry_asm` 在 dispatch 返回后 **`pop rax` 从 frame.num 槽取
+//! 返回值**（C-ABI rax 被 pop 覆盖）——分发层必须把结果写回 `frame.num`。
+//! [`syscall_dispatch`] 外壳统一写回，内部只算值。
+//!
 //! ## 不在本模块
 //!
-//! - 用户态地址合法性校验 / copy_from_user — P4-T6 syscall 分发层补；
 //! - per-thread 内核栈（每线程独立 kstack_top）— Phase 5+ 调度器接；
-//! - 用户态 ELF 加载 / init 进程 spawn — P4-T5/T9。
+//! - FaultKind 归因 / death notification / reap — P4-T9 进程表接线；
+//! - IPC / cap 系 syscall — P4-T7/T8。
 //!
 //! ## swapgs 纪律（AMD64 Vol.2 §4 syscall/sysret）
 //!
@@ -39,7 +49,12 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use synapse_abi::{SyscallFrame, SyscallId, ABI_MAJOR, ABI_MINOR};
+use synapse_abi::{
+    abi_query_value, decode, Syscall, SyscallFrame, Timespec, CLOCK_MONOTONIC, CLOCK_WALL,
+    E_INVALID_ADDR, E_NOT_FOUND, E_NOT_IMPLEMENTED,
+};
+
+use crate::paging::{AddressSpace, PT_USER, PT_WRITABLE};
 
 // ---------------------------------------------------------------------------
 // MSR 常量（AMD64 Manual Vol.2 §5 MSRs）
@@ -74,9 +89,6 @@ const STAR_VALUE: u64 = 0x0000_0008_0000_0023u64;
 /// FMASK：syscall 入口自动清除的 RFLAGS 位。设 0 = 保留全部（含 IF），
 /// 允许中断嵌套。
 const FMASK_VALUE: u64 = 0;
-
-/// -10 = `E_NOT_IMPLEMENTED`（Doc 02 §4.3）。
-const E_NOT_IMPLEMENTED: i64 = -10;
 
 // syscall 入口汇编（global_asm!）。
 //
@@ -257,40 +269,162 @@ pub fn abi_query_count() -> u64 {
     ABI_QUERY_COUNT.load(Ordering::SeqCst)
 }
 
-/// syscall 主分发（C-ABI）。
+/// IllegalSyscall（decode → None）触发计数（P4-T6：ring3 stub 用号 999
+/// 真机验证杀进程路径；T9 接 FaultKind 归因 + death notification）。
+static ILLEGAL_SYSCALL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// 读取 IllegalSyscall 计数。
+pub fn illegal_syscall_count() -> u64 {
+    ILLEGAL_SYSCALL_COUNT.load(Ordering::SeqCst)
+}
+
+/// syscall 主分发（C-ABI 外壳）：算值 → **写回 frame.num**（asm glue 的
+/// `pop rax` 从 num 槽取返回值，见模块头"返回值写回纪律"）→ 返回。
 ///
 /// 入口约定：
 /// - `rdi` = `&mut SyscallFrame`（栈布局：rax=num / args[0..5] = rdi,rsi,rdx,r10,r8,r9）
-/// - 返回值 = `i64`（≥0 成功，<0 错误码）
-///
-/// ## MVP
-/// 仅实现 `AbiQuery`（#18）和 `ProcessExit`（#21，P4-T4 ring3 smoke 专用）；
-/// 其余返回 `E_NOT_IMPLEMENTED`。P4-T6 扩展 cap_invoke / gettime / yield /
-/// exit / mmap / munmap。
+/// - 返回值 = `i64`（≥0 成功，<0 错误码，Doc 02 §4.3）
 #[no_mangle]
 extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> i64 {
-    let num = frame.num;
-    match SyscallId::from_num(num) {
-        Some(SyscallId::AbiQuery) => {
+    let ret = dispatch_inner(frame);
+    frame.num = ret as u64;
+    ret
+}
+
+fn dispatch_inner(frame: &SyscallFrame) -> i64 {
+    let Some(sc) = decode(frame) else {
+        // IllegalSyscall（Doc 02 §5.3）：未知号 / 窄参数越界。不静默截断、
+        // 不按 E_NOT_IMPLEMENTED 温和返回——杀进程语义。MVP smoke 下与
+        // process_exit 同走 KERNEL_FRAME iretq 接力（T9 换成 FaultKind
+        // 归因 + death notification + reap）。
+        ILLEGAL_SYSCALL_COUNT.fetch_add(1, Ordering::SeqCst);
+        log::error!(
+            "[syscall] IllegalSyscall: num={} ({:#x}) args=[{:#x} {:#x} {:#x} {:#x} {:#x} {:#x}] — killing process",
+            frame.num, frame.num,
+            frame.args[0], frame.args[1], frame.args[2],
+            frame.args[3], frame.args[4], frame.args[5],
+        );
+        // SAFETY: smoke 上下文已武装 KERNEL_FRAME（未武装 = 内核契约破坏，
+        // handle_process_exit 内部 panic 兜底）。
+        unsafe { crate::ring3::handle_process_exit() }
+    };
+
+    match sc {
+        Syscall::AbiQuery => {
             ABI_QUERY_COUNT.fetch_add(1, Ordering::SeqCst);
-            let v = ((ABI_MAJOR as u64) << 16) | (ABI_MINOR as u64);
-            frame.num = v;
-            v as i64
+            abi_query_value() as i64
         }
-        Some(SyscallId::ProcessExit) => {
+        Syscall::ProcessExit { code } => {
+            log::info!("[syscall] process_exit(code={code})");
             // 委托 ring3::handle_process_exit（永不返回）。
             // SAFETY: smoke 上下文已武装 KERNEL_FRAME。
-            unsafe { crate::ring3::handle_process_exit() };
+            unsafe { crate::ring3::handle_process_exit() }
         }
-        Some(_) => {
-            log::warn!("[syscall] unimplemented syscall num={}", num);
-            E_NOT_IMPLEMENTED
+        Syscall::Yield => {
+            // 接 P3 调度器：当前线程让出（单 runnable 线程时近似 no-op；
+            // r12/r13/r14 为 callee-saved，switch_to 保证跨切换还原）。
+            crate::kthread::kthread_yield();
+            0
         }
-        None => {
-            log::warn!("[syscall] unknown syscall num={}", num);
+        Syscall::GetTime { clock_id, ts_out } => with_user_as(|as_ptr| {
+            // SAFETY: with_user_as 已校验 as_ptr 非空（= 激活的用户 AS）。
+            unsafe { sys_gettime(as_ptr, clock_id, ts_out) }
+        }),
+        Syscall::Mmap { addr, len, prot, flags } => with_user_as(|as_ptr| {
+            // SAFETY: 同上。
+            unsafe { crate::umem::sys_mmap(as_ptr, addr, len, prot, flags) }
+        }),
+        Syscall::Munmap { addr, len } => with_user_as(|as_ptr| {
+            // SAFETY: 同上。
+            unsafe { crate::umem::sys_munmap(as_ptr, addr, len) }
+        }),
+        other => {
+            log::warn!("[syscall] unimplemented syscall {:?} (num={})", other.id(), frame.num);
             E_NOT_IMPLEMENTED
         }
     }
+}
+
+/// 取当前用户 AS 并执行（mmap/munmap/gettime 公共前置）。
+///
+/// AS 未武装（= 非 smoke/进程上下文的裸调用）时返回 [`E_INVALID_ADDR`]
+/// 并记 error——单核 MVP 下用户 syscall 只可能发生在 elf smoke 窗口内。
+fn with_user_as(f: impl FnOnce(*mut AddressSpace) -> i64) -> i64 {
+    let p = crate::elfload::current_as_ptr();
+    if p == 0 {
+        log::error!("[syscall] syscall needing user AS with none armed");
+        return E_INVALID_ADDR;
+    }
+    f(p as *mut AddressSpace)
+}
+
+/// 用户指针区间校验：[va, va+len) 每页 present + PT_USER（+ PT_WRITABLE
+/// 若 `need_write`）。拒绝而非 fault——syscall 集成层不允许触发 #PF 路径
+/// （demand paging 只对 VMA 登记的懒映射区生效，gettime 输出指针不在其列）。
+fn user_mem_ok(as_user: &AddressSpace, va: u64, len: u64, need_write: bool) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let Some(end) = va.checked_add(len) else { return false };
+    let mut page = va & !0xFFF;
+    while page < end {
+        match as_user.walk_flags(page) {
+            Some((_, flags)) => {
+                if flags & PT_USER == 0 {
+                    return false;
+                }
+                if need_write && flags & PT_WRITABLE == 0 {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+        page += 0x1000;
+    }
+    true
+}
+
+/// `gettime(clock_id, ts_out)`（#30）实现。
+///
+/// - `CLOCK_MONOTONIC`(0)：clock.rs TSC 单调钟（ns since boot）折算
+///   sec/nsec 写入 `ts_out`（16B [`Timespec`]，经恒等映射 PA 写入）；
+/// - `CLOCK_WALL`(1)：RTC 未接硬件 → [`E_NOT_IMPLEMENTED`]（deliverable ③
+///   明确延后）；用户态不暴露 rdtsc，TSC 原始值仅内核可见；
+/// - 未知 clock_id → [`E_NOT_FOUND`]；`ts_out` 未 8B 对齐或指向不可写 /
+///   未映射 / 非用户页 → [`E_INVALID_ADDR`]。
+///
+/// # Safety
+/// `as_ptr` 必须指向当前激活的用户 [`AddressSpace`]。
+unsafe fn sys_gettime(as_ptr: *mut AddressSpace, clock_id: u32, ts_out: u64) -> i64 {
+    if clock_id == CLOCK_WALL {
+        return E_NOT_IMPLEMENTED;
+    }
+    if clock_id != CLOCK_MONOTONIC {
+        return E_NOT_FOUND;
+    }
+    // Timespec 两个 u64 字段：要求 8B 对齐，保证 sec/nsec 各自不跨页
+    if ts_out % 8 != 0 {
+        return E_INVALID_ADDR;
+    }
+    // SAFETY: 调用方契约。
+    let as_user = unsafe { &*as_ptr };
+    if !user_mem_ok(as_user, ts_out, core::mem::size_of::<Timespec>() as u64, true) {
+        return E_INVALID_ADDR;
+    }
+
+    let ns = crate::clock::monotonic_ns();
+    let ts = Timespec { sec: ns / 1_000_000_000, nsec: ns % 1_000_000_000 };
+
+    // 经 walk_flags 取 PA（含页内偏移）后用恒等映射直写——不依赖当前
+    // CR3 的用户映射可达性（ring-0 写用户页也绕开 U/S 位语义争议）。
+    // SAFETY: 已校验两页 present + US + W；PA 为恒等映射可写内核视角。
+    unsafe {
+        let (pa_sec, _) = as_user.walk_flags(ts_out).unwrap_unchecked();
+        let (pa_nsec, _) = as_user.walk_flags(ts_out + 8).unwrap_unchecked();
+        (pa_sec as *mut u64).write_volatile(ts.sec);
+        (pa_nsec as *mut u64).write_volatile(ts.nsec);
+    }
+    0
 }
 
 // ---------------------------------------------------------------------------

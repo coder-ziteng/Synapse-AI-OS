@@ -5,15 +5,17 @@
 //! 端到端验证 ring-3 基础设施贯通：
 //! 1. 切 CR3 到用户 AS
 //! 2. 构造 iretq 帧 → 进入用户态（CS.RPL=3, SS.RPL=3）
-//! 3. 用户代码执行：mov rax, 18; syscall; mov [shared], rax; syscall #21 (process_exit)
+//! 3. 用户代码执行：mov rax, 18; syscall; mov [shared], rax; syscall #999（未定义号）
 //! 4. syscall #18 = abi_query 返回 ABI 版本
 //! 5. 用户态写共享页 → 内核通过 PA 读回（VA==PA 映射间接访问）
-//! 6. syscall #21 = process_exit → 内核 handler 做 iretq 回 prepared kernel frame
-//! 7. CPL 断言（CS.RPL==3）+ FR8 归零
+//! 6. syscall #999 = IllegalSyscall（P4-T6）→ decode None → 杀进程计数 +1 →
+//!    与 process_exit 同一 KERNEL_FRAME iretq 接力回 prepared kernel frame
+//! 7. CPL 断言（CS.RPL==3）+ illegal 计数断言 + FR8 归零
 //!
 //! ## 返回机制（关键设计）
 //!
-//! User code 最后调用 syscall #21 (`process_exit`) — handler 读 `KERNEL_FRAME`
+//! User code 最后调用 syscall #999（未定义号 → IllegalSyscall 杀进程；P4-T6
+//! 前为 #21 process_exit，二者走同一返回路径）— handler 读 `KERNEL_FRAME`
 //! 全局 static，把 RSP 指向该 frame，执行 `iretq`。CPU 跳到 `return_continuation`
 //! 在 ring-0 上下文（CS=KERNEL_CS, RSP=boot stack）→ ring3_smoke caller 完成
 //! 断言。
@@ -51,12 +53,17 @@ const USER_STACK_TOP: u64 = USER_REGION_START + 0x1000 + 0x1000;
 // 用户代码字节（手编机器码）
 // ============================================================================
 //
+// P4-T6 改造：末尾 syscall 由 #21 (process_exit) 改为 **#999（未定义号）**
+// ——真机验证 IllegalSyscall 杀进程路径：decode → None → 计数 +1 →
+// handle_process_exit（与 process_exit 同一 KERNEL_FRAME iretq 接力），
+// return_continuation 断言 illegal_syscall_count()==1。
+//
 // ```text
 // 48 c7 c0 12 00 00 00    mov rax, 0x12            ; AbiQuery syscall num = 18
 // 0f 05                   syscall                  ; rax = ABI version
 // 48 89 04 25 00 10 00 40 mov [0x4000_1000], rax   ; 写 ABI 版本到 data 页
-// 48 c7 c0 15 00 00 00    mov rax, 0x15            ; process_exit = 21
-// 0f 05                   syscall                  ; 触发 ring-0 返回
+// 48 c7 c0 e7 03 00 00    mov rax, 0x3e7           ; 999 = 未定义号 (IllegalSyscall)
+// 0f 05                   syscall                  ; 触发杀进程 → ring-0 返回
 // f4                      hlt                      ; 不应执行到
 // ```
 #[rustfmt::skip]
@@ -64,7 +71,7 @@ const USER_CODE_BYTES: &[u8] = &[
     0x48, 0xc7, 0xc0, 0x12, 0x00, 0x00, 0x00, // mov rax, 0x12
     0x0f, 0x05,                               // syscall
     0x48, 0x89, 0x04, 0x25, 0x00, 0x10, 0x00, 0x40, // mov [0x4000_1000], rax
-    0x48, 0xc7, 0xc0, 0x15, 0x00, 0x00, 0x00, // mov rax, 0x15  (process_exit = 21)
+    0x48, 0xc7, 0xc0, 0xe7, 0x03, 0x00, 0x00, // mov rax, 0x3e7 (999 = IllegalSyscall)
     0x0f, 0x05,                               // syscall
     0xf4,                                     // hlt (unreachable)
 ];
@@ -214,6 +221,15 @@ extern "C" fn return_continuation() -> ! {
         "[ring3-smoke]   ok: ABI value roundtrip = {:#x} (data_pa={:#x})",
         abi_value, data_pa
     );
+
+    // 3.5 P4-T6：stub 末尾 #999 触发 IllegalSyscall 杀进程路径的计数断言
+    //     （本 continuation 正是经该路径的 KERNEL_FRAME iretq 到达的）。
+    let illegal = crate::syscall::illegal_syscall_count();
+    assert_eq!(
+        illegal, 1,
+        "[ring3-smoke] IllegalSyscall count = {illegal}, expected 1 (stub #999)"
+    );
+    info!("[ring3-smoke]   ok: IllegalSyscall(#999) killed stub, count = {illegal}");
 
     // 4. 读 CPL 断言：本函数以 ring-0 进入；用户态曾进入 = RPL==3 已验证
     //    （CS=0x2B during user mode；现在 CS=0x08）。
