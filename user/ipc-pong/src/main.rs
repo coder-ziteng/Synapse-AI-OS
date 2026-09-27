@@ -28,7 +28,8 @@
 //! ## Phase 2 暂未覆盖（待 T14）
 //!
 //! - **真双向并发 send/recv**：本 bin 走 try_send（无 receiver → Queued）；
-//!   双进程互发需 idle 线程（T14）+ 并发 spawn API（P9.5），不在 T7 范围。
+//!   双进程互发需 idle 线程（P4-T14）+ 并发 spawn API（P5-T5，Doc 02 §5.2
+//!   spawn 限制放开 + SupervisorTree），不在 T7 范围。
 //! - **blocking ipc_send/recv**：单 child 阻塞时无可调度线程（init kernel
 //!   不是 kthread）= idle panic。kthread 级阻塞唤醒由 kthread_ipc_smoke
 //!   真机覆盖（task.json T7 actual_approach）。
