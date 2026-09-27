@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 use crate::build;
 use crate::qemu;
 
-/// 启动成功的标志性字符串——`_start64` 直接往 COM1 (0x3F8) 写 `'H', 'i'`。
-const EXPECTED_SERIAL: &str = "Hi";
+/// 启动成功的标志性字符串——`_start64` 经 serial+logger 初始化后打印的第一行
+/// （P1-T5 起走 log 宏；旧版裸写 COM1 的 "Hi" 已不存在，勿回退）。
+const EXPECTED_SERIAL: &str = "Hello, Synapse!";
 
 /// 轮询间隔。200ms 足够捕获启动（通常 <1s），同时避免 CPU 空转。
 const POLL_INTERVAL_MS: u64 = 200;
@@ -40,11 +41,11 @@ pub fn run(timeout_secs: u64) -> Result<(), String> {
         // 检查 QEMU 是否已退出
         match child.try_wait() {
             Ok(Some(status)) => {
-                if !status.success() {
+                if !qemu::is_success_status(&status) {
                     let _ = child.kill();
-                    return Err(format!("QEMU exited early (triple fault?): {status}"));
+                    return Err(format!("QEMU exited early (triple fault/panic?): {status}"));
                 }
-                // QEMU 已干净退出（hlt 循环 + 外部 kill）——继续读 serial 一次再判断
+                // QEMU 已干净退出——继续读 serial 一次再判断
                 break;
             }
             Ok(None) => {}

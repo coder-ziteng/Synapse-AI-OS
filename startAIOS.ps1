@@ -7,7 +7,7 @@
 #    .\startAIOS.ps1 -Test        # 运行 P1-T8 QEMU 测试套件 (4 用例)
 #    .\startAIOS.ps1 -Tail 30     # 判定后多打印几行串口日志 (默认 15)
 #
-#  判定标准 (xtask run 自身永远 exit 1，不可作为依据):
+#  判定标准 (解析 xtask 输出的退出码行，不依赖 xtask 自身 $LASTEXITCODE):
 #    1. QEMU 退出码 = 363  ((0xB5<<1)|1, isa-debug-exit 正常收尾)
 #       QEMU 退出码 = 355  ((0xB1<<1)|1, kernel panic 确定性出口 — 直接判失败)
 #    2. logs\serial.log 出现 "N/N checks passed" 且无 [PANIC]

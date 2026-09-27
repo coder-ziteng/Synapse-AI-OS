@@ -24,6 +24,36 @@ fn logs_dir() -> PathBuf {
     dir
 }
 
+/// 内核成功路径的 isa-debug-exit 出口（对照 355=panic 出口）。机制详见 decision_log。
+const KERNEL_SUCCESS_EXIT: i32 = 363;
+
+/// QEMU 退出状态是否为"成功"：进程退出码 0，或内核成功出口 [`KERNEL_SUCCESS_EXIT`]。
+pub(crate) fn is_success_status(status: &std::process::ExitStatus) -> bool {
+    status.success() || status.code() == Some(KERNEL_SUCCESS_EXIT)
+}
+
+/// 退出码的可读形式（被信号杀死时无退出码）。
+fn exit_code_str(status: &std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(c) => c.to_string(),
+        None => "unknown(signal)".into(),
+    }
+}
+
+/// 打印 QEMU 退出码并判定成功/失败。startAIOS.ps1 靠解析 stdout 中的
+/// `[xtask] QEMU exited with exit code: N` 行判定成败（363/355），不能只在错误路径输出。
+fn report_exit(status: &std::process::ExitStatus) -> Result<(), String> {
+    let code = exit_code_str(status);
+    println!("[xtask] QEMU exited with exit code: {code}");
+    if is_success_status(status) {
+        Ok(())
+    } else {
+        Err(format!(
+            "QEMU abnormal exit {code} (expected 0 or {KERNEL_SUCCESS_EXIT}=kernel success)"
+        ))
+    }
+}
+
 /// 构造 QEMU 命令行参数。
 ///
 /// 关键参数说明：
@@ -103,10 +133,7 @@ pub fn run_headless() -> Result<(), String> {
         .status()
         .map_err(|e| format!("qemu spawn failed: {e}"))?;
 
-    if !status.success() {
-        return Err(format!("QEMU exited with {status}"));
-    }
-    Ok(())
+    report_exit(&status)
 }
 
 /// 启动 QEMU 并返回子进程句柄（不等待）。用于 `xtask ci`（需要轮询 serial log + 超时杀进程）。
@@ -151,8 +178,5 @@ pub fn run_gui() -> Result<(), String> {
         .status()
         .map_err(|e| format!("qemu spawn failed: {e}"))?;
 
-    if !status.success() {
-        return Err(format!("QEMU exited with {status}"));
-    }
-    Ok(())
+    report_exit(&status)
 }
