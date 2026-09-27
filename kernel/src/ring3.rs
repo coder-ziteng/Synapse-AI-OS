@@ -162,22 +162,27 @@ pub unsafe fn handle_process_exit() -> ! {
     }
     info!("[ring3] process_exit syscall — iretq to kernel continuation");
 
+    // GS 账本归一化（P4-T7 Phase 2 修复，取代 P4-T5 的盲目 swapgs 配平）：
+    // 本函数有两类调用方，入口 GS 状态不同——
+    // (1) syscall #21 路径：入口 swapgs 已把 GS.base 切到 &PER_CPU、
+    //     KERNEL_GS_BASE=用户值 → 需一次配平 swapgs；
+    // (2) #PF/#GP 异常 → terminate_current 路径：异常入口**不切 GS**，此时
+    //     已是 boot 约定（KERNEL_GS_BASE=&PER_CPU）→ 盲目 swapgs 反而翻转
+    //     账本，下一个进 ring3 的进程首条 syscall 的入口 swapgs 装入垃圾
+    //     GS.base → `mov rsp, gs:[8]` 垃圾栈 → 首条 push（syscall_entry_asm
+    //     +0x15）fault → 异常递送再压同一垃圾栈 → #DF（真机复现：crasher
+    //     #PF 终止后 ipc-pong 子进程 #DF at ip=LSTAR+0x15）。
+    // ensure_kernel_gs_base = rdmsr(IA32_KERNEL_GS_BASE) 检查 + 条件 swapgs，
+    // 两类路径统一收敛到 boot 约定：GS.base=用户值（无意义）、
+    // KERNEL_GS_BASE=&PER_CPU；continuation 是普通 ring-0 代码，不经 gs:[]
+    // 取数，与首次进入用户态前的状态完全一致。
+    unsafe { crate::proc_ext::ensure_kernel_gs_base() };
+
     // SAFETY: KERNEL_FRAME 全字段已由 smoke 填好；CPU iretq 会按 iretq 帧弹
     // RIP, CS, RFLAGS, RSP, SS，跳到 return_continuation 在 ring-0 上下文。
     let kf_addr = KERNEL_FRAME.0.get() as u64;
     unsafe {
         asm!(
-            // swapgs 收支平衡（P4-T5 真机暴露的 #DF 根因）：syscall 入口的
-            // swapgs 已把 GS.base 切到 &PER_CPU，而本路径跳过 sysretq 侧的
-            // 平衡 swapgs。不在此补上，continuation（及其后续 elf_load_smoke）
-            // 再 iretq 进新用户上下文时，ring-3 的 GS.base 仍是内核指针、
-            // KERNEL_GS_BASE 是旧垃圾——用户第一次 syscall 的入口 swapgs 会
-            // 把垃圾装入 GS.base，`mov rsp, gs:[0]` 得到垃圾栈指针，首条
-            // push（syscall_entry_asm+0x15）即 fault，异常递送再失败 → #DF。
-            // swapgs 后恢复 boot 约定：GS.base=用户值（无意义）、
-            // KERNEL_GS_BASE=&PER_CPU；continuation 是普通 ring-0 代码，
-            // 不经 gs:[] 取数，与首次进入用户态前的状态完全一致。
-            "swapgs",
             "mov rsp, {kf}",
             "iretq",
             kf = in(reg) kf_addr,
@@ -396,6 +401,11 @@ pub(crate) unsafe fn write_kernel_frame(rip: u64, rsp: u64, rflags: u64) {
 /// `rip`/`rsp` 必须指向已在当前 CR3 用户 AS 中映射且权限正确的代码/栈；
 /// 调用前必须已 [`write_kernel_frame`]。
 pub(crate) unsafe fn enter_user_at(rip: u64, rsp: u64) -> ! {
+    // 防御性 GS 账本归一化（P4-T7 Phase 2）：进 ring3 的不变量是
+    // KERNEL_GS_BASE=&PER_CPU（用户首条 syscall 入口 swapgs 依赖之）。
+    // handle_process_exit 已归一化，此处兜底任何绕过该路径的调用链
+    // （幂等：已满足则 no-op）。
+    crate::proc_ext::ensure_kernel_gs_base();
     let uframe = IretqFrame {
         rip,
         cs: USER_CS,

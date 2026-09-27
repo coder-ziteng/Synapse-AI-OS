@@ -100,6 +100,14 @@ pub fn with_cap_table<R>(pid: Pid, f: impl FnOnce(&mut CapTable) -> R) -> R {
     f(slot.as_mut().expect("cap table not created for pid"))
 }
 
+/// 检查 pid 的 CapTable 是否已建（不获取锁外延——只读 `Option` 是否 `Some`）。
+///
+/// P4-T10 用于 init smoke 幂等校验：早期 main.rs 可能已铸，本模块不重复。
+pub fn cap_table_exists(pid: Pid) -> bool {
+    let g = CAP_TABLES.lock();
+    g[cap_slot(pid)].is_some()
+}
+
 // ---------- 对象分配 + 实体存储接线 ----------
 
 /// 分配内核对象并接线实体存储：

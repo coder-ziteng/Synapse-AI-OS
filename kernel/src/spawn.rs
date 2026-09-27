@@ -603,16 +603,7 @@ extern "C" fn crash_continuation() -> ! {
 
     info!("[crash-smoke] PASS");
 
-    // QEMU exit 363
-    unsafe {
-        asm!(
-            "mov dx, 0x502",
-            "mov al, 0xB5",
-            "out dx, al",
-            options(nostack, preserves_flags),
-        );
-    }
-    loop {
-        unsafe { asm!("hlt", options(nostack, preserves_flags)) };
-    }
+    // P4-T7 Phase 2：链式到 ipc_pong_smoke（ring3 子进程 try_send 真机贯通）。
+    // ipc_pong_continuation 最终链式到 init::init_smoke() → QEMU exit 363。
+    crate::ipc_pong_smoke::ipc_pong_smoke()
 }

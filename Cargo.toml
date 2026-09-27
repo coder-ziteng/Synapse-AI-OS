@@ -20,7 +20,8 @@ members = [
 # 必须排除在宿主 workspace 外——否则宿主 cargo test 会尝试为宿主 target
 # 链接它而失败。构建入口：`cargo run -p xtask -- user`。
 # P4-T9e：user/crasher 同上（额外 crash smoke 子进程）。
-exclude = ["user/hello", "user/crasher"]
+# P4-T10：user/init 同上（Root Agent，启动链首进程）。
+exclude = ["user/hello", "user/crasher", "user/init", "user/ipc-pong"]
 
 # 共享包元信息（避免每个 crate 重复 license/authors）
 [workspace.package]

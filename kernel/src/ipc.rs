@@ -50,7 +50,7 @@
 //! PA 后直接 `copy_nonoverlapping` 写入接收方 PA），等价于 kmap 退化形态，
 //! 无需维护 kmap 窗口。后续 kernel 上半部迁移后切换为真正 kmap。
 
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicU32, AtomicU64};
 
 use synapse_abi::{
     SyscallFrame, E_INVALID_ADDR, E_INVALID_CAP, E_NOT_FOUND, E_PEER_DIED, E_PERMISSION,
@@ -209,6 +209,21 @@ pub fn set_current_pid(pid: u32) {
 /// **P4-T9a 迁移**：底层迁到 `proc_ext::PerCpu.current_pid`（gs:[0]）。
 pub fn current_pid() -> u32 {
     crate::proc_ext::current_pid()
+}
+
+// ---------------------------------------------------------------------------
+// ipc_try_send 成功计数（P4-T7 Phase 2 ipc_pong_smoke 验证用）
+// ---------------------------------------------------------------------------
+
+/// `k_ipc_try_send` 成功次数（Queued + Delivered 均计数）。
+///
+/// ipc_pong_continuation 断言此值 ≥ 1，作为 ring3 → kernel IPC send 路径
+/// 真机贯通的证据（无需读取子进程 AS 中已失效的 payload_addr）。
+static IPC_TRY_SEND_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// 查询 `k_ipc_try_send` 累计成功次数（Queued + Delivered）。
+pub fn ipc_try_send_count() -> u64 {
+    IPC_TRY_SEND_COUNT.load(core::sync::atomic::Ordering::SeqCst)
 }
 
 // ---------------------------------------------------------------------------
@@ -662,6 +677,7 @@ pub fn k_ipc_try_send(frame: &SyscallFrame) -> i64 {
                 return code;
             }
             let _ = kthread::kthread_unblock(receiver.thread);
+            IPC_TRY_SEND_COUNT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
             if if_on { x86_64::instructions::interrupts::enable(); }
             0
         }
@@ -680,6 +696,7 @@ pub fn k_ipc_try_send(frame: &SyscallFrame) -> i64 {
                     expects_reply: false,
                 });
             }
+            IPC_TRY_SEND_COUNT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
             if if_on { x86_64::instructions::interrupts::enable(); }
             0
         }

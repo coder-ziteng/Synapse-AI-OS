@@ -20,11 +20,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// 用户态 bin 列表（name → Cargo.toml 相对路径）。`hello` 是 7-syscall 集成
-/// smoke；`crasher` 是 P4-T9e SegFault 路径验证。
+/// 用户态 bin 列表（name → Cargo.toml 相对路径）。
+/// - `hello`（P4-T6~T9）：8-syscall 集成 smoke。
+/// - `crasher`（P4-T9e）：SegFault 路径验证。
+/// - `init`（P4-T10）：Root Agent，启动链首进程（abi_query + gettime + exit）。
 const USER_BINS: &[(&str, &str)] = &[
+    ("init", "user/init/Cargo.toml"),
     ("hello", "user/hello/Cargo.toml"),
     ("crasher", "user/crasher/Cargo.toml"),
+    ("ipc-pong", "user/ipc-pong/Cargo.toml"),
 ];
 
 /// workspace 根目录（与 build.rs 同款；不共用是避免动 build.rs 引入并行窗口冲突面）。

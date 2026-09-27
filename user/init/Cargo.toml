@@ -1,0 +1,40 @@
+# P4-T10：用户态 init 进程（Root Agent）。
+#
+# 与 hello 同构：独立 workspace 根（root Cargo.toml exclude），走
+# xtask user build 路径产出独立 ELF，由 cpio 打包进 initramfs。
+# 但与 hello 不同：init 是开机首进程，**只做**三件事——
+#   1. `abi_query()`：版本协商（major 不匹配拒绝运行）
+#   2. `gettime(MONOTONIC)`：读内核单调时钟，验证 FR2
+#   3. `process_exit(0)`：交给内核收尾
+# 不做 mmap/munmap/IPC/Notification 全套——那是 hello / crasher 的职责。
+
+[package]
+name         = "synapse-init"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.85"
+license      = "MIT OR Apache-2.0"
+description  = "Synapse Root Agent（启动链首进程，P4-T10）"
+publish      = false
+
+[workspace]
+
+[[bin]]
+name = "init"
+path = "src/main.rs"
+
+[dependencies]
+synapse-user = { path = ".." }
+synapse-abi  = { path = "../../abi" }
+
+[profile.dev]
+panic = "abort"
+debug = true
+strip = "symbols"
+
+[profile.release]
+panic = "abort"
+debug = true
+opt-level = "s"
+lto = "thin"
+strip = "symbols"

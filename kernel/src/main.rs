@@ -47,6 +47,8 @@ pub mod proc_ext;
 pub mod spawn;
 pub mod proc_life;
 pub mod block;
+pub mod init;
+pub mod ipc_pong_smoke;
 
 // 把 trampoline 汇编链入二进制；`boot.S` 中 `.global _start` 提供链接器 entry。
 global_asm!(include_str!("boot.S"));
@@ -317,19 +319,14 @@ pub extern "C" fn _start64() -> ! {
     ring3::ring3_smoke();
     boot_marker(b'l');
 
-    // 通过 isa-debug-exit (iobase=0x502) 退出 QEMU。
-    // QEMU isa-debug-exit 实现为 exit((val << 1) | 1)（无掩码），
-    // 所以 val=0xB5 → exit code = (0xB5 << 1) | 1 = 363。
-    unsafe {
-        asm!(
-            "mov dx, 0x502",
-            "mov al, 0xB5",
-            "out dx, al",
-            options(nostack, preserves_flags),
-        );
-    }
+    // P4-T10 启动链收口：ring3_smoke 链式 → return_continuation → elf_load_smoke →
+    // elf_continuation → spawn_smoke → spawn_continuation → crash_smoke →
+    // crash_continuation → ipc_pong_smoke → ipc_pong_continuation → init_smoke →
+    // init_continuation → QEMU exit 363。
+    // 注：ring3_smoke 调用 enter_user_at (-> !) 永不返回；后续所有 smoke 由
+    // continuation 链式接力，最终 init_continuation 发出 QEMU exit。
 
-    // 不会到这里（上面的 out 已触发 QEMU 退出）
+    // 不会到这里（init_continuation 的 QEMU exit 已触发退出）
     loop {
         unsafe {
             asm!("hlt", options(nostack, preserves_flags));

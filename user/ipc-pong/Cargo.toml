@@ -1,0 +1,47 @@
+# P4-T7 Phase 2：ipc-pong 用户态 bin。
+#
+# 单 ring3 进程：abi_query → ipc_try_send(ep_cap=1, "init-ping\n", 9) → exit
+# 验证 ring3 send syscall 路径真机贯通（init kernel 端在 continuation 中
+# 从 sender queue 取出消息验证）。send/recv 阻塞唤醒由 kthread_ipc_smoke 已
+# 覆盖（task.json T7 Phase 1）；并发两 ring3 进程互发待 T14 idle 线程根治。
+#
+# 不入根 workspace：root Cargo.toml `exclude = [...]`。
+# 构建入口统一走 `cargo run -p xtask -- user`。
+# 产物：user/ipc-pong/target/x86_64-synapse-user/{debug|release}/ipc-pong。
+
+[package]
+name         = "synapse-ipc-pong"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.85"
+license      = "MIT OR Apache-2.0"
+description  = "P4-T7 Phase 2 ring3 IPC send smoke（try_send + kernel recv 时序）"
+publish      = false
+
+# 自成 workspace 根：即使物理上位于仓库目录树内，也不被根 workspace 收编
+# （root Cargo.toml 的 exclude 在 Windows 路径归一化下不可靠，双保险）。
+[workspace]
+
+[[bin]]
+name = "ipc-pong"
+path = "src/main.rs"
+
+[dependencies]
+synapse-user = { path = ".." }
+synapse-abi  = { path = "../../abi" }
+
+# standalone crate 不继承根 workspace profile；panic=abort 必须与
+# target json 的 panic-strategy=abort 一致，否则链接期报 mismatch。
+[profile.dev]
+panic = "abort"
+debug = true
+# 剥除符号表——与 hello/crash 一致，避免 initrd 预留 ~600+ 帧挤爆 page_frame
+# 预算（剩余 RAM 仅 ~128MB / 937 帧，hello 段 mmap 等路径会爆）。
+strip = "symbols"
+
+[profile.release]
+panic = "abort"
+debug = true
+opt-level = "s"
+lto = "thin"
+strip = "symbols"

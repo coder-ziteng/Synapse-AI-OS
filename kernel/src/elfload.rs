@@ -88,6 +88,23 @@ pub(crate) fn extract_and_parse() -> ParsedElf<'static> {
     extract_and_parse_named(HELLO_NAME)
 }
 
+/// P4-T10 init smoke 续体专用：从 initramfs 提取并解析 `init` ELF。
+///
+/// init ELF 与 hello 同构（PT_LOAD text RX + data RW、用户窗口），但 init
+/// 进程在 continuation 清理时需要知道 ELF 段布局才能 unmap+free 各页。本
+/// helper 等价于 `extract_and_parse_named("init")`，但避免在清理路径上
+/// 写裸字符串字面量。返回 None 表示 init 不在 initramfs 中。
+pub(crate) fn extract_init_parsed() -> Option<ParsedElf<'static>> {
+    let initrd = crate::initrd::bytes()?;
+    let found = cpio::find(initrd, "init").ok()?;
+    let bytes: &[u8] = found.as_ref()?;
+    let cfg = synapse_elf::LoadConfig {
+        user_base: USER_REGION_START,
+        user_limit: USER_REGION_END,
+    };
+    synapse_elf::parse(bytes, &cfg).ok()
+}
+
 /// P4-T9e：通用化版本——按名字从 initramfs 取任意 ELF。spawn 路径按需传入
 /// "hello" / "crasher" 等不同目标。
 pub(crate) fn extract_and_parse_named(name: &str) -> ParsedElf<'static> {

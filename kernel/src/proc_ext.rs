@@ -135,6 +135,45 @@ pub fn per_cpu_pointer() -> u64 {
     per_cpu_addr()
 }
 
+/// GS 账本归一化（P4-T7 Phase 2 修复）：确保 **IA32_KERNEL_GS_BASE == &PER_CPU**
+/// （boot 约定，见 syscall.rs 模块头 swapgs 纪律）。
+///
+/// 不满足时（= GS.base 当前持有 &PER_CPU、KERNEL_GS_BASE 是用户值/垃圾）执行
+/// 一次 `swapgs` 归位；已满足则 no-op —— **幂等**，任何上下文可安全调用。
+///
+/// 为什么不能盲目 swapgs：`handle_process_exit` 有两类调用方——
+/// (1) syscall #21 路径：入口 swapgs 已把 GS.base 切到 &PER_CPU，需配平；
+/// (2) #PF/#GP 异常 → `terminate_current` 路径：异常入口**不切 GS**，此时已是
+///     boot 约定，再 swapgs 反而翻转账本（KERNEL_GS_BASE=用户值）。
+/// P4-T5 的盲目配平在路径 (2) 下把账本搞反，下一个进 ring3 的进程首条
+/// syscall 的入口 swapgs 装入垃圾 GS.base → `mov rsp, gs:[8]` 得到垃圾栈 →
+/// 首条 push（syscall_entry_asm+0x15）fault → 异常递送再压同一垃圾栈 → #DF
+/// （P4-T7 Phase 2 真机复现：crasher #PF 终止后 ipc-pong 子进程即 #DF）。
+///
+/// # Safety
+/// 关中断上下文调用（swapgs 与后续读写非原子；timer IRQ handler 不碰 GS，
+/// 实际窗口安全，但契约上要求调用方处于内核可信路径）。
+pub unsafe fn ensure_kernel_gs_base() {
+    const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") MSR_KERNEL_GS_BASE,
+            out("eax") lo,
+            out("edx") hi,
+            options(nostack, preserves_flags),
+        );
+    }
+    let kgs = ((hi as u64) << 32) | lo as u64;
+    if kgs != per_cpu_addr() {
+        unsafe {
+            core::arch::asm!("swapgs", options(nostack, preserves_flags));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // per-process kstack 分配 / 释放（spawn / reap 路径）
 // ---------------------------------------------------------------------------
