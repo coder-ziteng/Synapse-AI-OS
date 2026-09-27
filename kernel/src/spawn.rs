@@ -51,6 +51,7 @@ static SPAWN_OLD_CR3: AtomicU64 = AtomicU64::new(0);
 static SPAWN_OLD_RSP0: AtomicU64 = AtomicU64::new(0);
 static SPAWN_CHILD_AS_PTR: AtomicU64 = AtomicU64::new(0);
 static SPAWN_BASE_USED: AtomicU64 = AtomicU64::new(0);
+static SPAWN_DEATH_CAP: AtomicU64 = AtomicU64::new(0);
 static SMOKE_DONE: AtomicBool = AtomicBool::new(false);
 
 /// P4-T9b spawn smoke：由 `elf_continuation` 链式接力调用。
@@ -134,6 +135,9 @@ pub fn spawn_smoke() -> ! {
     // 已 drop 的陈旧 init AS → E_INVALID_ADDR → hello §3 assert panic（真机暴露：
     // abi_query/yield 不碰 AS 故正常，gettime 一碰即 ring3 #GP）。
     crate::elfload::set_current_as_ptr(&mut child_as as *mut AddressSpace as u64);
+    // P4-T9c：把子 AS 指针写入 PROC_EXT[pid].user_as_ptr，fault terminate 路径
+    // （proc_life::terminate_current）据此回收用户页（unmap+free）+ drop AS。
+    crate::proc_ext::set_user_as(child_pid, &mut child_as as *mut AddressSpace as u64);
 
     // 5. 武装 KERNEL_FRAME（spawn_continuation 为 RIP）
     unsafe {
@@ -152,6 +156,9 @@ pub fn spawn_smoke() -> ! {
     // 6. 切到子进程上下文
     crate::proc_ext::switch_to_process(child_pid);
     unsafe { crate::gdt::set_rsp0(child_kstack_top) };
+    // P4-T9c：记录内核 AS PML4 物理地址——terminate_current 切回 CR3 用
+    //（必须在 activate 之前：kernel_cr3 自身就是被覆盖的那个值）
+    crate::proc_life::set_kernel_cr3(old_cr3);
     unsafe { child_as.activate() };
     info!(
         "[spawn-smoke]   switched to child: pid={} cr3={:#x} rsp0={:#x}",
@@ -208,13 +215,32 @@ fn do_spawn() -> Result<Pid, CapError> {
     let agent_id_raw = crate::pit::tick_count().wrapping_add(100) as u32;
     let agent = AgentId(agent_id_raw);
 
+    // P4-T9c：铸造**专用** death endpoint——init 持有一个 send-only cap，子进程死亡时
+    // 内核向其投递 DeathMsg。新建独立 endpoint 而非复用 init bootstrap ep：避免子进程
+    // IPC recv 误把 death msg 当普通消息读出（label 过滤可解，但语义上独立更清晰）。
+    let death_obj = crate::kstate::k_alloc_object(synapse_cap::ObjKind::Endpoint)
+        .expect("[spawn-smoke] alloc death endpoint failed");
+    let death_cap = crate::kstate::k_mint_root(
+        INIT_PID,
+        death_obj,
+        synapse_cap::Rights::RECV, // init 只 recv（死信入口）；GRANT 留给 phase 2
+    )
+    .expect("[spawn-smoke] mint death cap for init failed");
+    info!(
+        "[spawn-smoke]   ok: init death_endpoint minted → cap slot {} (obj {}:{})",
+        death_cap, death_obj.index, death_obj.generation
+    );
+
     let params = SpawnParams {
         agent,
         quota: DEFAULT_QUOTA,
-        death_endpoint: 0, // T9c 补：真实 death endpoint CapRef
+        death_endpoint: death_cap,
     };
 
-    crate::kstate::with_procs(|t| t.spawn(INIT_PID, params))
+    let child_pid = crate::kstate::with_procs(|t| t.spawn(INIT_PID, params))?;
+    // T9c 续体要 recv 这个 death_ep，先静态存下 init 的 cap slot。
+    SPAWN_DEATH_CAP.store(death_cap as u64, Ordering::SeqCst);
+    Ok(child_pid)
 }
 
 // ============================================================================
@@ -244,8 +270,23 @@ extern "C" fn spawn_continuation() -> ! {
     let child_pid = Pid(SPAWN_CHILD_PID.load(Ordering::SeqCst) as u32);
     let as_ptr = SPAWN_CHILD_AS_PTR.load(Ordering::SeqCst) as *mut AddressSpace;
 
-    // 3a. 清理子 AS（unmap + free 所有帧 + drop AS）
-    if !as_ptr.is_null() {
+    // P4-T9c：判定子进程是 process_exit 路径（Exited）还是 fault terminate 路径
+    //（Zombie）。后者已被 proc_life::terminate_current 完成 AS/CapTable 清理，
+    // 此处仅做 kstack + 频率条目收尾，不重复 unmap/drop。
+    let child_state = crate::kstate::with_procs(|t| {
+        t.get(child_pid).map(|p| p.state)
+    });
+    let already_terminated = matches!(
+        child_state,
+        Some(synapse_proc::process::ProcState::Zombie)
+    );
+    info!(
+        "[spawn-smoke]   child state at continuation entry: {:?} (already_terminated={})",
+        child_state, already_terminated
+    );
+
+    // 3a. 清理子 AS（unmap + free 所有帧 + drop AS）— 仅 process_exit 路径需要
+    if !already_terminated && !as_ptr.is_null() {
         let child_as = unsafe { &mut *as_ptr };
         // 清理 ELF 段 + 栈（用 extract_and_parse 重走解析，确定性）
         let parsed = crate::elfload::extract_and_parse();
@@ -275,15 +316,21 @@ extern "C" fn spawn_continuation() -> ! {
         // drop AS（归还页表帧）
         unsafe { core::ptr::drop_in_place(as_ptr) };
         info!("[spawn-smoke]   ok: child AS cleaned, freed {} frames", freed);
+    } else if already_terminated {
+        info!("[spawn-smoke]   ok: child AS already cleaned by terminate_current (fault path)");
     }
 
-    // 3b. 清理 kstack
+    // 3b. 清理 kstack — 两路径都需要
     crate::proc_ext::uninstall_kstack(child_pid);
     info!("[spawn-smoke]   ok: kstack uninstalled");
 
-    // 3c. 清理 CapTable
-    crate::kstate::k_destroy_cap_table(child_pid);
-    info!("[spawn-smoke]   ok: CapTable destroyed");
+    // 3c. 清理 CapTable — 仅 process_exit 路径需要（terminate_current 已做）
+    if !already_terminated {
+        crate::kstate::k_destroy_cap_table(child_pid);
+        info!("[spawn-smoke]   ok: CapTable destroyed");
+    } else {
+        info!("[spawn-smoke]   ok: CapTable already destroyed by terminate_current");
+    }
 
     // 3d. proc.reap() — 释放 Pcb + 配额 uncarve + agent 注销
     // MVP: 直接调 reap（跳过 death notification，T9c 补）

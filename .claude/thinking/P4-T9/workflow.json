@@ -12,15 +12,17 @@
   },
   "subtaskCompletion": {
     "T9a-kstack-proc_ext": "completed",
-    "T9b-process_spawn": "pending",
-    "T9c-crash-death-notification": "pending",
+    "T9b-process_spawn": "completed",
+    "T9c-crash-death-notification": "in_progress",
     "T9d-process_reap": "pending",
     "T9e-quota-enforce": "pending"
   },
   "notes": {
     "T9a": "2026-09-27 commit a65c62c — per-process kstack + PerCpu { current_pid, kstack_top } 解耦。IPC smoke PASS。",
+    "T9b": "2026-09-27 commit ff48359 — spawn-smoke 真机 exit 363：child_pid=4 跑完 hello 7 节全路径 → 子 process_exit(code=0)。期间暴露 3 集成 bug 全修：① AS_PTR 陈旧（spawn 切 AS 后未更新 current_as_ptr）→ 子 §3 gettime 即 #GP → 加 elfload::set_current_as_ptr；② 子 CapTable 是新建空表 vs hello §6 硬编码 ep_cap=1 → spawn_smoke step 3b 全新 ep 铸造到子 slot 1（不能用 init 的 bootstrap ep：init §6.6 try_send 已留 queued 消息）；③ 帧预算爆（hello 2.8 MB initrd 预留 688 帧，子一加即帧出）→ user/hello/Cargo.toml 加 strip=\"symbols\"，hello→90 KB / 帧预算 +667。另加 kernel/src/proc_life stub 让并行窗口已在 paging.rs 写好的 T9c call sites 可编译。",
+    "parallel-window-status": "并行窗口已先推进 T9c 部分内容（kstate.rs k_quota_charge/release + paging.rs free_all_user_pages + kill_path terminate_current 接线 + abi DeathMsg/DeathLabel + proc_ext.rs user_as_ptr 字段 + k_quota 引用）；但 proc_life::terminate_current 当前 stub-panic，spawn 同步路径未实装，本窗口接手 proc_life.rs 实现 + spawn_continuation 投递路径 + spawn 子进程真机 fault smoke。",
     "known-preexisting-bug": "commit 8483f82 已披露的间歇 #GP（error_code=0x10）在 timer_interrupt_handler iretq。IPC 改动提高复现率。根因：on_timer_irq → checkpoint→_switch_to 触发上下文切换时 handler pop+iretq 在新线程栈以陈旧寄存器恢复。待独立 bug fix 跟进（不在 T9 范围）。"
   },
   "createdAt": "2026-09-27T11:25:00",
-  "updatedAt": "2026-09-27T12:15:00"
+  "updatedAt": "2026-09-27T12:30:00"
 }
