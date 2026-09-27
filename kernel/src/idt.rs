@@ -165,19 +165,41 @@ extern "C" fn double_fault_inner(ip: u64, error_code: u64) -> ! {
     );
 }
 
-// #GP trampoline（RIP 偏移修正同 #DF）
+// #GP trampoline（RIP 偏移修正同 #DF；P4-T9c 新增：读 CS 区分 ring0/ring3）
+//
+// CPU 帧（ring0 异常 / ring3 异常都相同偏移）：
+//   [rsp+0]  = error_code
+//   [rsp+8]  = RIP
+//   [rsp+16] = CS（低 2 位 = CPL：0=ring0，3=ring3）
+//
+// ring0 #GP = 内核 bug → panic；ring3 #GP = 用户违规（如 ring3 执行 hlt /
+// 非法 MSR 访问 / 违反段选择子规则）→ 杀进程（handle_process_exit 走
+// KERNEL_FRAME iretq 回到内核延续，永不返回到 faulting 用户代码）。
 core::arch::global_asm!(
     ".global general_protection_trampoline_asm",
     "general_protection_trampoline_asm:",
     "mov rdi, [rsp + 8]",    // rdi = RIP
     "mov rsi, [rsp]",        // rsi = error_code
+    "mov rdx, [rsp + 16]",   // rdx = CS（低 2 位 = CPL）
     "and rsp, -16",
     "call general_protection_inner",
     "ud2",
 );
 
 #[no_mangle]
-extern "C" fn general_protection_inner(ip: u64, error_code: u64) -> ! {
+extern "C" fn general_protection_inner(ip: u64, error_code: u64, cs: u64) -> ! {
+    if cs & 3 == 3 {
+        // ring3 #GP：用户态违规（hlt / 非法 MSR / 段选择子违规等）。
+        // 走 ProcessExit/IllegalSyscall 同一 kill 路径（KERNEL_FRAME iretq
+        // 接力回内核延续，永不返回 faulting 用户代码）。
+        log::warn!(
+            "[idt] #GP ring3 user fault (error_code={:#x}) at ip={:#x} — killing process",
+            error_code, ip
+        );
+        // SAFETY: smoke 上下文已武装 KERNEL_FRAME（未武装 = 内核契约破坏，
+        // handle_process_exit 内部 panic 兜底）。
+        unsafe { crate::ring3::handle_process_exit() }
+    }
     panic!(
         "EXCEPTION: #GP general protection fault (error_code={:#x}) at ip={:#x}",
         error_code, ip
