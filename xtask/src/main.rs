@@ -5,6 +5,7 @@
 //! * `xtask build [--release]` — `cargo build -p synapse-kernel --target x86_64-bootloader.json`
 //!   然后 `python build_disk.py <elf> kernel_hd.img`。
 //! * `xtask run   [--release]` — `build` + 启动 QEMU（headless，等待 QEMU 自然退出）。
+//! * `xtask gui   [--release]` — `build` + 启动 QEMU（gtk 窗口显示 VBE 帧缓冲）。
 //! * `xtask ci    [--timeout N]` — `build` + 启动 QEMU + 轮询 `serial.log`，
 //!   在超时内断言出现 `EXPECTED_SERIAL`（默认 10 秒）。
 
@@ -36,6 +37,7 @@ fn main() {
     let result: Result<(), String> = match cmd.as_str() {
         "build" => build::run(release),
         "run"   => build::run(release).and_then(|()| qemu::run_headless()),
+        "gui"   => build::run(release).and_then(|()| qemu::run_gui()),
         "ci"    => ci::run(timeout),
         other   => {
             usage();
@@ -51,8 +53,9 @@ fn main() {
 }
 
 fn usage() {
-    eprintln!("Usage: xtask <build|run|ci> [options]");
+    eprintln!("Usage: xtask <build|run|gui|ci> [options]");
     eprintln!("  build [--release]");
-    eprintln!("  run   [--release]");
-    eprintln!("  ci    [--timeout SECONDS]   (default 10)");
+    eprintln!("  run   [--release]              headless, 等待 QEMU 退出");
+    eprintln!("  gui   [--release]              gtk 窗口显示 VBE 帧缓冲");
+    eprintln!("  ci    [--timeout SECONDS]      (default 10)");
 }
