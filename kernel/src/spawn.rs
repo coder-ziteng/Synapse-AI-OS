@@ -332,16 +332,36 @@ extern "C" fn spawn_continuation() -> ! {
         info!("[spawn-smoke]   ok: CapTable already destroyed by terminate_current");
     }
 
-    // 3d. proc.reap() — 释放 Pcb + 配额 uncarve + agent 注销
-    // MVP: 直接调 reap（跳过 death notification，T9c 补）
-    crate::kstate::with_procs(|t| {
-        // reap 要求 caller = parent = INIT_PID，target 为 Zombie
-        // 但子进程 process_exit 后状态是 Exited 不是 Zombie
-        // 真实 reap 需要先 exit → Zombie 转换；MVP 暂跳过 reap（仅清理资源）
-        // TODO: T9d 补完整 reap 流程
-        let _ = t; // suppress unused warning
-    });
-    info!("[spawn-smoke]   ok: proc reap deferred to T9d");
+    // 3d. P4-T9c：从 init 持有的 death endpoint 读取死亡消息——验证内核
+    //     terminate_current 投递的 DeathMsg 确实落入 parent cap table 能
+    //     看到的 endpoint 队列（label 过滤后取出）。
+    let death_cap = SPAWN_DEATH_CAP.load(Ordering::SeqCst) as u8;
+    if death_cap != 0 {
+        if let Some(msg) = crate::proc_life::recv_death_msg(INIT_PID, death_cap) {
+            info!(
+                "[spawn-smoke]   ok: death msg recv: pid={} exit_code={} fault={} (expect normal-exit)",
+                msg.pid, msg.exit_code, msg.fault
+            );
+            // 正常 process_exit → fault 应为 FAULT_NONE(0)
+            assert_eq!(msg.fault, synapse_abi::FAULT_NONE,
+                "[spawn-smoke] expected FAULT_NONE for clean process_exit, got {}", msg.fault);
+            assert_eq!(msg.pid, child_pid.0,
+                "[spawn-smoke] death msg pid mismatch");
+        } else {
+            info!("[spawn-smoke]   warn: death msg recv returned None (queue empty or wrong label)");
+        }
+    }
+
+    // 3e. proc.reap() — 释放 Pcb + 配额 uncarve + agent 注销
+    //     T9d：现在子进程已被 terminate_current 推到 Zombie，sys_reap 可执行。
+    //     reap 成功 → per-process kstack 已被 proc_life::sys_reap 释放，
+    //     此处 uninstall_kstack 是 no-op（双重保险）。
+    let reap_ok = crate::proc_life::sys_reap(INIT_PID, child_pid).is_ok();
+    if reap_ok {
+        info!("[spawn-smoke]   ok: proc reap succeeded (T9d)");
+    } else {
+        info!("[spawn-smoke]   warn: proc reap failed (already terminated or wrong state)");
+    }
 
     // 3e. 清理频率计数
     crate::kstate::k_rate_unregister(child_pid);
