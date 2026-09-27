@@ -60,22 +60,15 @@ pub fn run_with_features(release: bool, features: &[&str]) -> Result<(), String>
         return Err(format!("cargo build failed: {status}"));
     }
 
-    // Step 2 (P4-T5): 构建用户态 ELF（复用 user 管线：build + ELF 头断言），
+    // Step 2 (P4-T5 + P4-T9e): 构建用户态 ELF 列表（hello + crasher），
     // 打成 cpio newc initramfs，写 target/initramfs.cpio。
-    crate::user::run(release)?;
-    let hello = root
-        .join("user")
-        .join("hello")
-        .join("target")
-        .join("x86_64-synapse-user")
-        .join(profile)
-        .join("hello");
-    let hello_bytes = fs::read(&hello)
-        .map_err(|e| format!("read user ELF {} failed: {e}", hello.display()))?;
-    let archive = build_cpio(&[InitrdFile {
-        name: "hello",
-        data: &hello_bytes,
-    }]);
+    let bins = crate::user::build_all(release)?;
+    let archive = build_cpio(
+        &bins
+            .iter()
+            .map(|(name, bytes)| InitrdFile { name, data: bytes })
+            .collect::<Vec<_>>(),
+    );
     let initramfs = root.join("target").join("initramfs.cpio");
     if let Some(parent) = initramfs.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir target failed: {e}"))?;
@@ -83,10 +76,11 @@ pub fn run_with_features(release: bool, features: &[&str]) -> Result<(), String>
     fs::write(&initramfs, &archive)
         .map_err(|e| format!("write {} failed: {e}", initramfs.display()))?;
     println!(
-        "[xtask] initramfs OK -> {} ({} bytes, 1 file: hello={})",
+        "[xtask] initramfs OK -> {} ({} bytes, {} files: {})",
         initramfs.display(),
         archive.len(),
-        hello_bytes.len()
+        bins.len(),
+        bins.iter().map(|(n, b)| format!("{n}={}B", b.len())).collect::<Vec<_>>().join(", ")
     );
 
     // Step 3: python build_disk.py <elf> <img> <initramfs>

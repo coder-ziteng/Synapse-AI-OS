@@ -848,7 +848,7 @@ fn unpack_ipc(frame: &SyscallFrame) -> (u8, u64, u32, u64, u32) {
     (ep, msg, len, caps_ptr, n_caps)
 }
 
-fn cap_err_to_code(e: CapError) -> i64 {
+pub(crate) fn cap_err_to_code(e: CapError) -> i64 {
     match e {
         CapError::InvalidCap => E_INVALID_CAP,
         CapError::InvalidAddr => E_INVALID_ADDR,

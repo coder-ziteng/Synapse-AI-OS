@@ -1,4 +1,4 @@
-//! 用户态构建 pipeline（P4-T1）：
+//! 用户态构建 pipeline（P4-T1 + P4-T9e 扩展）。
 //!
 //! 1. `cargo build --manifest-path user/hello/Cargo.toml
 //!        --target <root>/x86_64-synapse-user.json
@@ -6,7 +6,8 @@
 //!    → `user/hello/target/x86_64-synapse-user/{debug|release}/hello`
 //!    （cwd 必须是仓库根：target json 的 `--script=user/linker.ld`
 //!    由 ld.lld 相对 cargo cwd 解析。）
-//! 2. 宿主侧 ELF 头断言（task.json P4-T1 verify）：
+//! 2. 同上构建 `user/crasher/Cargo.toml` → `crasher`。
+//! 3. 宿主侧 ELF 头断言（task.json P4-T1 verify）：
 //!    * `e_type == ET_EXEC`（非 PIE，Doc 02 §2.1）
 //!    * `e_entry` 落在 1GB 基址区 [0x4000_0000, 0x8000_0000)（Doc 02 §3.1 UPDATE(P4-T2)）
 //!    * PT_LOAD flags：text=RX(5)、data=RW(6)，W^X 分段
@@ -19,54 +20,89 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// 用户态 bin 列表（name → Cargo.toml 相对路径）。`hello` 是 7-syscall 集成
+/// smoke；`crasher` 是 P4-T9e SegFault 路径验证。
+const USER_BINS: &[(&str, &str)] = &[
+    ("hello", "user/hello/Cargo.toml"),
+    ("crasher", "user/crasher/Cargo.toml"),
+];
+
 /// workspace 根目录（与 build.rs 同款；不共用是避免动 build.rs 引入并行窗口冲突面）。
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask manifest has parent")
-        .to_path_buf()
+    .parent()
+    .expect("xtask manifest has parent")
+    .to_path_buf()
 }
 
-/// 执行用户态构建 + ELF 校验。`release` 控制是否 `--release`。
-pub fn run(release: bool) -> Result<(), String> {
-    let root = workspace_root();
+/// 构建单个用户态 bin（独立 manifest，避免 hello/crasher workspace 互踩）。
+fn build_one(root: &Path, manifest: &Path, profile: &str) -> Result<PathBuf, String> {
     let target_json = root.join("x86_64-synapse-user.json");
-    let manifest = root.join("user").join("hello").join("Cargo.toml");
-    let profile = if release { "release" } else { "debug" };
-
     let mut cmd = Command::new("cargo");
-    cmd.current_dir(&root); // 关键：--script=user/linker.ld 相对 cwd 解析
+    cmd.current_dir(root);
     cmd.arg("build");
-    cmd.arg("--manifest-path").arg(&manifest);
+    cmd.arg("--manifest-path").arg(manifest);
     cmd.arg("--target").arg(&target_json);
     cmd.arg("-Zjson-target-spec");
-    // 用户态首期无 std（Doc 02 §1.2）：只建 core + alloc
     cmd.arg("-Zbuild-std=core,alloc");
-    if release {
+    if profile == "release" {
         cmd.arg("--release");
     }
-
     let status = cmd
         .status()
-        .map_err(|e| format!("cargo build (user) spawn failed: {e}"))?;
+        .map_err(|e| format!("cargo build user spawn failed: {e}"))?;
     if !status.success() {
-        return Err(format!("cargo build (user) failed: {status}"));
+        return Err(format!("cargo build user failed: {status}"));
     }
-
+    // 返回 ELF 路径供调用方读取
+    let bin_name = manifest
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("bad manifest path: {}", manifest.display()))?;
     let elf = root
         .join("user")
-        .join("hello")
+        .join(bin_name)
         .join("target")
         .join("x86_64-synapse-user")
         .join(profile)
-        .join("hello");
-    let bytes =
-        fs::read(&elf).map_err(|e| format!("read ELF {} failed: {e}", elf.display()))?;
-    let summary = verify_user_elf(&bytes)?;
+        .join(bin_name);
+    Ok(elf)
+}
 
-    println!("[xtask] user build OK -> {}", elf.display());
-    println!("[xtask] ELF verify: {summary}");
+/// 执行用户态构建 + ELF 校验（对每个 bin）。`release` 控制是否 `--release`。
+pub fn run(release: bool) -> Result<(), String> {
+    let root = workspace_root();
+    let profile = if release { "release" } else { "debug" };
+
+    for (name, manifest_rel) in USER_BINS {
+        let manifest = root.join(manifest_rel);
+        let elf = build_one(&root, &manifest, profile)?;
+        let bytes = fs::read(&elf)
+            .map_err(|e| format!("read ELF {} failed: {e}", elf.display()))?;
+        let summary = verify_user_elf(&bytes)?;
+        println!("[xtask] user build OK '{name}' -> {} | {summary}", elf.display());
+    }
     Ok(())
+}
+
+/// 把所有用户态 bin 打成 cpio（build.rs 调用）。
+///
+/// 返回 (name, bytes) 对。
+pub fn build_all(release: bool) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let root = workspace_root();
+    let profile = if release { "release" } else { "debug" };
+    let mut out = Vec::with_capacity(USER_BINS.len());
+    for (name, manifest_rel) in USER_BINS {
+        let manifest = root.join(manifest_rel);
+        let elf = build_one(&root, &manifest, profile)?;
+        let bytes = fs::read(&elf)
+            .map_err(|e| format!("read ELF {} failed: {e}", elf.display()))?;
+        let summary = verify_user_elf(&bytes)?;
+        println!("[xtask] user build OK '{name}' -> {} | {summary}", elf.display());
+        out.push((name.to_string(), bytes));
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

@@ -191,8 +191,23 @@ extern "C" fn general_protection_inner(ip: u64, error_code: u64, cs: u64) -> ! {
     crate::syscall::star_watchdog("gp-fault");
     if cs & 3 == 3 {
         // ring3 #GP：用户态违规（hlt / 非法 MSR / 段选择子违规等）。
-        // 走 ProcessExit/IllegalSyscall 同一 kill 路径（KERNEL_FRAME iretq
-        // 接力回内核延续，永不返回 faulting 用户代码）。
+        // - 真实 spawned child → terminate_current(FaultKind::GeneralProtection)：
+        //   走 proc 表状态转换 + death notification + 资源释放 + Zombie + iretq 续体；
+        // - init（current_is_spawned_child() == false）→ legacy KERNEL_FRAME 接力，
+        //   ring3-smoke / elf-smoke 的 _start 异常场景保持 panic-iff-没武装原语义。
+        if crate::proc_life::current_is_spawned_child() {
+            log::warn!(
+                "[idt] #GP ring3 child fault (error_code={:#x}) at ip={:#x} — terminating",
+                error_code, ip
+            );
+            // SAFETY: spawned child 上下文，KERNEL_FRAME 已武装。
+            unsafe {
+                crate::proc_life::terminate_current(
+                    Some(synapse_proc::process::FaultKind::GeneralProtection),
+                    error_code as i32,
+                )
+            }
+        }
         log::warn!(
             "[idt] #GP ring3 user fault (error_code={:#x}) at ip={:#x} — killing process",
             error_code, ip

@@ -40,9 +40,11 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use log::info;
 
 use synapse_abi::{
-    E_INVALID_ADDR, E_NO_MEMORY, E_NOT_FOUND, E_NOT_IMPLEMENTED, E_PERMISSION, MAP_GROWABLE,
-    MAP_MASK, PROT_EXEC, PROT_MASK, PROT_READ, PROT_WRITE,
+    E_INVALID_ADDR, E_NO_MEMORY, E_NOT_FOUND, E_NOT_IMPLEMENTED, E_PERMISSION,
+    E_QUOTA_EXCEEDED, MAP_GROWABLE, MAP_MASK, PROT_EXEC, PROT_MASK, PROT_READ, PROT_WRITE,
 };
+use synapse_cap::quota::Resource;
+use synapse_proc::process::Pid;
 use synapse_vma::{RegionFlags, RegionKind, UserMemoryRegion};
 
 use crate::page_frame::{alloc_frame, free_frame, FRAME_SIZE};
@@ -240,22 +242,54 @@ pub unsafe fn sys_mmap(as_ptr: *mut AddressSpace, addr: u64, len: u64, prot: u32
     st.active.push(Region { start, len, prot, flags });
     drop(st);
 
+    // P4-T9e quota 计费：在 ACTIVE 表登记后、eager_map 前 charge Pages
+    // （Doc 02 §5.5）。失败 → 撤 ACTIVE 记录、释放页（尚未分配 = no-op）、
+    // 返 E_QUOTA_EXCEEDED。注：cap lookup 表外（init / 没 PROC_EXT 条目）
+    // 静默跳过 charge——集成 smoke 与 boot 路径契约。
+    let pages = (len / FRAME) as u32;
+    let pid_raw = crate::proc_ext::current_pid();
+    let pid = Pid(pid_raw);
+    let charged = if pid_raw != 0 {
+        match crate::kstate::k_quota_charge(pid, Resource::Pages, pages) {
+            Ok(()) => true,
+            Err(_) => {
+                crate::proc_life::note_quota_denied();
+                STATE.lock().active.retain(|r| r.start != start);
+                MMAP_ERR.fetch_add(1, Ordering::SeqCst);
+                log::warn!(
+                    "[umem] mmap quota exceeded: pid={} pages={} (region {:#x}..{:#x})",
+                    pid_raw, pages, start, start + len
+                );
+                return E_QUOTA_EXCEEDED;
+            }
+        }
+    } else {
+        false
+    };
+
     // SAFETY: 调用方契约——as_ptr 指向存活的激活 AS。
     let as_user = unsafe { &mut *as_ptr };
     if let Err(e) = eager_map(as_user, start, len, prot) {
-        // 映射失败：撤 ACTIVE 记录 + VMA 未登记无需撤
+        // 映射失败：撤 ACTIVE 记录 + 释放已 charge 的页配额（VMA 未登记无需撤）
         STATE.lock().active.retain(|r| r.start != start);
+        if charged {
+            crate::kstate::k_quota_release(pid, Resource::Pages, pages);
+        }
         MMAP_ERR.fetch_add(1, Ordering::SeqCst);
         log::warn!("[umem] mmap eager_map failed at {start:#x} -> {e}");
         return e;
     }
 
     // VMA 登记（权限记录 + munmap 后 kill 闭环）。重叠已预检，insert 失败
-    // 属竞争异常——单核 syscall 串行下不应发生，发生即回滚映射并报 -2。
+    // 属竞争异常——单核 syscall 串行下不应发生，发生即回滚映射 + 释放配额
+    // + 撤 ACTIVE 记录并报 -2。
     let region = UserMemoryRegion::new(start, start + len, prot_to_flags(prot, flags), RegionKind::Mapped);
     if let Err(e) = demand_register(region) {
         rollback(as_user, start, len);
         STATE.lock().active.retain(|r| r.start != start);
+        if charged {
+            crate::kstate::k_quota_release(pid, Resource::Pages, pages);
+        }
         MMAP_ERR.fetch_add(1, Ordering::SeqCst);
         log::error!("[umem] VMA register failed: {e:?} at {start:#x}");
         return E_INVALID_ADDR;
@@ -306,6 +340,16 @@ pub unsafe fn sys_munmap(as_ptr: *mut AddressSpace, addr: u64, len: u64) -> i64 
     // VMA 注销（此后访问该区间 → "no VMA" → kill 骨架，语义闭环）
     demand_unregister(addr);
 
+    // P4-T9e：释放已 charge 的 Pages 配额（仅当 caller 是带 PROC_EXT 的进程）
+    let pid_raw = crate::proc_ext::current_pid();
+    if pid_raw != 0 {
+        crate::kstate::k_quota_release(
+            Pid(pid_raw),
+            Resource::Pages,
+            (len / FRAME) as u32,
+        );
+    }
+
     MUNMAP_OK.fetch_add(1, Ordering::SeqCst);
     info!("[umem] munmap [{addr:#x}..{:#x}) -> freed {} pages", addr + len, len / FRAME);
     0
@@ -330,6 +374,7 @@ pub unsafe fn cleanup_all(as_ptr: *mut AddressSpace) {
     // SAFETY: 调用方契约。
     let as_user = unsafe { &mut *as_ptr };
     let mut freed = 0u64;
+    let mut total_pages: u64 = 0;
     for r in &regions {
         for i in (0..r.len).step_by(FRAME as usize) {
             if let Ok(pa) = as_user.unmap_page(r.start + i) {
@@ -338,9 +383,20 @@ pub unsafe fn cleanup_all(as_ptr: *mut AddressSpace) {
             }
         }
         demand_unregister(r.start);
+        total_pages += r.len / FRAME;
+    }
+    // P4-T9e：批量释放总页配额（terminate_current 路径；caller = child pid，
+    // PROC_EXT 仍有效，current_pid 在 cleanup 时尚未重置）。
+    let pid_raw = crate::proc_ext::current_pid();
+    if pid_raw != 0 && total_pages > 0 {
+        crate::kstate::k_quota_release(
+            Pid(pid_raw),
+            Resource::Pages,
+            total_pages as u32,
+        );
     }
     info!(
-        "[umem] cleanup_all: {} regions, {freed} pages unmapped+freed",
+        "[umem] cleanup_all: {} regions, {freed} pages unmapped+freed, released {total_pages} page quota",
         regions.len()
     );
 }

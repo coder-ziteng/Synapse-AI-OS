@@ -23,8 +23,8 @@ fn abi_query_roundtrip_via_dispatch() {
     let mut state = KernelState::new();
     let frame = build_frame(SyscallId::AbiQuery, build_args_abi_query());
     let ret = dispatch(&mut state, &frame);
-    // 返回值 = (major << 16) | minor = (0 << 16) | 1 = 1
-    assert_eq!(ret, 1);
+    // 返回值 = (major << 16) | minor = (0 << 16) | ABI_MINOR (P4-T9c 升 4)
+    assert_eq!(ret, synapse_abi::ABI_MINOR as i64);
 }
 
 #[test]

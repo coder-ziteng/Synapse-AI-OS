@@ -35,12 +35,15 @@ pub struct ProcExtEntry {
     pub kstack_bottom: u64,
     /// kstack 顶部地址（栈顶 push 起点，16 字节对齐）
     pub kstack_top: u64,
+    /// 用户 AddressSpace 裸指针（`Box<AddressSpace>` 泄漏形态；0 = 未装载）。
+    /// spawn 装载 ELF 时写入；terminate 路径读取并回收（P4-T9c）。
+    pub user_as_ptr: u64,
 }
 
 impl ProcExtEntry {
     /// 空条目占位（`[const { None }; MAX_PROCS]` 不可直接 derive Default）。
     pub const fn empty() -> Self {
-        Self { kstack_bottom: 0, kstack_top: 0 }
+        Self { kstack_bottom: 0, kstack_top: 0, user_as_ptr: 0 }
     }
 }
 
@@ -106,6 +109,7 @@ pub unsafe fn init_proc_ext() {
         t[synapse_proc::process::INIT_PID.0 as usize] = Some(ProcExtEntry {
             kstack_bottom: boot_kstack_bottom,
             kstack_top: ksp,
+            user_as_ptr: 0,
         });
     }
 
@@ -149,6 +153,7 @@ pub fn install_kstack(pid: Pid) -> Option<()> {
     t[pid.0 as usize] = Some(ProcExtEntry {
         kstack_bottom: bottom,
         kstack_top: top,
+        user_as_ptr: 0,
     });
     Some(())
 }
@@ -225,4 +230,40 @@ pub fn current_kstack_top() -> u64 {
 pub fn is_kstack_installed(pid: Pid) -> bool {
     let t = PROC_EXT.lock();
     t[pid.0 as usize].is_some()
+}
+
+// ---------------------------------------------------------------------------
+// 用户 AddressSpace 句柄（P4-T9c）
+//
+// 装载形态：`Box<AddressSpace>::into_raw` 后的裸指针，由 proc_life 负责回收
+// (`Box::from_raw` + drop)。slot 0 表示未装载。
+// ---------------------------------------------------------------------------
+
+/// 写入 pid 的 user AS 指针（spawn 装载 ELF 后调）。覆盖：未防御性检测旧值，
+/// 调用方契约 = 该 pid 已 install_kstack 但尚未 set_user_as。
+pub fn set_user_as(pid: Pid, as_ptr: u64) {
+    let mut t = PROC_EXT.lock();
+    if let Some(e) = t[pid.0 as usize].as_mut() {
+        e.user_as_ptr = as_ptr;
+    } else {
+        panic!("set_user_as: pid {} has no PROC_EXT entry", pid.0);
+    }
+}
+
+/// 取出 pid 的 user AS 指针（terminate 路径回收前调）；返回 0 = 未装载。
+/// 调用后 slot 内 `user_as_ptr = 0`，避免双重 drop。
+pub fn take_user_as(pid: Pid) -> u64 {
+    let mut t = PROC_EXT.lock();
+    if let Some(e) = t[pid.0 as usize].as_mut() {
+        core::mem::replace(&mut e.user_as_ptr, 0)
+    } else {
+        0
+    }
+}
+
+/// 只读查 pid 的 user AS 指针是否非零（proc_life 判断 spawned child 用）。
+/// 不修改 PROC_EXT 状态。
+pub fn peek_user_as(pid: Pid) -> bool {
+    let t = PROC_EXT.lock();
+    t[pid.0 as usize].map(|e| e.user_as_ptr != 0).unwrap_or(false)
 }

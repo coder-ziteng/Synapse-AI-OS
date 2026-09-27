@@ -85,10 +85,16 @@ pub(crate) fn set_current_as_ptr(as_ptr: u64) {
 /// 从 initramfs 提取并解析 hello ELF（smoke 与 continuation 清理各调一次，
 /// 输入驻留内存不变 → 结果确定）。
 pub(crate) fn extract_and_parse() -> ParsedElf<'static> {
+    extract_and_parse_named(HELLO_NAME)
+}
+
+/// P4-T9e：通用化版本——按名字从 initramfs 取任意 ELF。spawn 路径按需传入
+/// "hello" / "crasher" 等不同目标。
+pub(crate) fn extract_and_parse_named(name: &str) -> ParsedElf<'static> {
     let initrd = crate::initrd::bytes().expect("[elf-smoke] initramfs missing (0x20100 size=0)");
-    let elf_bytes = cpio::find(initrd, HELLO_NAME)
+    let elf_bytes = cpio::find(initrd, name)
         .expect("[elf-smoke] cpio malformed")
-        .unwrap_or_else(|| panic!("[elf-smoke] '{HELLO_NAME}' not in initramfs"));
+        .unwrap_or_else(|| panic!("[elf-smoke] '{name}' not in initramfs"));
     let cfg = synapse_elf::LoadConfig {
         user_base: USER_REGION_START,
         user_limit: USER_REGION_END,
@@ -183,14 +189,20 @@ pub(crate) fn map_stack(as_user: &mut AddressSpace) -> (u64, u64) {
 /// 返回 `(as_user, entry, stack_top)`，调用方负责 iretq 到 entry 并在
 /// 续体中清理 AS。
 pub(crate) fn load_hello_into_as() -> (AddressSpace, u64, u64) {
-    let parsed = extract_and_parse();
+    load_elf_into_as(HELLO_NAME)
+}
+
+/// P4-T9e 通用化：按名字从 initramfs 提取 + 装入新 AS。spawn smoke 路径
+/// 复用——hello / crasher 共用同一装载原语。
+pub(crate) fn load_elf_into_as(name: &str) -> (AddressSpace, u64, u64) {
+    let parsed = extract_and_parse_named(name);
     let mut as_user = AddressSpace::new().expect("[spawn] frames for child AS");
     for seg in parsed.loads() {
         map_segment(&mut as_user, seg);
     }
     let (_stack_base, stack_top) = map_stack(&mut as_user);
     info!(
-        "[spawn] loaded hello: entry={:#x}, stack_top={:#x}, pml4={:#x}",
+        "[spawn] loaded '{name}': entry={:#x}, stack_top={:#x}, pml4={:#x}",
         parsed.entry, stack_top, as_user.pml4_phys()
     );
     (as_user, parsed.entry, stack_top)

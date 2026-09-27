@@ -85,15 +85,19 @@ pub fn kernel_cr3() -> u64 {
     KERNEL_CR3.load(Ordering::SeqCst)
 }
 
+/// mmap 配额拒绝计数（umem 路径 charge 失败递增）。
 pub fn quota_denied_count() -> u64 {
     QUOTA_DENIED.load(Ordering::SeqCst)
 }
+/// 死信直接拷贝到接收方的次数（无队列等待）。
 pub fn death_delivered_count() -> u64 {
     DEATH_DELIVERED.load(Ordering::SeqCst)
 }
+/// 死信入队次数（接收方未在 recv，排队等消费）。
 pub fn death_queued_count() -> u64 {
     DEATH_QUEUED.load(Ordering::SeqCst)
 }
+/// 死信投递失败（无 endpoint / cap 失效 / 队列满）次数。
 pub fn death_dropped_count() -> u64 {
     DEATH_DROPPED.load(Ordering::SeqCst)
 }

@@ -31,8 +31,8 @@
 use crate::sync::SpinLock;
 
 use synapse_cap::{
-    transfer_caps, CapError, CapRef, CapTable, ObjectTable, ObjKind, ObjRef, Rights, TransferItem,
-    MAX_TRANSFER,
+    quota::Resource, transfer_caps, CapError, CapRef, CapTable, ObjectTable, ObjKind, ObjRef,
+    Rights, TransferItem, MAX_TRANSFER,
 };
 use synapse_ipc::{Endpoint, Notification, RecvOutcome, SendOutcome, SendRequest};
 use synapse_ipc::AgentId;
@@ -260,6 +260,29 @@ pub fn k_rate_unregister(pid: Pid) {
         return;
     }
     let _ = crate::kthread::with_sched(|s| s.rate_mut().unregister(pid.0));
+}
+
+// ---------- Quota 计费（P4-T9e：mmap/munmap enforce Doc 02 §5.5） ----------
+//
+// `pid` 不在进程表中 → `charge` 返 `NotFound`（umem 路径映射为 E_NOT_FOUND）；
+// `release` 静默 no-op（清理路径允许"目标已 reap"）。
+
+/// 计费：超出 `pid.quota` 上限 → `QuotaExceeded`（umem 映射为 E_QUOTA_EXCEEDED -13）。
+pub fn k_quota_charge(pid: Pid, res: Resource, amount: u32) -> Result<(), CapError> {
+    with_procs(|t| {
+        let p = t.get_mut(pid).ok_or(CapError::NotFound)?;
+        let quota = p.quota;
+        p.usage.charge(&quota, res, amount)
+    })
+}
+
+/// 释放计费（饱和减法，不返错）。
+pub fn k_quota_release(pid: Pid, res: Resource, amount: u32) {
+    with_procs(|t| {
+        if let Some(p) = t.get_mut(pid) {
+            p.usage.release(res, amount);
+        }
+    });
 }
 
 // ---------- FR10 进程级冻结/解冻（proc 表 × sched 原语双接线） ----------

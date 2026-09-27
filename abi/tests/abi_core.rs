@@ -217,11 +217,49 @@ fn decode_gettime_and_mmap_args() {
 }
 
 #[test]
-fn abi_minor_bumped_to_3() {
-    // P4-T6：1→2（错误码/Timespec/prot 位入 crate）；P4-T7：2→3（补 -11..-15）。
-    // minor 增量 = 向后兼容新增；旧 -1..-10 编号不变，附带 5 个新码。
-    assert_eq!(ABI_MINOR, 3);
-    assert_eq!(abi_query_value(), 0x3);
+fn abi_minor_bumped_to_4() {
+    // P4-T6：1→2（错误码/Timespec/prot 位入 crate）；P4-T7：2→3（补 -11..-15）；
+    // P4-T9c：3→4（DeathMsg / DEATH_LABEL / FAULT_* 编码）。
+    // minor 增量 = 向后兼容新增；旧编号全部不变。
+    assert_eq!(ABI_MINOR, 4);
+    assert_eq!(abi_query_value(), 0x4);
+}
+
+// ---------- death notification（P4-T9c，Doc 02 §5.3） ----------
+
+#[test]
+#[allow(unsafe_code)] // 布局断言需要按字节视角读 repr(C) 结构
+fn death_msg_layout_is_repr_c_16b() {
+    // 内核投递 / 用户态 recv 读取共享此布局：4×u32 = 16 字节，无填充。
+    assert_eq!(core::mem::size_of::<DeathMsg>(), 16);
+    let m = DeathMsg { pid: 7, exit_code: -1, fault: FAULT_SEGFAULT, rsv: 0 };
+    assert_eq!(m.pid, 7);
+    assert_eq!(m.fault, FAULT_SEGFAULT);
+    // 字段偏移（little-endian 字节序契约）
+    let bytes = unsafe {
+        core::slice::from_raw_parts(&m as *const DeathMsg as *const u8, 16)
+    };
+    assert_eq!(&bytes[0..4], &7u32.to_le_bytes());
+    assert_eq!(&bytes[4..8], &(-1i32).to_le_bytes());
+    assert_eq!(&bytes[8..12], &FAULT_SEGFAULT.to_le_bytes());
+}
+
+#[test]
+fn fault_codes_are_distinct_and_none_is_zero() {
+    // FAULT_NONE=0 是"正常退出"哨兵，必须与全部崩溃码互异。
+    let codes = [
+        FAULT_NONE, FAULT_SEGFAULT, FAULT_PANIC, FAULT_ILLEGAL_SYSCALL,
+        FAULT_ILLEGAL_INSTRUCTION, FAULT_GENERAL_PROTECTION,
+    ];
+    assert_eq!(FAULT_NONE, 0);
+    for (i, a) in codes.iter().enumerate() {
+        for (j, b) in codes.iter().enumerate() {
+            if i != j {
+                assert_ne!(a, b, "fault codes must be distinct");
+            }
+        }
+    }
+    assert_eq!(DEATH_LABEL, 0x4445_4144);
 }
 
 #[test]

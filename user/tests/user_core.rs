@@ -220,7 +220,8 @@ fn abi_query_value_matches_constants() {
     assert_eq!(abi_query_value(), ((ABI_MAJOR as u64) << 16) | (ABI_MINOR as u64));
     assert_eq!(ABI_MAJOR, 0);
     // P4-T6：1→2（错误码/Timespec/prot 位入 crate）；P4-T7：2→3（-11..-15）。
-    assert_eq!(ABI_MINOR, 3);
+    // P4-T9c：3→4（DeathMsg/DEATH_LABEL/FAULT_* 入 crate）。
+    assert_eq!(ABI_MINOR, 4);
 }
 
 #[test]

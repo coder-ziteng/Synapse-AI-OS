@@ -51,6 +51,7 @@ use synapse_abi::{
     abi_query_value, decode, Syscall, SyscallFrame, Timespec, CLOCK_MONOTONIC, CLOCK_WALL,
     E_INVALID_ADDR, E_NOT_FOUND, E_NOT_IMPLEMENTED,
 };
+use synapse_proc::process::{FaultKind, Pid};
 
 use crate::paging::{AddressSpace, PT_USER, PT_WRITABLE};
 
@@ -316,9 +317,7 @@ fn dispatch_inner(frame: &SyscallFrame) -> i64 {
     log::info!("[syscall] dispatch: num={} ({:#x})", frame.num, frame.num);
     let Some(sc) = decode(frame) else {
         // IllegalSyscall（Doc 02 §5.3）：未知号 / 窄参数越界。不静默截断、
-        // 不按 E_NOT_IMPLEMENTED 温和返回——杀进程语义。MVP smoke 下与
-        // process_exit 同走 KERNEL_FRAME iretq 接力（T9 换成 FaultKind
-        // 归因 + death notification + reap）。
+        // 不按 E_NOT_IMPLEMENTED 温和返回——杀进程语义。
         ILLEGAL_SYSCALL_COUNT.fetch_add(1, Ordering::SeqCst);
         log::error!(
             "[syscall] IllegalSyscall: num={} ({:#x}) args=[{:#x} {:#x} {:#x} {:#x} {:#x} {:#x}] — killing process",
@@ -326,6 +325,17 @@ fn dispatch_inner(frame: &SyscallFrame) -> i64 {
             frame.args[0], frame.args[1], frame.args[2],
             frame.args[3], frame.args[4], frame.args[5],
         );
+        // 真实 spawned child → 归因 IllegalSyscall + death notification + reap。
+        // init / 集成 smoke 未武装 KERNEL_FRAME 的裸调用 → 走 legacy 接力。
+        if crate::proc_life::current_is_spawned_child() {
+            // SAFETY: spawned child 上下文，KERNEL_FRAME 已武装。
+            unsafe {
+                crate::proc_life::terminate_current(
+                    Some(FaultKind::IllegalSyscall),
+                    frame.num as i32,
+                )
+            }
+        }
         // SAFETY: smoke 上下文已武装 KERNEL_FRAME（未武装 = 内核契约破坏，
         // handle_process_exit 内部 panic 兜底）。
         unsafe { crate::ring3::handle_process_exit() }
@@ -338,7 +348,13 @@ fn dispatch_inner(frame: &SyscallFrame) -> i64 {
         }
         Syscall::ProcessExit { code } => {
             log::info!("[syscall] process_exit(code={code})");
-            // 委托 ring3::handle_process_exit（永不返回）。
+            // 真实 spawned child → 走 terminate_current：状态转换 Exited +
+            // 释放资源 + 投递 DeathMsg + reap-able，**永不返回**。
+            // init / 集成 smoke → 走 legacy handle_process_exit KERNEL_FRAME 接力。
+            if crate::proc_life::current_is_spawned_child() {
+                // SAFETY: spawned child 上下文，KERNEL_FRAME 已武装。
+                unsafe { crate::proc_life::terminate_current(None, code) }
+            }
             // SAFETY: smoke 上下文已武装 KERNEL_FRAME。
             unsafe { crate::ring3::handle_process_exit() }
         }
@@ -366,6 +382,23 @@ fn dispatch_inner(frame: &SyscallFrame) -> i64 {
                 Syscall::IpcRecv { .. } => crate::ipc::k_ipc_recv(frame),
                 Syscall::IpcReply { .. } => crate::ipc::k_ipc_reply(frame),
                 Syscall::IpcTrySend { .. } => crate::ipc::k_ipc_try_send(frame),
+                Syscall::ProcessReap { pid } => {
+                    // P4-T9d：reap 父进程持有的 zombie child。调用方 = caller
+                    // （smoke 内是 init / spawn_continuation）；错误映射走
+                    // ipc::cap_err_to_code（CapError → Doc 02 §4.3 错误码）。
+                    let caller = Pid(crate::proc_ext::current_pid());
+                    let target = Pid(pid);
+                    match crate::proc_life::sys_reap(caller, target) {
+                        Ok(()) => 0,
+                        Err(e) => {
+                            log::warn!(
+                                "[syscall] process_reap(pid={}) failed: {:?}",
+                                pid, e
+                            );
+                            crate::ipc::cap_err_to_code(e)
+                        }
+                    }
+                }
                 _ => {
                     log::warn!("[syscall] unimplemented syscall {:?} (num={})", other.id(), frame.num);
                     E_NOT_IMPLEMENTED

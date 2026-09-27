@@ -337,6 +337,34 @@ impl AddressSpace {
         }
     }
 
+    /// 解除用户区 [1GB, 2GB) 的**全部**叶映射并逐帧 free（进程 terminate
+    /// 路径，P4-T9c）。返回释放的叶帧数。
+    ///
+    /// 走查私有 `user_pd`（512 个 2MB 槽）→ 每个 present PT 的 512 个叶槽；
+    /// 中间 PT 帧不在此释放（`Drop` 统一归还 `owned_tables`）。不发 invlpg：
+    /// 调用方契约 = 本 AS 已非当前 CR3（terminate 先切回内核 AS），CR3 切换
+    /// 已全量刷 TLB（无 PCID）。
+    pub fn free_all_user_pages(&mut self) -> u64 {
+        let mut freed = 0u64;
+        for pd_idx in 0..512usize {
+            let pd_e = unsafe { entry_read(self.user_pd, pd_idx) };
+            if pd_e & PT_PRESENT == 0 {
+                continue;
+            }
+            let pt_phys = pd_e & PT_ADDR_MASK;
+            for pt_idx in 0..512usize {
+                let e = unsafe { entry_read(pt_phys, pt_idx) };
+                if e & PT_PRESENT == 0 {
+                    continue;
+                }
+                unsafe { entry_write(pt_phys, pt_idx, 0) };
+                free_frame(e & PT_ADDR_MASK);
+                freed += 1;
+            }
+        }
+        freed
+    }
+
     /// VA → (PA, 叶级 entry) 翻译（P4-T6：syscall 集成层的用户指针校验用）。
     ///
     /// 与 [`translate`](Self::translate) 同一走查，但额外返回命中的叶级
@@ -640,13 +668,28 @@ fn kill_path(cr2: u64, error_code: u64, ip: u64, reason: &'static str) -> u64 {
             "[vma] kill-skeleton SIGSEGV-equivalent ({}): cr2={:#x} err={:#x} ip={:#x}; sink armed -> resumed (smoke)",
             reason, cr2, error_code, ip
         );
-    } else {
+        return resume;
+    }
+    // P4-T9c：真实 ring-3 子进程（proc 表在案 + 非 init）→ FaultKind::SegFault
+    // 归因 terminate（death notification + 资源释放 + Zombie），永不返回。
+    // smoke 上下文（sink 未武装且非 spawned child）保持原 panic 语义。
+    if error_code & PF_ERR_USER != 0 && crate::proc_life::current_is_spawned_child() {
         info!(
-            "[vma] kill-skeleton SIGSEGV-equivalent ({}): cr2={:#x} err={:#x} ip={:#x}; sink unarmed -> panic",
+            "[vma] kill: ring3 SegFault ({}): cr2={:#x} err={:#x} ip={:#x} — terminating child",
             reason, cr2, error_code, ip
         );
+        unsafe {
+            crate::proc_life::terminate_current(
+                Some(synapse_proc::process::FaultKind::SegFault),
+                error_code as i32,
+            )
+        }
     }
-    resume
+    info!(
+        "[vma] kill-skeleton SIGSEGV-equivalent ({}): cr2={:#x} err={:#x} ip={:#x}; sink unarmed -> panic",
+        reason, cr2, error_code, ip
+    );
+    0
 }
 
 // ---------------------------------------------------------------------------

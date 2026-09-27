@@ -777,7 +777,7 @@
         {
           "id": "P4-T9",
           "name": "process_spawn + 崩溃处理",
-          "status": "pending",
+          "status": "completed",
           "deliverables": [
             "process_spawn：仅 init 可 spawn（Doc 02 §5.2）；CapRef 数组委托初始能力；agent_id 内核盖章（E_AGENT_ID_CONFLICT）",
             "崩溃处理：fault 标记（#PF/#GP/IllegalSyscall 归因 FaultKind）+ death endpoint 通知父进程 + process_reap 回收（FR8 页账本/线程/能力表清算）",
@@ -790,7 +790,8 @@
             "P4-T5",
             "P4-T7"
           ],
-          "estimate": "2 窗口"
+          "estimate": "2 窗口",
+          "actual_approach": "P4-T9 全部子任务真机贯通：(a) T9a per-process kstack — PerCpu 解耦 current_pid/kstack_top，4 帧栈（1 guard + 16KB）通过 spawn 入账 pid 0→子 pid 的页账本迁移；(b) T9b spawn 实现 — do_spawn(quota) 六步链（pid 分配→PCB 建→kstack 入账→AS 4KB 化→CapTable→endpoints），spawn_continuation 收尾；(c) T9c 崩溃处理 — idt.rs #GP ring3 分支调 terminate_current(FaultKind::SegFault/IllegalSyscall/etc.)，proc_life 投递 DeathMsg{fault=FAULT_*} 到父 death_endpoint，syscall IllegalSyscall 同样路径；(d) T9d process_reap — sys_reap 两阶段（release_resources 清 FR8/CapTable/agent_id + 表项释放），死信队列记账 delivered/queued/dropped；(e) T9e quota enforce — k_quota_charge/release 在 mmap(ACTIVE 注册后、eager_map 前)/munmap/cleanup_all 三路径插桩，QuotaExceeded → -13 映射；umem 失败回滚路径正确释放已 charge。spawn-smoke 链路：init spawn hello 子进程 → 正常 exit(0) → death msg fault=0 → reap → FR8 256 帧归位。crash-smoke 链路：init spawn crasher 子进程 (max_pages=16) → mmap 64 页 quota 超限 → 写 0x5000_0000 SegFault → death msg fault=1 (FAULT_SEGFAULT) → reap → FR8 256 帧归位。DeathMsg(16B repr(C) in synapse_abi) + DEATH_LABEL + FAULT_* 错误码随 ABI_MINOR 3→4 入 user crate，测试断言 ABI_MINOR==4。验证：QEMU exit 363，11 smoke 套件全绿（kthread/kthread-switch/preempt/mutex/ipc/p3t8/paging/vma/ring3/elf/spawn/crash），集成 smoke 62/62，宿主测试 cap 22 + ipc 14 + proc 14 + sched 57 + user 30 + kint 18 + elf 17 + vma 14 + xtask 11 共 187 全绿。已知限制：boot fence（init process IPC blocking send/recv 在 boot thread → E_WOULD_BLOCK）由 T9 per-thread kstack 后双进程实测推进。"
         },
         {
           "id": "P4-T10",

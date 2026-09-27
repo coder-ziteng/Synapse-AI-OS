@@ -38,7 +38,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// 位常量首次进入 crate 本体；syscall 号表与 decode 语义不变。
 /// 0.3（P4-T7）：补齐扩展错误码 -11..-15（与 cap crate `CapError` /
 /// Doc 03 §5.1 IPC 错误语义对齐；Doc 02 §4.3 表同步追加）。
-pub const ABI_MINOR: u16 = 3;
+/// 0.4（P4-T9c）：death notification 消息布局 [`DeathMsg`] + [`DEATH_LABEL`]
+/// + `FAULT_*` 崩溃归因编码（Doc 02 §5.3；纯新增，向后兼容）。
+pub const ABI_MINOR: u16 = 4;
 
 /// `abi_query`（#18）返回值：`(major << 16) | minor`。
 ///
@@ -133,6 +135,48 @@ pub const PROT_MASK: u32 = PROT_READ | PROT_WRITE | PROT_EXEC;
 pub const MAP_GROWABLE: u32 = 1 << 3;
 /// `flags` 合法位全集（含此集合外的位 → [`E_NOT_IMPLEMENTED`]，未实现语义）。
 pub const MAP_MASK: u32 = MAP_GROWABLE;
+
+// ============================================================================
+// death notification（Doc 02 §5.3，P4-T9c）
+// ============================================================================
+//
+// 进程进入 Exited/Faulted 时，内核向其 spawn 时注册的 `death_endpoint`
+// 投递一条常规 IPC 消息（复用 Endpoint 队列，无新原语）：
+// `label == DEATH_LABEL`，payload = 16 字节 [`DeathMsg`]。
+// 父进程 `recv(death_endpoint)` 后按 label 识别，读取 payload 归因崩溃，
+// 随后 `process_reap(pid)`（#22）彻底释放僵尸。
+
+/// death signal 消息的 label（IPC 消息头 label 字段；用户按此过滤）。
+pub const DEATH_LABEL: u32 = 0x4445_4144; // "DEAD"
+
+/// `fault` 编码：正常退出（`process_exit`），无崩溃。
+pub const FAULT_NONE: u32 = 0;
+/// `fault` 编码：段错误（访问未映射 / 权限不符地址，#PF kill 路径）。
+pub const FAULT_SEGFAULT: u32 = 1;
+/// `fault` 编码：用户态 panic。
+pub const FAULT_PANIC: u32 = 2;
+/// `fault` 编码：非法 syscall（未知号 / 窄参数越界）。
+pub const FAULT_ILLEGAL_SYSCALL: u32 = 3;
+/// `fault` 编码：非法指令（#UD）。
+pub const FAULT_ILLEGAL_INSTRUCTION: u32 = 4;
+/// `fault` 编码：一般保护异常（ring-3 #GP：hlt / 特权指令 / 段违规）。
+pub const FAULT_GENERAL_PROTECTION: u32 = 5;
+
+/// death notification payload（`repr(C)`、little-endian、16 字节；
+/// 新字段只允许追加尾部，Doc 02 §4.5 布局纪律同 [`Timespec`]）。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeathMsg {
+    /// 终止进程的 pid。
+    pub pid: u32,
+    /// 退出码（正常退出 = `process_exit` 参数；崩溃 = 内核填充的异常码，
+    /// 如 #PF error_code / 非法 syscall 号）。
+    pub exit_code: i32,
+    /// 崩溃归因（`FAULT_*` 编码；正常退出 = [`FAULT_NONE`]）。
+    pub fault: u32,
+    /// 保留（对齐填充；读方必须忽略）。
+    pub rsv: u32,
+}
 
 /// syscall 号全集（Doc 02 §4.2 分配表 + §4.5 abi_query）。
 ///

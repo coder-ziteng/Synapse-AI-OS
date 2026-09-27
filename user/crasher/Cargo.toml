@@ -1,0 +1,43 @@
+# P4-T9e：crash smoke 子进程（受小配额 + 写未映射页 → SegFault）。
+#
+# 测试序列（task.json P4-T9e verify）：
+# 1. mmap 1 页 RW → OK（小配额 16 页内）
+# 2. mmap 64 页 RW → -13（quota 拒绝，proc_life::quota_denied++）
+# 3. munmap 1 页 → OK
+# 4. 写未映射 0x5000_0000 → SegFault → 内核 terminate_current(FaultKind::SegFault)
+# 5. 内核向 init death endpoint 投递 DeathMsg{ fault=FAULT_SEGFAULT(1) }
+#
+# **不入根 workspace**（root Cargo.toml `exclude = ["user/*"]`）。
+# 构建入口：`cargo run -p xtask -- user`（xtask/src/user.rs 串起 hello + crasher）。
+
+[package]
+name         = "synapse-crasher"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.85"
+license      = "MIT OR Apache-2.0"
+description  = "Synapse crash smoke 子进程（小配额 + SegFault → death notification）"
+publish      = false
+
+# 自成 workspace 根。
+[workspace]
+
+[[bin]]
+name = "crasher"
+path = "src/main.rs"
+
+[dependencies]
+synapse-user = { path = ".." }
+synapse-abi  = { path = "../../abi" }
+
+[profile.dev]
+panic = "abort"
+debug = true
+strip = "symbols"
+
+[profile.release]
+panic = "abort"
+debug = true
+opt-level = "s"
+lto = "thin"
+strip = "symbols"
