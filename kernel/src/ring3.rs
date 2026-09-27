@@ -160,6 +160,17 @@ pub unsafe fn handle_process_exit() -> ! {
     let kf_addr = KERNEL_FRAME.0.get() as u64;
     unsafe {
         asm!(
+            // swapgs 收支平衡（P4-T5 真机暴露的 #DF 根因）：syscall 入口的
+            // swapgs 已把 GS.base 切到 &PER_CPU，而本路径跳过 sysretq 侧的
+            // 平衡 swapgs。不在此补上，continuation（及其后续 elf_load_smoke）
+            // 再 iretq 进新用户上下文时，ring-3 的 GS.base 仍是内核指针、
+            // KERNEL_GS_BASE 是旧垃圾——用户第一次 syscall 的入口 swapgs 会
+            // 把垃圾装入 GS.base，`mov rsp, gs:[0]` 得到垃圾栈指针，首条
+            // push（syscall_entry_asm+0x15）即 fault，异常递送再失败 → #DF。
+            // swapgs 后恢复 boot 约定：GS.base=用户值（无意义）、
+            // KERNEL_GS_BASE=&PER_CPU；continuation 是普通 ring-0 代码，
+            // 不经 gs:[] 取数，与首次进入用户态前的状态完全一致。
+            "swapgs",
             "mov rsp, {kf}",
             "iretq",
             kf = in(reg) kf_addr,
@@ -238,21 +249,10 @@ extern "C" fn return_continuation() -> ! {
 
     info!("[ring3-smoke] PASS");
 
-    // 8. 主动退出 QEMU：isa-debug-exit (0x502) 写 0xB5 → exit 363（与 main 成功路径一致）。
-    //    不能走 main 的正常路径（ring3_smoke 被 iretq 切走，永远不会返回 caller）。
-    unsafe {
-        core::arch::asm!(
-            "mov dx, 0x502",
-            "mov al, 0xB5",
-            "out dx, al",
-            options(nostack, preserves_flags),
-        );
-    }
-
-    // 不应到这里（isa-debug-exit 已触发 QEMU 退出）
-    loop {
-        unsafe { asm!("hlt", options(nostack, preserves_flags)) };
-    }
+    // 8. P4-T5 链式 smoke：本 continuation 由 iretq 直达（不返回 main 正常路径），
+    //    故直接接力下一场——从 initramfs 提取 hello ELF → 装入用户 AS → iretq
+    //    执行 → elf_continuation 负责断言 + QEMU 退出（exit 363）。
+    crate::elfload::elf_load_smoke()
 }
 
 // ============================================================================
@@ -324,19 +324,7 @@ pub fn ring3_smoke() {
     info!("[ring3-smoke]   ok: CS/SS will be set by iretq frame (ring-0 cannot set SS.RPL=3 directly)");
 
     // 4. 准备"返回内核" iretq 帧（KERNEL_FRAME 全局 static）
-    unsafe {
-        core::ptr::write_volatile(
-            KERNEL_FRAME.0.get(),
-            KernelIretqFrame {
-                rip: return_continuation as *const () as u64,
-                cs: KERNEL_CS,
-                rflags: krflags,
-                rsp: ksp,
-                ss: KERNEL_DS,
-            },
-        );
-    }
-    KERNEL_FRAME_ARMED.store(true, Ordering::SeqCst);
+    unsafe { write_kernel_frame(return_continuation as *const () as u64, ksp, krflags) };
     info!(
         "[ring3-smoke]   ok: KERNEL_FRAME armed @ {:#x} (rip={:#x} rsp={:#x})",
         KERNEL_FRAME.0.get() as u64,
@@ -348,21 +336,59 @@ pub fn ring3_smoke() {
     RETURN_USER_AS_PTR.store(&mut as_user as *mut AddressSpace as u64, Ordering::SeqCst);
 
     // 6. 构造 user iretq frame 并 iretq
-    let uframe = IretqFrame {
-        rip: USER_CODE_ADDR,
-        cs: USER_CS,
-        rflags: RFlags::INTERRUPT_FLAG.bits() | (1 << 1), // bit1 保留位（x86 强制 =1）
-        rsp: USER_STACK_TOP,
-        ss: USER_DS,
-        _pad: 0,
-    };
     info!(
-        "[ring3-smoke]   iretq to user: rip={:#x} cs={:#x} rsp={:#x} ss={:#x} rflags={:#x}",
-        uframe.rip, uframe.cs, uframe.rsp, uframe.ss, uframe.rflags
+        "[ring3-smoke]   iretq to user: rip={:#x} cs={:#x} rsp={:#x} ss={:#x}",
+        USER_CODE_ADDR, USER_CS, USER_STACK_TOP, USER_DS
     );
 
     // 7. iretq to user → 不可返回（continuation 通过 syscall #21 接力）
-    enter_user(&uframe);
+    unsafe { enter_user_at(USER_CODE_ADDR, USER_STACK_TOP) }
+}
+
+// ============================================================================
+// 可复用的"武装返回帧 + 进入用户态"原语（P4-T5 elf smoke 复用）
+// ============================================================================
+
+/// 写入并武装"返回内核" iretq 帧。
+///
+/// # Safety
+/// `rip` 必须指向 `extern "C" fn() -> !` 的 ring-0 continuation；
+/// `rsp`/`rflags` 必须是可安全恢复的 ring-0 上下文（典型 = smoke 入口
+/// 捕获值）。武装后 syscall #21 (process_exit) 将 iretq 到该帧。
+pub(crate) unsafe fn write_kernel_frame(rip: u64, rsp: u64, rflags: u64) {
+    unsafe {
+        core::ptr::write_volatile(
+            KERNEL_FRAME.0.get(),
+            KernelIretqFrame {
+                rip,
+                cs: KERNEL_CS,
+                rflags,
+                rsp,
+                ss: KERNEL_DS,
+            },
+        );
+    }
+    KERNEL_FRAME_ARMED.store(true, Ordering::SeqCst);
+}
+
+/// 构造用户态 iretq 帧并进入 ring-3（永不返回；回程走 KERNEL_FRAME 接力）。
+///
+/// `rsp` 语义 = iretq 后用户态 RSP。对 Rust 编译的用户 ELF 取
+/// `栈顶 - 8`（模拟 call 入口 rsp%16==8 约定，见 elfload.rs）。
+///
+/// # Safety
+/// `rip`/`rsp` 必须指向已在当前 CR3 用户 AS 中映射且权限正确的代码/栈；
+/// 调用前必须已 [`write_kernel_frame`]。
+pub(crate) unsafe fn enter_user_at(rip: u64, rsp: u64) -> ! {
+    let uframe = IretqFrame {
+        rip,
+        cs: USER_CS,
+        rflags: RFlags::INTERRUPT_FLAG.bits() | (1 << 1), // bit1 保留位（x86 强制 =1）
+        rsp,
+        ss: USER_DS,
+        _pad: 0,
+    };
+    enter_user(&uframe)
 }
 
 #[inline(never)]

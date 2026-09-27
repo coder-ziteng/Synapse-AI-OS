@@ -55,3 +55,7 @@ path = "../vma"
 # ===== P4-T4 (2026-09-27): syscall ABI 常量（SyscallId / ABI 版本号）=====
 [dependencies.synapse-abi]
 path = "../abi"
+
+# ===== P4-T5 (2026-09-27): ELF64 静态加载 + cpio newc initramfs 纯逻辑解析 =====
+[dependencies.synapse-elf]
+path = "../elf"

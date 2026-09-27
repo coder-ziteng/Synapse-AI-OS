@@ -44,8 +44,10 @@ import os
 ELF = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     'target', 'x86_64-bootloader', 'debug', 'synapse-kernel')
 IMG = sys.argv[2] if len(sys.argv) > 2 else 'kernel_hd.img'
+INITRD = sys.argv[3] if len(sys.argv) > 3 else None   # P4-T5: cpio newc initramfs
 IMG_SECTORS = 32768          # 16 MB
 KERNEL_LOAD = 0x200000       # 链接基址
+INITRD_INFO_ADDR = 0x20100   # stage2 写 {base u64, size u64}；内核 initrd.rs 消费
 EDD_MAX_SECTORS = 127        # 单次 AH=42h 读上限(保守值)
 
 # ============================================================
@@ -104,6 +106,25 @@ assert start64, '_start64 symbol not found'
 ksectors = (len(kernel) + 511) // 512
 print(f'kernel: base=0x{base:x} size={len(kernel)} ({ksectors} sectors) '
       f'_start64=0x{start64:x} e_entry=0x{e_entry:x}')
+
+# ============================================================
+# P4-T5 initramfs: cpio newc 归档追加到 kernel.bin 之后，stage2
+# 连续加载 (kernel + initramfs) 到 0x200000+，并在 0x20100 写
+# {base, size} 记录。initrd_base = 0x200000 + ksectors*512（构建期常量）。
+# ============================================================
+if INITRD:
+    with open(INITRD, 'rb') as f:
+        initrd = f.read()
+    assert initrd[:6] == b'070701', f'initramfs {INITRD} not cpio newc'
+else:
+    initrd = b''
+ird_sectors = (len(initrd) + 511) // 512
+initrd_base = KERNEL_LOAD + ksectors * 512
+initrd_size = len(initrd)
+total_sectors = ksectors + ird_sectors
+assert total_sectors < 0x10000, f'kernel+initrd {total_sectors} sectors overflow u16 counter'
+print(f'initramfs: {initrd_size} bytes ({ird_sectors} sectors) -> base=0x{initrd_base:x}; '
+      f'total load = {total_sectors} sectors')
 
 # ============================================================
 # STAGE 2 (@ 0x8000): 内核加载器 + 16→32→64 trampoline
@@ -355,6 +376,19 @@ emit(bytes([0xBC, 0x08, 0x00, 0x06, 0x00]))  # mov esp, 0x60008
 
 debug32(0x44)                            # 'D'
 
+# ---- P4-T5: 写 initramfs 引导记录到物理 0x20100（32-bit PM 平坦段，分页未开）----
+#   {base u64, size u64}；构建期常量（initrd_base = 0x200000 + ksectors*512）。
+#   mov dword [abs], imm32 编码：C7 04 25 <disp32> <imm32>（SIB 无基址寄存器）。
+def mov_mem_imm32(addr, imm):
+    emit(bytes([0xC7, 0x04, 0x25]))
+    emit(struct.pack('<I', addr))
+    emit(struct.pack('<I', imm))
+
+mov_mem_imm32(INITRD_INFO_ADDR + 0x0, initrd_base & 0xFFFFFFFF)
+mov_mem_imm32(INITRD_INFO_ADDR + 0x4, (initrd_base >> 32) & 0xFFFFFFFF)
+mov_mem_imm32(INITRD_INFO_ADDR + 0x8, initrd_size & 0xFFFFFFFF)
+mov_mem_imm32(INITRD_INFO_ADDR + 0xC, (initrd_size >> 32) & 0xFFFFFFFF)
+
 # ---- 清零页表区 24KB @ 0x10000 (PML4+PDPT+PD0+PD1+PD2+PD3) ----
 emit(bytes([0xBF, 0x00, 0x00, 0x01, 0x00]))  # mov edi, 0x10000
 emit(bytes([0xB9, 0x00, 0x18, 0x00, 0x00]))  # mov ecx, 0x1800 (6144 dwords = 24KB)
@@ -543,9 +577,11 @@ assert len(s2) - data_off == 7 * 24, f'E820 data size mismatch: {len(s2) - data_
 n_s2 = (len(s2) + 511) // 512
 kernel_lba = 1 + n_s2
 struct.pack_into('<I', s2, lba_patch, kernel_lba)
-struct.pack_into('<H', s2, total_patch, ksectors)
+# P4-T5: 连续加载 kernel + initramfs（total_sectors 扇区），而非仅 ksectors
+struct.pack_into('<H', s2, total_patch, total_sectors)
 assert n_s2 * 512 >= len(s2)
-print(f'Stage 2: {len(s2)} bytes ({n_s2} sectors), kernel LBA={kernel_lba}')
+print(f'Stage 2: {len(s2)} bytes ({n_s2} sectors), kernel LBA={kernel_lba}, '
+      f'load {total_sectors} sectors (kernel+initrd)')
 
 # ============================================================
 # STAGE 1 (boot sector @ 0x7C00): EDD 加载 stage 2 → 0x8000
@@ -645,8 +681,9 @@ boot[511] = 0xAA
 # ============================================================
 s2_padded = s2 + bytearray(n_s2 * 512 - len(s2))
 kernel_padded = kernel + bytearray(ksectors * 512 - len(kernel))
+initrd_padded = initrd + bytearray(ird_sectors * 512 - len(initrd))
 
-img = boot + s2_padded + kernel_padded
+img = boot + s2_padded + kernel_padded + initrd_padded
 total_used = len(img) // 512
 assert total_used <= IMG_SECTORS, f'image overflow: {total_used} > {IMG_SECTORS}'
 img += bytearray(IMG_SECTORS * 512 - len(img))
@@ -654,4 +691,5 @@ img += bytearray(IMG_SECTORS * 512 - len(img))
 with open(IMG, 'wb') as f:
     f.write(img)
 print(f'{IMG}: {len(img)} bytes, used {total_used} sectors '
-      f'(stage1=1, stage2={n_s2}@lba1, kernel={ksectors}@lba{kernel_lba})')
+      f'(stage1=1, stage2={n_s2}@lba1, kernel={ksectors}@lba{kernel_lba}, '
+      f'initrd={ird_sectors}@lba{kernel_lba + ksectors})')

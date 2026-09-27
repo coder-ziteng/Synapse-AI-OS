@@ -6,5 +6,10 @@ rust-version.workspace = true
 license.workspace     = true
 publish     = false
 
-# xtask 是宿主工具链二进制——不依赖任何外部 crate，保持零依赖、编译快。
+# xtask 是宿主工具链二进制——运行时零外部依赖，保持编译快。
 # 所有参数解析走 std::env::args；错误走 Result<T, String>。
+#
+# dev-dependency：initramfs cpio 写器的宿主测试用 synapse-elf 解析器做
+# 写↔读闭环验证（仅 cfg(test) 链入，不进 xtask 二进制本体）。
+[dev-dependencies]
+synapse-elf = { path = "../elf" }

@@ -261,6 +261,18 @@ pub fn init_page_frame_allocator() {
         alloc.mark_range_used(kernel_base, kernel_end - kernel_base);
     }
 
+    // 步骤 2.5（P4-T5）: 保留 initramfs 驻留区（stage2 连续加载在内核镜像
+    // 之后，基址/长度来自 0x20100 引导记录，见 initrd.rs）。不出账则分配器
+    // 会把 initrd 页清零复用 → cpio 归档被破坏。
+    if let Some((ird_base, ird_size)) = crate::initrd::region() {
+        alloc.mark_range_used(ird_base, ird_size);
+        info!(
+            "[page_frame] initrd reserved [{:#x}..{:#x}]",
+            ird_base,
+            ird_base + ird_size
+        );
+    }
+
     info!(
         "[page_frame] initialized: total={} free={} ({} KB); kernel reserved [{:#x}..{:#x}]",
         alloc.total_frames(),

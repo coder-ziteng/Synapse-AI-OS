@@ -13,6 +13,7 @@
 
 mod build;
 mod ci;
+mod initramfs;
 mod qemu;
 mod user;
 

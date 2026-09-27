@@ -37,6 +37,8 @@ pub mod bootstrap;
 pub mod smoke;
 pub mod syscall;
 pub mod ring3;
+pub mod initrd;
+pub mod elfload;
 
 // 把 trampoline 汇编链入二进制；`boot.S` 中 `.global _start` 提供链接器 entry。
 global_asm!(include_str!("boot.S"));
@@ -192,6 +194,12 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'J');
     memory_map::memory_map_init();
     boot_marker(b'K');
+
+    // P4-T5 initramfs：读 stage2 写的 0x20100 {base,size} 记录 + cpio magic 校验。
+    // 必须在 page_frame init 之前——分配器步骤 2.5 消费 initrd::region() 出账保留。
+    boot_marker(b'm');
+    initrd::initrd_init();
+    boot_marker(b'n');
 
     // P2-T2 物理页帧分配器：消费 MEMORY_MAP，bitmap 管理 4KB 帧
     boot_marker(b'L');

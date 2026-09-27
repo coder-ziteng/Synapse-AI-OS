@@ -674,7 +674,7 @@
         {
           "id": "P4-T4",
           "name": "Ring3 切换：iret 首次进入 + syscall/sysret",
-          "status": "pending",
+          "status": "done",
           "deliverables": [
             "GDT ring3 代码/数据段启用（P2-T4 已预留）+ TSS.RSP0 per-thread 写入（切线程/进用户态前更新）",
             "MSR_STAR/LSTAR/FMASK 配置 + syscall 入口汇编：swapgs → 切内核栈 → 保存用户态寄存器帧 → dispatch 骨架 → sysret 返回",
@@ -689,12 +689,13 @@
             "P4-T1",
             "P4-T2"
           ],
-          "estimate": "2 窗口"
+          "estimate": "2 窗口",
+          "actual_approach": "GDT ring-3 描述符（CS=0x2B/DS=0x23）+ TSS.RSP0（16KB per-thread 内核栈）+ MSR STAR/LSTAR/FMASK/IA32_KERNEL_GS_BASE 配置；syscall_entry_asm（global_asm!）：swapgs → mov rsp,gs:[0] → push 10 寄存器 SyscallFrame → call syscall_dispatch → pop 还原 → swapgs → sysretq；dispatch 骨架：AbiQuery(#18) 返回 (major<<16)|minor=0x1、ProcessExit(#21) 委托 ring3::handle_process_exit、其余 -E_NOT_IMPLEMENTED(-10)；iretq 首次进入用户态（5 槽帧 RIP/CS/RFLAGS/RSP/SS）+ KERNEL_FRAME 接力回 ring-0 continuation。顺带修两 bug：PML4[0] 缺 PT_USER（CPL=3 在 PML4 级即拒，err=0x15 I/D=1 误报 NX 实为 U/S 违例）；syscall push 顺序错位（num 槽读到 user_RSP 而非 rax）。真机 exit 363 + serial [ring3-smoke] PASS + ABI 值 0x1 经共享页 PA 回读校验 + FR8 归零。根因详见 decision_log 2026-09-27 P4-T4 条目。"
         },
         {
           "id": "P4-T5",
           "name": "静态 ELF 加载器 + initramfs（cpio newc）",
-          "status": "pending",
+          "status": "done",
           "deliverables": [
             "ELF 解析器（纯逻辑 crate 宿主可测）：ET_EXEC 校验、PT_LOAD 解析、段越界/权限错误路径（Doc 02 §2）；不做 PIE/动态链接",
             "cpio newc 解析器（纯逻辑，宿主可测）：header 校验 + 文件提取",
@@ -708,7 +709,8 @@
             "P4-T3",
             "P4-T4"
           ],
-          "estimate": "1-2 窗口"
+          "estimate": "1-2 窗口",
+          "actual_approach": "① synapse-elf 纯逻辑 crate（elf/src/{lib,cpio}.rs，零依赖 no_std、固定数组 MAX_LOAD_SEGMENTS=8、#![deny(unsafe_code)]，宿主 18/18）：ELF64 ET_EXEC 完整校验（magic/class/data/machine/phentsize/phdr 文件边界/memsz≥filesz>0/页同余/W^X 拒 W+X 拒无 R/flags 限 {R,RX,RW}/用户窗口 [1GB,2GB)/段页区间重叠/PT_DYNAMIC 拒绝/entry∈PF_X 段，ElfError 20 变体）+ cpio newc 解析器（\"070701\" magic、110B header 13 字段 ASCII-hex、名字/数据 align4、TRAILER!!! 停止、CpioError 6 变体，entries/find/validate_magic）。② 构建管线：xtask/src/initramfs.rs cpio 写器（hex8 大写、S_IFREG|0755、dev-dep synapse-elf 做写↔读闭环 3 测）→ build.rs 三段（kernel → user::run 构建 hello → build_cpio 打包 → target/initramfs.cpio → build_disk.py 第三参数）；build_disk.py 把 initramfs 追加在 kernel.bin 之后（stage2 现有加载循环连续读入 0x200000+，total_sectors=ksectors+ird_sectors，u16 溢出断言），stage2 在 32-bit PM 往 0x20100 写 {base u64,size u64} 引导记录（C7 04 25 SIB 编码，debug32 'D' 之后）。③ 内核：initrd.rs 读 0x20100 记录 + cpio magic 校验（boot marker m/n，必须在 page_frame init 之前）；page_frame 步骤 2.5 把 initrd 区间出账保留（防清零复用）；elfload.rs smoke：cpio::find 提取 hello → synapse_elf::parse 校验 → 新 AddressSpace 逐 PT_LOAD 页 alloc_frame/清零/拷贝文件交集/map_page(PT_USER|W?WRITABLE|!X?NX) + 4 页 RW+NX 用户栈（entry RSP=TOP-8 满足 rustc \"函数入口 rsp%16==8\" 约定）→ write_kernel_frame(elf_continuation) → activate → enter_user_at(e_entry)；hello ring-3 执行 abi_query(#18) 往返 → process_exit(#21) → iretq 回 elf_continuation（ring-0）：断言 abi_query_count≥1（实测 =2）→ CR3 还原 → 逐页 unmap/free → drop AS → FR8 账本回基线 → exit 363。④ 顺带修两个 T4 遗留 bug（链式 smoke 首次暴露）：handle_process_exit iretq-to-continuation 缺平衡 swapgs → 再进用户态首次 syscall #DF；syscall_entry_asm sysretq 前未还原 user RSP → 用户态带内核栈指针，真实 ELF pop rbp #PF。宿主 elf 18 + xtask 11 全绿；真机三重证据齐（exit 363 + [elf-smoke] PASS 无 PANIC + debugcon m/n/D marker）。"
         },
         {
           "id": "P4-T6",
@@ -1142,6 +1144,11 @@
       "date": "2026-09-27",
       "scope": "P4-T4 Ring3 切换 smoke — 两 bug 修复 + syscall 基础设施贯通",
       "decision": "1) PML4[0] 缺 PT_USER 位：AMD64 页表走查中 U/S 位按层 AND 生效，PML4[0] 为 supervisor-only 导致 CPL=3 在 PML4 级即被拒（err=0x15 I/D=1 P=1 误报 NX violation 实为 U/S 违例）。修复：AddressSpace::new 中 PML4[0] 写 entry 加 PT_USER，下层 PDPT[0]（内核）保留 supervisor-only 仍保内核区不可被用户态访问。2) syscall 入口汇编 push 顺序错位：原序 push r9,r8,r10,rdx,rsi,rdi,rax,r14,r13,r12 导致 SyscallFrame.num（offset 0）读到 user_RSP 而非 rax。修复：改 push 序为 r14(user_RFLAGS), r13(user_RIP), r12(user_RSP), r9, r8, r10, rdx, rsi, rdi, rax —— 栈向低地址增长，LAST push 落在最低地址 = offset 0，故 rax 必须最后 push 才对应 SyscallFrame.num；pop 序同步改为 pop rax, rdi, rsi, rdx, r10, r8, r9, add rsp, 24。真机验收：QEMU exit 363，用户态 _start 跑起 → syscall abi_query(#18) 往返 → 用户态写共享页 → syscall process_exit(#21) → 内核 iretq 回 continuation → ABI 值 0x1 回读校验 → FR8 归零。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4-T5 静态 ELF 加载器 + initramfs — 全链路贯通（顺带补登 P4-T4 状态）",
+      "decision": "设计决策：1) initramfs 进内存方案 — 内核无磁盘驱动（P6 才有），选择扩展 stage2 现有连续加载循环：cpio 追加在 kernel.bin 之后的磁盘扇区，total_sectors 从 ksectors 改为 ksectors+ird_sectors（零汇编循环改动，仅 bump u16 立即数），initrd_base = 0x200000 + ksectors*512 是构建期常量，stage2 在 32-bit PM（平坦段、分页未开）直接写 0x20100 {base,size} 引导记录；位置在 E820 buffer（0x20000..0x200AC）之后的低 1MB 保留区内。page_frame init 步骤 2.5 消费该记录把 initrd 区间出账（否则分配器把 cpio 页清零复用 → 归档破坏）。2) smoke 链式接力 — ring3 smoke 的 return_continuation 由 iretq 直达不返回 main，故其尾部直接调 elf_load_smoke()，由 elf_continuation 负责 exit 363；内核栈复用安全（ksp 均为死帧区域）。3) cpio 写器放 xtask（构建期工具，零运行时依赖纪律），用 [dev-dependencies] synapse-elf 做写↔读闭环测试；解析器放 synapse-elf（内核运行期消费）。4) 用户栈入口约定：rustc 生成的 extern \"C\" fn _start 按函数入口 rsp%16==8（call 语义）做栈对齐假设，iretq 直达无 call 压栈，故 RSP = ELF_STACK_TOP - 8。真机暴露两 bug 修复（T4 手写 stub 不触栈、不再进用户态，故 T4 未暴露）：A) swapgs 收支不平衡 — syscall 入口 swapgs 把 GS.base 切到 &PER_CPU，process_exit 的 handle_process_exit 走 iretq-to-continuation 跳过 sysretq 侧平衡 swapgs；continuation 再 iretq 进新用户上下文时 ring-3 GS.base=内核指针、KERNEL_GS_BASE=旧垃圾 → 用户第一次 syscall 入口 swapgs 把垃圾装入 GS.base → mov rsp,gs:[0] 得垃圾栈指针 → syscall_entry_asm 首条 push r14（0x20aef1）即 fault，异常递送在同栈再失败 → #DF。修复：handle_process_exit 的 iretq 前补 swapgs，恢复 boot 约定（GS.base=用户值、KERNEL_GS_BASE=&PER_CPU），continuation 为普通 ring-0 代码不经 gs:[] 取数；纪律写入 syscall.rs 模块头（绕过 sysretq 的路径必须自行配平）。B) syscall 返回未还原 user RSP — sysretq 不弹 RSP，原实现 pop 7 寄存器后 add rsp,24 停在 kstack_top 就 sysretq，用户态带着内核栈顶指针返回；T4 手写 stub 全程不触栈故 不可见，真实 rustc ELF（invoke() 的 pop rbp）立刻 #PF（fault_addr=0x3a9010 即内核栈区，用户 AS 未映射）。修复：add rsp,24 改 mov rsp,r12（r12=user_RSP，SysV callee-saved，dispatch 保证还原）。真机验收：exit 363、serial [elf-smoke] 全 ok 无 PANIC（abi_query count=2 = ring3 smoke 1 + hello 1）、debugcon m/n（initrd_init）+ stage12 'D'（引导记录写入）、宿主 elf 18/18 + xtask 11/11（含 cpio 写读闭环）。"
     }
   ],
   "current_task": "P3-T6",

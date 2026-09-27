@@ -19,7 +19,9 @@
 //! ## swapgs 纪律（AMD64 Vol.2 §4 syscall/sysret）
 //!
 //! - 进入：先 `swapgs`（让 GS.base 切到 per-CPU kernel GS，访问 kstack_top）；
-//! - 返回：再 `swapgs`（切回 user GS）；
+//! - 返回：再 `swapgs`（切回 user GS）；**绕过 sysretq 的路径必须自行配平**
+//!   （`ring3::handle_process_exit` 的 iretq-to-continuation 在跳前补 `swapgs`，
+//!   否则后续再进用户态时首次 syscall 的 swapgs 会装入垃圾 GS.base → #DF）；
 //! - GS.base 在用户态可被用户程序写 — 内核态数据绝不能依赖 GS.base 直读，
 //!   一律经 `swapgs` 后的 kernel GS 取。
 //!
@@ -35,7 +37,7 @@
 use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use synapse_abi::{SyscallFrame, SyscallId, ABI_MAJOR, ABI_MINOR};
 
@@ -133,9 +135,12 @@ core::arch::global_asm!(
 
     // syscall_dispatch 返回 i64 在 rax — dispatcher 已写回 frame.num 槽。
     // 栈上布局（低→高）：rax, rdi, rsi, rdx, r10, r8, r9, user_RSP, user_RIP, user_RFLAGS
-    // pop 顺序必须从低偏移到高偏移：先 pop rax（返回值），再 pop 6 args，
-    // 最后 add rsp, 24 跳过栈上的 user_RSP/RIP/RFLAGS 三份（r12/r13/r14 仍持有副本
-    // 用于 sysretq 的 rcx/r11 装载）。
+    // pop 顺序必须从低偏移到高偏移：先 pop rax（返回值），再 pop 6 args。
+    //
+    // **user RSP 必须由内核显式还原**（P4-T5 真机暴露）：sysretq 不弹 RSP —
+    // 原实现 `add rsp, 24` 后 RSP 停在 kstack_top，用户态带着内核栈指针返回，
+    // 真实 ELF（rustc 生成 push/pop）立刻 #PF。T4 手写 stub 不触栈故未暴露。
+    // r12/r13/r14 为 SysV callee-saved，dispatch（Rust extern "C"）保证还原。
     "pop rax",               // offset 0: dispatch 返回的 syscall 结果
     "pop rdi",               // offset 8:  args[0] 还原
     "pop rsi",               // offset 16: args[1] 还原
@@ -143,7 +148,7 @@ core::arch::global_asm!(
     "pop r10",               // offset 32: args[3] 还原
     "pop r8",                // offset 40: args[4] 还原
     "pop r9",                // offset 48: args[5] 还原
-    "add rsp, 24",           // 弃栈上的 user_RSP/RIP/RFLAGS（offset 56/64/72）
+    "mov rsp, r12",          // 还原 user RSP（跳过 offset 56/64/72 三个保留槽）
 
     // 准备 sysretq：RCX=user_RIP，R11=user_RFLAGS（从 callee-saved r12/r13/r14 取回）
     "mov rcx, r13",
@@ -243,6 +248,15 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 // C-ABI 分发（syscall 入口 asm 调用此函数）
 // ---------------------------------------------------------------------------
 
+/// abi_query 成功分发计数（P4-T5 elf smoke 断言"用户 ELF 真实执行过
+/// syscall 往返"的内核侧证据；P4-T9 进程表接线后并入 per-process 统计）。
+static ABI_QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// 读取 abi_query 分发计数。
+pub fn abi_query_count() -> u64 {
+    ABI_QUERY_COUNT.load(Ordering::SeqCst)
+}
+
 /// syscall 主分发（C-ABI）。
 ///
 /// 入口约定：
@@ -258,6 +272,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> i64 {
     let num = frame.num;
     match SyscallId::from_num(num) {
         Some(SyscallId::AbiQuery) => {
+            ABI_QUERY_COUNT.fetch_add(1, Ordering::SeqCst);
             let v = ((ABI_MAJOR as u64) << 16) | (ABI_MINOR as u64);
             frame.num = v;
             v as i64
