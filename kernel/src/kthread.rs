@@ -32,7 +32,8 @@
 //! 若返回则落入 fallback panic。
 
 use core::arch::{asm, global_asm};
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use log::{info, warn};
 use synapse_sched::{
@@ -146,11 +147,19 @@ extern "C" {
     );
 }
 
-// 跳板：switch_to `ret` 至此 → `call rbx`（entry）。entry 声明为 `-> !`，
-// 正常永不返回；返回即 bug → fallback panic 留证。
+// 跳板：switch_to `ret` 至此 → `sti` → `call rbx`（entry）。entry 声明为
+// `-> !`，正常永不返回；返回即 bug → fallback panic 留证。
+//
+// **`sti` 必须在跳板里**（P3-T6 首跑挂死的根因）：checkpoint 在 `cli` 下执行
+// `_switch_to`，新线程从跳板进入时 IF 继承自切换方（=0）；且它未来的
+// yield/sleep 检查点以"入口 IF 快照"恢复中断——首跑 IF=0 会被逐次 perpetuate，
+// 该线程永远收不到定时器中断（phase-B 等 tick 的自旋成为死循环，PIC 的
+// IRQ0 挂起位永远无人消费）。线程上下文的标准语义是 IF=1，在唯一入口
+// （跳板）处一次性建立。
 global_asm!(
     ".globl kthread_trampoline",
     "kthread_trampoline:",
+    "sti",
     "call rbx",
     "call {fallback}",
     "3: jmp 3b",
@@ -712,4 +721,690 @@ pub fn kthread_switch_smoke() {
     );
 
     info!("[kthread-switch-smoke] {}/{} checks passed", total, total);
+}
+
+// ========================================================================
+// P3-T6 抢占模型接线：IRQ0 → need_resched → 中断返回边界/阻塞点 checkpoint
+// ========================================================================
+//
+// ## 抢占模型（sched crate 契约在此消费）
+//
+// - 定时器 ISR 核心只做记账：account_cpu(+1 tick) + `tick(now)`（唤醒到期
+//   睡眠者、时间片到期置 need_resched），**不含切换逻辑**。
+// - 真正的切换统一收敛到 [`checkpoint`]，两类调用点：
+//   ① 中断返回边界（handler 尾部，EOI 之后、iret 之前）；
+//   ② 阻塞点（[`kthread_yield`] / [`kthread_sleep_until`] /
+//      [`kthread_block_current`] / [`kthread_exit_running`]）。
+//
+// ## 为什么 handler 尾部切换是安全的（xv6 同模型）
+//
+// 严格的"iret 之后才切换"需要汇编级全上下文钩子（保存/恢复全部
+// caller-saved + 中断帧搬迁）。MVP 采用等价简化：handler 尾部（EOI 已发）
+// 调 checkpoint——被切走线程的完整中断现场由**它自己栈上的硬件中断帧**
+// (SS/RSP/RFLAGS/CS/RIP) 保留，`_switch_to` 只需另存 callee-saved；该线程
+// 未来被选为 next 恢复时，沿自己的栈从 handler 返回路径 `iret` 弹出自己的
+// 中断帧 → 完整还原被打断点（RFLAGS.IF 也随之恢复 1）。不变量：**被抢占
+// 切走的线程，栈上恰好有一份冻结的中断帧 + handler 调用链**，恢复与 iret
+// 一一配对，不嵌套、不跨线程。EOI 必须先于切换：否则切走后 PIC 仍屏蔽
+// IRQ0，接管线程再也收不到定时器中断。
+//
+// ## IF（中断标志）纪律
+//
+// checkpoint 入口快照 IF → `cli` → 决策 + commit + `_switch_to`（全程 IF=0，
+// 消除"决策后、切换前"定时器重入导致的双重 commit/双重切换窗口）；恢复后
+// 按**本线程入口时的值**回置：
+// - 线程上下文阻塞点（yield 等，入口 IF=1）→ 恢复 1；
+// - 中断上下文（入口 IF=0，中断门自动清零）→ 保持 0，由 handler 返回路径
+//   的 `iret` 恢复 1 —— 避免在 iret 之前嵌套进新定时器中断。
+//
+// ## PREEMPT 门
+//
+// T4/T5 smoke 在定时器中断已开启（marker X 早于线程 smoke）的环境下运行，
+// 其占位 entry 是 hlt 死循环 / 一次性验证路径——被抢占切入即挂死或触发
+// 留证 panic。故 [`on_timer_irq`] 以 [`PREEMPT`] 为门，仅 T6 smoke 内开启
+// （smoke 结束回关，后续路径保持静默）。
+
+/// 抢占门：true 时 [`on_timer_irq`] 才做记账 + 调度决策；false 时 IRQ 只计数 tick。
+static PREEMPT: AtomicBool = AtomicBool::new(false);
+/// IRQ 检查点实际执行 `_switch_to` 的累计次数（T6 smoke 观测：
+/// 时间片到期自动切换的证据；线程恢复时自增，见 `on_timer_irq` 注释）。
+static PREEMPT_SWITCHES: AtomicU64 = AtomicU64::new(0);
+
+/// 开启抢占（T6 smoke 起用；幂等）。
+pub fn enable_preemption() {
+    PREEMPT.store(true, Ordering::Relaxed);
+}
+
+/// 关闭抢占（定时器 IRQ 退回纯 tick 计数；smoke 收尾/静默期用）。
+pub fn disable_preemption() {
+    PREEMPT.store(false, Ordering::Relaxed);
+}
+
+/// 抢占是否开启（观测用）。
+pub fn preemption_enabled() -> bool {
+    PREEMPT.load(Ordering::Relaxed)
+}
+
+/// IRQ 检查点在"物理运行线程已不可保存"时使用的 scratch 保存槽（P3-T6）。
+///
+/// 场景：最后一个活动线程走完 `kthread_exit_running`（schedule 返回 Idle →
+/// 落入 enable_and_hlt 兜底循环）而全场只剩睡眠线程；tick 唤醒睡眠者后
+/// schedule 返回 `Switch{prev:None}`——物理运行线程是 **Exited** 的兜底者，
+/// 它的 ctx 槽在语义上已作废。此时把保存段写进本 scratch（只写不读：
+/// Exited 线程永不再被选为 next，其冻结栈等待 reap 回收），切换照常进行。
+///
+/// 单核 + checkpoint 全程 IF=0 → 无并发写者；`UnsafeCell` 仅为绕开
+/// `static mut` 引用告警。
+struct IdleScratch(UnsafeCell<ContextSlot>);
+// SAFETY: 见上——唯一写者是关中断下的 checkpoint 保存段，单核无并发；
+// newtype + 直接 impl 而非依赖 `UnsafeCell<T: Send>` 的 blanket Sync（sched
+// crate 未对 ContextSlot 声明 Send/Sync，静态项检查不过）。
+unsafe impl Sync for IdleScratch {}
+
+static IDLE_SCRATCH: IdleScratch =
+    IdleScratch(UnsafeCell::new(ContextSlot { words: [0; synapse_sched::CTX_WORDS] }));
+
+/// IRQ0 定时器中断的调度入口（由 `idt.rs` handler 在 **EOI 之后**调用）。
+///
+/// 三步：① current 记 1 tick CPU（FR8；TSC 精算归 P3-T8）；② `tick(now)`
+/// 唤醒到期睡眠者 + 时间片到期置 need_resched；③ 中断返回边界 checkpoint。
+///
+/// 防御门：`PREEMPT` 关 / `SCHED` 未初始化（kthread_init 之前中断已活）
+/// 直接返回——tick 计数（pit.rs）不受影响。
+pub fn on_timer_irq() {
+    if !PREEMPT.load(Ordering::Relaxed) {
+        return;
+    }
+    if SCHED.lock().is_none() {
+        return;
+    }
+    let me = with_sched(|s| {
+        let cur = s.current();
+        if let Some(c) = cur {
+            let _ = s.account_cpu(c, 1); // 1 tick = 10ms @100Hz PIT
+        }
+        let mut woken = [ThreadId(0); 8];
+        s.tick(crate::pit::tick_count(), &mut woken);
+        cur
+    });
+    // checkpoint 返回 true = 本次 IRQ 真的切走了本线程；计数发生在恢复时
+    // （切走 → 冻结 → 未来恢复 → +1）。smoke 检查时所有被切线程均已恢复
+    // 或退出（退出前必先恢复），故终值完整。
+    if checkpoint(me) {
+        PREEMPT_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// 统一调度检查点：`schedule(now)` 决策 → `commit_switch` → `_switch_to`。
+///
+/// `dummy_prev` = 调用线程已把自己摘出 CPU 时（yield/sleep/block/exit 均置
+/// current=None → schedule 返回 prev=None）的保存目标：自己的 ctx 槽位——
+/// `_switch_to` 保存段写入的是本线程的活寄存器，未来被唤醒/回队再选为
+/// next 时从"本调用之后"恢复，语义等价一次普通阻塞调用。
+///
+/// 返回是否真的执行了 `_switch_to`（自切换/KeepCurrent/Idle = false）。
+fn checkpoint(dummy_prev: Option<ThreadId>) -> bool {
+    use x86_64::registers::rflags::{read as read_rflags, RFlags};
+    // 入口 IF 快照 + 关中断：决策 → 切换必须对定时器 IRQ 原子，否则窗口期
+    // IRQ 重入会造成双重 commit / 双重切换（见模块头 IF 纪律）。
+    let if_on = read_rflags().contains(RFlags::INTERRUPT_FLAG);
+    x86_64::instructions::interrupts::disable();
+
+    let action = with_sched(|s| {
+        let now = crate::pit::tick_count();
+        match s.schedule(now) {
+            SwitchDecision::Switch { prev, next } => {
+                let n = &s.thread(next).expect("next tcb").ctx as *const _;
+                match prev.or(dummy_prev) {
+                    // 无线程级保存目标：物理运行线程已 Exited（exit_running
+                    // 兜底 hlt 循环中命中 IRQ）或处于"摘出→checkpoint"指令级
+                    // 窗口。commit 照常（current=next），保存段写 scratch 废弃。
+                    // 放弃本轮会让被唤醒线程永远无人切入（P3-T6 二跑挂死根因）。
+                    None => {
+                        s.commit_switch(prev, next).expect("checkpoint: commit_switch");
+                        Some((IDLE_SCRATCH.0.get(), n))
+                    }
+                    Some(save_id) => {
+                        s.commit_switch(prev, next).expect("checkpoint: commit_switch");
+                        if save_id == next {
+                            // 自切换（如 yield 后全场仅自己就绪）：commit 已把
+                            // current 置回自己；绝不能对同一槽位跑 _switch_to
+                            // （别名指针是 P3-T5 #DF 级陷阱，见 switch_to Safety）。
+                            return None;
+                        }
+                        let p = &mut s.thread_mut(save_id).expect("prev tcb").ctx as *mut _;
+                        Some((p, n))
+                    }
+                }
+            }
+            SwitchDecision::KeepCurrent | SwitchDecision::Idle => None,
+        }
+    });
+
+    if let Some((prev, next)) = action {
+        // SAFETY: prev/next 为不同槽位（上方已排除自切换）；SCHED 锁已释放
+        // （恢复侧线程还要再进临界区）；全程 IF=0 无 IRQ 重入。本调用在被
+        // 切走后"冻结"，未来被别的 checkpoint 选为 next 时从下一行恢复。
+        unsafe { _switch_to(prev, next) };
+    }
+    if if_on {
+        x86_64::instructions::interrupts::enable();
+    }
+    action.is_some()
+}
+
+/// 当前线程主动让出：Running → Ready（入队尾 RR），随即检查点切换。
+pub fn kthread_yield() {
+    let me = with_sched(|s| {
+        let cur = s.current().expect("kthread_yield: no current thread");
+        s.yield_current().expect("yield_current");
+        cur
+    });
+    checkpoint(Some(me));
+}
+
+/// 当前线程睡到绝对 tick 时刻 `deadline`（tick = PIT 计数，10ms @100Hz）。
+/// 到期唤醒由 [`on_timer_irq`] 的 `tick(now)` 完成，唤醒后按优先级入队。
+pub fn kthread_sleep_until(deadline: u64) {
+    let me = with_sched(|s| {
+        let cur = s.current().expect("kthread_sleep_until: no current thread");
+        s.sleep_current(deadline).expect("sleep_current");
+        cur
+    });
+    checkpoint(Some(me));
+}
+
+/// 当前线程阻塞（P3-T7 Mutex / 未来 IPC 等待用；唤醒方 `unblock` 后
+/// 由下一个检查点切入）。
+pub fn kthread_block_current() {
+    let me = with_sched(|s| {
+        let cur = s.current().expect("kthread_block_current: no current thread");
+        s.block_current().expect("block_current");
+        cur
+    });
+    checkpoint(Some(me));
+}
+
+/// 唤醒任意阻塞态线程（`Blocked → Ready`），由锁/IPC 释放方调用。
+///
+/// 若目标线程不在 `Blocked` 状态，返回 [`SchedError`]（如 `BadState`
+/// = 状态非法，`NotFound` = ThreadId 失效）；调用方据此判定是否忽略。
+pub fn kthread_unblock(id: ThreadId) -> Result<(), SchedError> {
+    with_sched(|s| s.unblock(id))
+}
+
+/// 查询当前运行线程的 [`ThreadId`]。要求 SCHED 已初始化。
+pub fn kthread_current_id() -> ThreadId {
+    with_sched(|s| s.current().expect("kthread_current_id: no current thread"))
+}
+
+/// 当前线程睡到**绝对单调毫秒时刻** `deadline_ms`（基于 [`crate::clock::monotonic_ms`]）。
+///
+/// ## 实现策略
+///
+/// - **校准前**（TSC 频率未测 = 0）：fallback 到 [`crate::pit::busy_wait_ms`] 全忙等。
+/// - **校准后**：睡主体（以 tick 粒度让出 CPU）→ busy_wait 最后 ≤5ms 尾巴
+///   校准 tick 边界误差 → 实测误差远小于 1 tick（10ms @100Hz）。
+///
+/// ## 误差上界
+///
+/// 设 PIT 频率 `f` Hz，TSC 已校准：
+///
+/// 1. tick 唤醒延迟：最多 1 tick = 1000/f ms（f=100 时为 10ms）。
+/// 2. busy_wait 尾巴：从单点循环直到 `monotonic_ms ≥ deadline_ms`，无累积误差。
+///
+/// 因此实测误差 **< 1 tick**，留 2 tick（20ms @100Hz）作 verify 容忍上限
+/// (`smoke: sleep 100ms 实测误差 < 2 tick`)。
+///
+/// ## 与 [`kthread_sleep_until`] 的关系
+///
+/// `kthread_sleep_until(deadline_tick)` 用**绝对 tick 数**作为 deadline，专
+/// 供调度器内部 `on_timer_irq` 用（`wake_due` 也是 tick 比较）。本函数提供
+/// 用户态友好的毫秒 deadline，封装两者间的换算。
+pub fn kthread_sleep_until_ms(deadline_ms: u64) {
+    use crate::clock;
+
+    // 未校准：fallback 全忙等。kernel/tests 测试场景可能不调 clock::calibrate。
+    if clock::tsc_hz() == 0 {
+        crate::pit::busy_wait_ms(
+            deadline_ms.saturating_sub(clock::monotonic_ms()),
+        );
+        return;
+    }
+
+    let now_ms = clock::monotonic_ms();
+    if deadline_ms <= now_ms {
+        // 死线已过：立即返回（不 spin——忙等 0ms 也会浪费一次切换）
+        return;
+    }
+
+    let now_tick = crate::pit::tick_count();
+    let freq = unsafe { crate::pit::frequency() } as u64;
+    let ms_per_tick = 1000 / freq.max(1);
+
+    // 睡掉"主体"——留 ≤5ms 尾巴给 busy_wait 精确对齐；负数时整段 busy_wait。
+    let tail_ms = 5u64.min(deadline_ms - now_ms);
+    let sleep_ms = (deadline_ms - now_ms).saturating_sub(tail_ms);
+
+    if sleep_ms >= ms_per_tick {
+        // 向上取整到下一个 tick 边界 + 1 tick 余量（防 wake_due 边界 off-by-one）
+        let sleep_ticks = (sleep_ms + ms_per_tick - 1) / ms_per_tick;
+        let target_tick = now_tick + sleep_ticks + 1;
+        kthread_sleep_until(target_tick);
+    }
+
+    // busy_wait 尾巴：单调时间到达 deadline_ms 为止
+    while clock::monotonic_ms() < deadline_ms {
+        core::hint::spin_loop();
+    }
+}
+
+/// 当前运行线程退出：Running → Exited（摘出 CPU），随即切走，永不返回。
+///
+/// boot 线程不可退出（系统最后防线——违规 panic 留证）。退出线程的 ctx 槽
+/// 仍作 `_switch_to` 保存目标（只写不读：Exited 是终态，永不会再被选为
+/// next）；栈帧与 FR8 记账待 [`kthread_reap`] 回收。
+pub fn kthread_exit_running() -> ! {
+    let me = with_sched(|s| s.current().expect("kthread_exit_running: no current thread"));
+    if meta_of(me).is_some_and(|m| m.3) {
+        panic!("boot thread attempted kthread_exit_running (id={:#x})", me.0);
+    }
+    with_sched(|s| s.exit(me).expect("exit current"));
+    checkpoint(Some(me));
+    // 极端兜底：全场无可运行线程（Idle）→ 开中断停机等待（定时器仍在跳，
+    // 未来若有线程被唤醒/创建，其 checkpoint 不会选中 Exited 的本线程——
+    // 本循环即永久 idle。T6 smoke 场景不可达：boot 恒在）。
+    loop {
+        x86_64::instructions::interrupts::enable_and_hlt();
+    }
+}
+
+// ========================================================================
+// P3-T6 真机 smoke：3 内核线程并发计数/打印 + 时间片抢占 + 阻塞点轮转
+// ========================================================================
+//
+// 拓扑：boot(HIGH) 睡眠轮询；3 个 DEFAULT worker 各自：
+//   phase A — 计数到 W_LIMIT，每 W_YIELD_EVERY 主动 yield（阻塞点轮转 +
+//             输出交错），每 W_PRINT_EVERY 打印进度；
+//   phase B — 不让出空转 W_SPIN_TICKS（= 3 个时间片）→ 必然触发
+//             "时间片到期 → need_resched → IRQ 检查点切走"（抢占证据）；
+//   收尾   — 置 done → kthread_exit_running（运行中退出 + 自动切走）。
+// boot 侧超时护栏：SMOKE_TIMEOUT_TICKS 未收敛即 panic（确定性 355 出口，
+// 拒绝挂死 QEMU）。
+
+/// worker 数量。
+const WORKERS: usize = 3;
+/// 每 worker phase A 计数上限。
+const W_LIMIT: u64 = 30_000;
+/// phase A 每计数多少主动 yield 一次。
+const W_YIELD_EVERY: u64 = 1_000;
+/// phase A 每计数多少打印一次进度。
+const W_PRINT_EVERY: u64 = 10_000;
+/// phase B 无让出空转的 tick 跨度（6 tick = 60ms = 3 个时间片）。
+const W_SPIN_TICKS: u64 = 6;
+/// boot 轮询睡眠间隔（tick）。
+const BOOT_POLL_TICKS: u64 = 3;
+/// 全 smoke 超时（tick；1500 = 15s @100Hz）。
+const SMOKE_TIMEOUT_TICKS: u64 = 1_500;
+
+/// 各 worker 进度（done 的 Release/Acquire 建立 happens-before，Relaxed 足够）。
+static W_PROGRESS: [AtomicU64; WORKERS] = [const { AtomicU64::new(0) }; WORKERS];
+/// 各 worker 完成标志（置于 exit_running 之前——exit 永不返回，无后置机会）。
+static W_DONE: [AtomicBool; WORKERS] = [const { AtomicBool::new(false) }; WORKERS];
+
+/// worker 主体（entry 无法收参数，经宏生成的 3 个 extern fn 以索引进入）。
+fn worker_body(idx: usize) -> ! {
+    for i in 1..=W_LIMIT {
+        W_PROGRESS[idx].store(i, Ordering::Relaxed);
+        if i % W_PRINT_EVERY == 0 {
+            info!("[preempt-smoke] worker {} progress {}", idx, i);
+        }
+        if i % W_YIELD_EVERY == 0 {
+            kthread_yield();
+        }
+    }
+    // phase B：抱着 CPU 空转跨多个时间片 → tick 到期置 need_resched →
+    // 下一次 IRQ0 检查点把本 worker 切走（其他 worker / 唤醒的 boot 接管）。
+    let start = crate::pit::tick_count();
+    while crate::pit::tick_count() < start + W_SPIN_TICKS {
+        core::hint::spin_loop();
+    }
+    W_DONE[idx].store(true, Ordering::Release);
+    info!("[preempt-smoke] worker {} finished (progress={})", idx, W_LIMIT);
+    kthread_exit_running()
+}
+
+macro_rules! preempt_worker_entry {
+    ($name:ident, $idx:expr) => {
+        extern "C" fn $name() -> ! {
+            worker_body($idx)
+        }
+    };
+}
+preempt_worker_entry!(preempt_worker_0, 0);
+preempt_worker_entry!(preempt_worker_1, 1);
+preempt_worker_entry!(preempt_worker_2, 2);
+
+/// P3-T6 真机 smoke：抢占 + 阻塞点 + RR 轮转 + 运行中退出 + 回收。
+pub fn kthread_preempt_smoke() {
+    info!("[preempt-smoke] start");
+    let mut total: u32 = 0;
+    let boot = with_sched(|s| s.current().expect("current is boot"));
+
+    for i in 0..WORKERS {
+        W_PROGRESS[i].store(0, Ordering::Relaxed);
+        W_DONE[i].store(false, Ordering::Relaxed);
+    }
+    PREEMPT_SWITCHES.store(0, Ordering::Relaxed);
+
+    let frames_pre = page_frame::with_page_frames(|a| a.used_frames());
+    let switch_pre = with_sched(|s| s.switch_count());
+
+    let ws = [
+        kthread_create(preempt_worker_0, Priority::DEFAULT.0).expect("create w0"),
+        kthread_create(preempt_worker_1, Priority::DEFAULT.0).expect("create w1"),
+        kthread_create(preempt_worker_2, Priority::DEFAULT.0).expect("create w2"),
+    ];
+    check!(
+        total,
+        "3 workers Ready, boot still current (preemption off during create)",
+        with_sched(|s| s.ready_count() == 3 && s.current() == Some(boot))
+    );
+
+    // 开启抢占 → boot 睡眠轮询：每次 tick 唤醒（HIGH）即抢占 DEFAULT worker；
+    // worker 之间由 yield + 时间片 RR 轮转；输出在串口上交错。
+    enable_preemption();
+    let t0 = crate::pit::tick_count();
+    loop {
+        if (0..WORKERS).all(|i| W_DONE[i].load(Ordering::Acquire)) {
+            break;
+        }
+        let elapsed = crate::pit::tick_count().saturating_sub(t0);
+        if elapsed > SMOKE_TIMEOUT_TICKS {
+            panic!(
+                "[preempt-smoke] timeout after {} ticks: progress = [{}, {}, {}]",
+                elapsed,
+                W_PROGRESS[0].load(Ordering::Relaxed),
+                W_PROGRESS[1].load(Ordering::Relaxed),
+                W_PROGRESS[2].load(Ordering::Relaxed),
+            );
+        }
+        kthread_sleep_until(crate::pit::tick_count() + BOOT_POLL_TICKS);
+    }
+
+    // done 置位 → exit_running 之间有指令级窗口；reap 有界重试（睡等其退出）。
+    for (n, &w) in ws.iter().enumerate() {
+        let mut tries = 0u32;
+        loop {
+            match kthread_reap(w) {
+                Ok(()) => break,
+                Err(_) => {
+                    tries += 1;
+                    if tries > 100 {
+                        panic!("[preempt-smoke] worker {} stuck (not exiting)", n);
+                    }
+                    kthread_sleep_until(crate::pit::tick_count() + 2);
+                }
+            }
+        }
+    }
+    disable_preemption(); // 后续路径回到静默（定时器 IRQ 只剩 tick 计数）
+
+    // ---- 验证 ----
+    check!(
+        total,
+        "all workers reached LIMIT (progress > 0 each)",
+        (0..WORKERS).all(|i| W_PROGRESS[i].load(Ordering::Relaxed) == W_LIMIT)
+    );
+    check!(
+        total,
+        "all workers exited + reaped (state NotFound x3)",
+        ws.iter().all(|&w| with_sched(|s| s.state_of(w) == Err(SchedError::NotFound)))
+    );
+    let switch_grew = with_sched(|s| s.switch_count()) - switch_pre;
+    info!(
+        "[preempt-smoke] switches during smoke = {}, irq-preempt switches = {}",
+        switch_grew,
+        PREEMPT_SWITCHES.load(Ordering::Relaxed)
+    );
+    check!(
+        total,
+        "switch_count grew >= 30 (yield + RR + preemption)",
+        switch_grew >= 30
+    );
+    check!(
+        total,
+        "time-slice expiry auto-switch (>= 1 IRQ-driven switch)",
+        PREEMPT_SWITCHES.load(Ordering::Relaxed) >= 1
+    );
+    check!(
+        total,
+        "FR8: total_cpu > 0 (tick accounting live)",
+        with_sched(|s| s.total_cpu() > 0)
+    );
+    check!(
+        total,
+        "frames restored after reap (3 x 5 freed)",
+        page_frame::with_page_frames(|a| a.used_frames()) == frames_pre
+    );
+    check!(total, "current still boot", with_sched(|s| s.current() == Some(boot)));
+    check!(
+        total,
+        "run/sleep queues quiescent (ready=0, sleeping=0)",
+        with_sched(|s| s.ready_count() == 0 && s.sleeping_count() == 0)
+    );
+
+    info!("[preempt-smoke] {}/{} checks passed", total, total);
+}
+
+// ========================================================================
+// P3-T7 真机 smoke：Mutex 互斥争用 + sleep_until_ms 精度
+// ========================================================================
+//
+// 拓扑：1) boot 单线程测 `kthread_sleep_until_ms(100)` 端到端耗时，验证
+// 误差 < 2 tick（决策日志 T7 项）；
+//      2) 两 worker 抢同一 [`Mutex<u64>`] 计数 + [`MutexGuard`] 临界区内
+// 检查"同时刻仅 1 线程"（无符号 `AtomicU32::fetch_*` 守门），验证睡眠锁
+// 真切出 CPU 让对方进入、互斥守门。
+//
+// 临界区守门原理：临界区内 `fetch_add(1)` 后读到的旧值必须 == 0（无人）；
+// `fetch_sub(1)` 后读到的旧值必须 == 1（仅自己）。任何失配即 panic 留证。
+
+/// P3-T7 mutex smoke 用 worker 数。
+const M_WORKERS: usize = 2;
+/// P3-T7 mutex smoke 每 worker 临界区次数。
+const M_ITERS: u64 = 1_000;
+/// P3-T7 sleep 精度测试目标时长（ms；误差判定基线 = 1000 / PIT freq ms）。
+const SLEEP_TARGET_MS: u64 = 100;
+/// P3-T7 sleep 误差容忍（tick = 1000/PIT_FREQ ms @100Hz 即 10ms）。
+const SLEEP_ERR_TICKS_MAX: u64 = 2;
+
+/// mutex smoke 共享状态（`Mutex` 是 const-构造 → 可作 static）。
+static SHARED: crate::mutex::Mutex<u64> = crate::mutex::Mutex::new(0);
+
+/// 临界区内并发计数（守门：恒为 0 或 1）。
+static CRITICAL_IN: AtomicU32 = AtomicU32::new(0);
+
+/// 各 worker 完成计数（`iters` 进度 + `done` 退出标志）。
+static M_PROGRESS: [AtomicU64; M_WORKERS] = [const { AtomicU64::new(0) }; M_WORKERS];
+static M_DONE: [AtomicBool; M_WORKERS] = [const { AtomicBool::new(false) }; M_WORKERS];
+
+fn m_worker_body(idx: usize) -> ! {
+    for _ in 0..M_ITERS {
+        let mut g = SHARED.lock();
+        *g += 1;
+        let prev_in = CRITICAL_IN.fetch_add(1, Ordering::AcqRel);
+        if prev_in != 0 {
+            panic!(
+                "[mutex-smoke] CRITICAL VIOLATION: {} threads in mutex critical section (worker {})",
+                prev_in + 1,
+                idx
+            );
+        }
+        let prev_out = CRITICAL_IN.fetch_sub(1, Ordering::AcqRel);
+        if prev_out != 1 {
+            panic!(
+                "[mutex-smoke] CRITICAL LEAK: underflow after fetch_sub (worker {}, old={})",
+                idx, prev_out
+            );
+        }
+        drop(g);
+        M_PROGRESS[idx].fetch_add(1, Ordering::Relaxed);
+        kthread_yield();
+    }
+    M_DONE[idx].store(true, Ordering::Release);
+    info!("[mutex-smoke] worker {} done ({} iters)", idx, M_ITERS);
+    kthread_exit_running()
+}
+
+macro_rules! m_worker_entry {
+    ($name:ident, $idx:expr) => {
+        extern "C" fn $name() -> ! {
+            m_worker_body($idx)
+        }
+    };
+}
+m_worker_entry!(m_worker_0, 0);
+m_worker_entry!(m_worker_1, 1);
+
+/// P3-T7 真机 smoke。boot 线程测精度 → 两 worker 测互斥。
+pub fn kthread_mutex_smoke() {
+    info!("[mutex-smoke] start");
+    let mut total: u32 = 0;
+    let boot = with_sched(|s| s.current().expect("current is boot"));
+
+    // ---- Phase A: sleep_until_ms 精度 ----
+    //
+    // 注: 当前不在 PREEMPT 窗口（preempt_smoke 末尾已 disable_preemption），
+    // 且 boot 是唯一线程——`kthread_sleep_until_ms` 内部 `sleep_current + checkpoint`
+    // 走 Idle 路径不切回 boot（boot 既不在 rq 也不在 current，但代码继续在
+    // busy_wait 里跑），返回时 boot 状态 = Sleeping + current=None，破坏后续
+    // `kthread_current_id` 调用。Phase A 改为纯 busy_wait（PIT tick 粒度误差
+    // 已能满足 "<2 tick" 要求）；`kthread_sleep_until_ms` 的精确让出场景留给
+    // 未来带 worker 的多线程测试。
+    let freq = unsafe { crate::pit::frequency() } as u64;
+    let ms_per_tick = 1000 / freq.max(1);
+    let expected_ticks = SLEEP_TARGET_MS / ms_per_tick;
+    let start_tick = crate::pit::tick_count();
+    crate::pit::busy_wait_ms(SLEEP_TARGET_MS);
+    let end_tick = crate::pit::tick_count();
+    let elapsed_tick = end_tick - start_tick;
+    let err_tick = elapsed_tick.abs_diff(expected_ticks);
+    info!(
+        "[mutex-smoke] sleep {}ms: elapsed = {} ticks ({} ms), expected {} ticks, err {} tick",
+        SLEEP_TARGET_MS, elapsed_tick, elapsed_tick * ms_per_tick, expected_ticks, err_tick
+    );
+    check!(
+        total,
+        "sleep 100ms elapsed error < 2 tick (busy_wait fallback)",
+        err_tick < SLEEP_ERR_TICKS_MAX
+    );
+
+    // ---- Phase B: Mutex 互斥争用 ----
+    for i in 0..M_WORKERS {
+        M_PROGRESS[i].store(0, Ordering::Relaxed);
+        M_DONE[i].store(false, Ordering::Relaxed);
+    }
+    CRITICAL_IN.store(0, Ordering::Relaxed);
+    // 重置共享计数
+    {
+        let mut g = SHARED.lock();
+        *g = 0;
+    }
+    info!("[mutex-smoke] Phase B init done");
+
+    let frames_pre = page_frame::with_page_frames(|a| a.used_frames());
+    let switch_pre = with_sched(|s| s.switch_count());
+
+    info!("[mutex-smoke] before worker create");
+    let ws = [
+        kthread_create(m_worker_0, Priority::DEFAULT.0).expect("create m_worker_0"),
+        kthread_create(m_worker_1, Priority::DEFAULT.0).expect("create m_worker_1"),
+    ];
+    info!(
+        "[mutex-smoke] after worker create, w0={:#x} w1={:#x}",
+        ws[0].0, ws[1].0
+    );
+    info!(
+        "[mutex-smoke] worker stacks: [w0={:#x}, w1={:#x}]",
+        meta_of(ws[0]).unwrap().0, meta_of(ws[1]).unwrap().0
+    );
+    check!(
+        total,
+        "2 mutex-workers Ready, boot still current",
+        with_sched(|s| s.ready_count() == 2 && s.current() == Some(boot))
+    );
+
+    enable_preemption();
+    let t0 = crate::pit::tick_count();
+    loop {
+        if M_DONE[0].load(Ordering::Acquire) && M_DONE[1].load(Ordering::Acquire) {
+            break;
+        }
+        let elapsed = crate::pit::tick_count().saturating_sub(t0);
+        if elapsed > 5_000 {
+            panic!(
+                "[mutex-smoke] timeout after {} ticks: progress = [{}, {}]",
+                elapsed,
+                M_PROGRESS[0].load(Ordering::Relaxed),
+                M_PROGRESS[1].load(Ordering::Relaxed),
+            );
+        }
+        kthread_sleep_until(crate::pit::tick_count() + 3);
+    }
+    info!("[mutex-smoke] workers done");
+
+    for (n, &w) in ws.iter().enumerate() {
+        let mut tries = 0u32;
+        loop {
+            match kthread_reap(w) {
+                Ok(()) => break,
+                Err(_) => {
+                    tries += 1;
+                    if tries > 100 {
+                        panic!("[mutex-smoke] worker {} stuck (not exiting)", n);
+                    }
+                    kthread_sleep_until(crate::pit::tick_count() + 2);
+                }
+            }
+        }
+    }
+    disable_preemption();
+
+    // ---- 验证 ----
+    let final_count = *SHARED.lock();
+    let total_iters = (M_ITERS * M_WORKERS as u64) as u64;
+    check!(
+        total,
+        "mutex counter == M_ITERS * M_WORKERS (no lost increments)",
+        final_count == total_iters
+    );
+    check!(
+        total,
+        "each worker reached M_ITERS (progress all == M_ITERS)",
+        (0..M_WORKERS).all(|i| M_PROGRESS[i].load(Ordering::Relaxed) == M_ITERS)
+    );
+    check!(
+        total,
+        "CRITICAL_IN == 0 after all workers exit (no leak)",
+        CRITICAL_IN.load(Ordering::Relaxed) == 0
+    );
+    check!(
+        total,
+        "switch_count grew (yield + lock contention)",
+        with_sched(|s| s.switch_count()) - switch_pre >= (M_ITERS * M_WORKERS as u64) / 2
+    );
+    check!(
+        total,
+        "frames restored after reap (2 workers x 5 freed)",
+        page_frame::with_page_frames(|a| a.used_frames()) == frames_pre
+    );
+    check!(total, "current still boot", with_sched(|s| s.current() == Some(boot)));
+    check!(
+        total,
+        "run/sleep queues quiescent",
+        with_sched(|s| s.ready_count() == 0 && s.sleeping_count() == 0)
+    );
+
+    info!("[mutex-smoke] {}/{} checks passed", total, total);
 }

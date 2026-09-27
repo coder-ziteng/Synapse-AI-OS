@@ -39,7 +39,7 @@
 │  ipc/   Endpoint(同步) · Notification(异步) · 单拷贝路径    │
 │  proc/  进程表 · Agent 注册表 · spawn/exit/reap            │
 │  sched/ TCB 状态机 · runqueue · sleep 队列 · FR8 核算 · FR10 频率计数│
-│  kernel/ 引导链 · 页帧/堆 · GDT/TSS/IDT · PIC/PIT · TSC · kthread · paging/AS/VMA│
+│  kernel/ 引导链 · 页帧/堆 · GDT/TSS/IDT · PIC/PIT · TSC · kthread/switch_to/抢占调度 · paging/AS/VMA│
 │  hal/   硬件抽象 Trait (Mmu/Interrupt/Timer/Serial)        │
 │  audit/ 审计事件流（骨架）                                 │
 └─────────────────────────────────────────────────────────┘
@@ -56,12 +56,12 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 | P0 | 环境与基线（nightly-2026-09-23 锁定 + QEMU + 工具链验证） | ✅ 完成 |
 | P1 | 裸机点亮与工程基建（三级 boot 链 · UART · log/panic 回溯 · CI · 测试框架） | ✅ 完成 (11/11) |
 | P2 | 内存 / 中断 / 异常（E820 · 页帧分配器 · 内核堆 · GDT/TSS/IST · IDT · PIC/PIT · TSC 校准） | ✅ 完成 (7/7) |
-| P3 | 多任务与调度（sched/ 纯逻辑 crate · switch_to 汇编 · 抢占模型 · Mutex · FR8/FR10 原语） | 🔄 进行中 (5/8)：T1 sched crate ✅ · T2 FR8 核算 ✅ · T3 FR10 频率计数 ✅ · T4 kthread 基建 ✅ 真机 27/27 · T5 switch_to 汇编 ✅ 真机双线程往返 9/9 |
+| P3 | 多任务与调度（sched/ 纯逻辑 crate · switch_to 汇编 · 抢占模型 · Mutex · FR8/FR10 原语） | 🔄 进行中 (6/8)：T1 sched crate ✅ · T2 FR8 核算 ✅ · T3 FR10 频率计数 ✅ · T4 kthread 基建 ✅ 真机 27/27 · T5 switch_to 汇编 ✅ 真机双线程往返 9/9 · T6 抢占模型接线 ✅ 真机 3-worker 交错 9/9（时间片抢占 + yield/sleep/exit/reap） |
 | P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 🔄 进行中 (5/12)：已分解 12 任务（T1 target+ELF → T12 PCID+收尾）· T1 ✅ 用户态 target json + 基址 1GB 链接脚本 + 第一个静态 ELF · T2 ✅ 内核 4KB 页表 + AddressSpace（CR3 切换/用户页读写/#PF 期望故障恢复，真机 15/15）· T3 ✅ VMA 表 + 按需分页缺页路径（synapse-vma 纯逻辑 crate 20/20 宿主测 + 内核 handle_user_fault 接 idt#PF 真机 14/14：VMA 注册/需求映射/权限违例 kill/未注册 kill/NULL guard/FR8 归零；顺带强化 #PF trampoline 保存 caller-saved GPR 让 faulting 指令正确重执）· T4 ✅ Ring3 切换 smoke（GDT ring-3 描述符启用 + TSS.RSP0 16KB 内核栈 + MSR STAR/LSTAR/FMASK/IA32_KERNEL_GS_BASE 配置 + syscall 入口汇编 swapgs→切内核栈→push GPR→dispatch→sysret + iretq 首次进入用户态 + CPL=3 往返；真机 exit 363：用户态 _start 跑起 → syscall abi_query 往返 → 用户态写共享页 → syscall process_exit → 内核 iretq 回 continuation → ABI 值回读校验 → FR8 归零；顺带修 PML4[0] 缺 U/S 位致 user walk 在 PML4 级被拒 + syscall frame push 顺序错位导致 dispatch 误读 user_RSP 为 num）· T5 ✅ 静态 ELF 加载器 + initramfs（synapse-elf 纯逻辑 crate：ELF64 ET_EXEC 完整校验 20 错误变体 + cpio newc 解析器，宿主 18/18；构建管线 xtask cpio 写器 → build_disk.py 把 initramfs 追加在 kernel.bin 后由 stage2 连续加载、0x20100 写 {base,size} 引导记录；内核 initrd.rs + page_frame 出账保留 + elfload.rs 装入用户 AS（逐页 alloc/清零/拷贝/映射 W^X + 用户栈 entry RSP=TOP-8）→ iretq 进 hello e_entry；真机 exit 363：hello ring-3 跑 abi_query 往返 → process_exit → continuation 断言计数=2 + CR3 还原 + 逐页 unmap/free + FR8 回基线；顺带修 T4 遗留两 bug：process_exit iretq 路径缺平衡 swapgs 致再进用户态首次 syscall #DF + sysretq 前未还原 user RSP 致真实 ELF pop 即 #PF）（独立 worktree d:/ai-os-p4，分支 claude/p4-userspace） |
 | P4.5 | PCI 枚举与中断用户态化 | 未开始 |
 | P5 | 外交工具与 Agent 雏形 | 未开始 |
 | P6 | SMP / 存储栈 / IOMMU / 本地推理 / 跨 OS 外交 | 远期 |
-| S6 预研 | 显示栈 PoC（tiny-skia 渲染管线 · 混合模式场景图 · 2D 虚拟人表情状态机，Doc 07） | ✅ PoC 完成 (S6-T0)：19 tests 绿 · 1080p 整帧 93ms |
+| S6 预研 | 显示栈 PoC（tiny-skia 渲染管线 · Bento Grid + Liquid Glass 玄武视觉 · 赛博朋克虚拟人表情状态机，Doc 07） | ✅ PoC 完成 (S6-T0 v2)：19 tests 绿 · 1080p 整帧 ~105ms；内核侧 `bootanim/` 已在 VBE 1024×768 上还原 HTML 时间轴（SETTLED + blit_settled 架构，QMP screendump 多时间点 QA） |
 
 ## 4. 快速开始
 
@@ -75,6 +75,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 
 ```powershell
 .\startAIOS.ps1              # 构建 → QEMU 无头运行 → 三重自动判定
+.\startAIOS-GUI.ps1          # 构建 → QEMU GTK 窗口（查看开机动画）
 .\startAIOS.ps1 -Test        # 运行 QEMU 内测试套件（P1-T8）
 .\startAIOS.ps1 -BuildOnly   # 只构建 kernel_hd.img
 ```
@@ -104,8 +105,8 @@ python kernel/tests/run_tests.py      # QEMU 测试套件
 | `abi/` | 用户态 ABI（syscall 号表，18 个，设计文档 02 §4.2） |
 | `audit/` | 审计事件流（骨架） |
 | `user/` | 用户态程序（P4-T1 起启用：`synapse-user` 运行时 + `user/hello` 第一个静态 ELF，构建入口 `xtask user`） |
-| `display/` | S6 显示栈预研（synapse-display：tiny-skia 渲染管线 + 混合模式场景图 + 2D 虚拟人，`renderer` feature 门控） |
-| `xtask/` | 构建 / 运行 / CI 任务封装（P4-T5 起含 initramfs cpio 打包，build 三段：kernel → hello → cpio+磁盘镜像） |
+| `display/` | S6 显示栈预研（synapse-display：tiny-skia 渲染管线 + 混合模式场景图 + 2D 虚拟人；examples/logo 导出玄武徽章 4 版 PNG，`renderer` feature 门控） |
+| `xtask/` | 构建 / 运行 / CI 任务封装（P4-T5 起含 initramfs cpio 打包，build 三段：kernel → hello → cpio+磁盘镜像；`gui` 子命令 GTK 窗口看 VBE 动画） |
 | `docs/design/` | 设计文档 00~07 + rule.md 开发规则 |
 | `scripts/` `build_disk.py` `verify-all.ps1` | 辅助脚本 |
 

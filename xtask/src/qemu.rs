@@ -31,7 +31,7 @@ fn logs_dir() -> PathBuf {
 /// | 参数                                | 用途                                                   |
 /// | ----------------------------------- | ------------------------------------------------------ |
 /// | `-drive file=kernel_hd.img,format=raw` | 启动盘（build_disk.py 产物）                         |
-/// | `-display none`                     | 无头模式                                               |
+/// | `-display none` / `-display gtk`    | 无头模式 / 有窗口模式                                  |
 /// | `-serial file:serial.log`           | COM1 (UART 16550 @ 0x3F8) 输出捕获到文件               |
 /// | `-device isa-debugcon,iobase=0x402` | stage1/stage2 追踪字符（build_disk.py 写入）           |
 /// | `-device isa-debugcon,iobase=0x501` | kernel `_start64` 入口追踪字符                         |
@@ -68,6 +68,19 @@ pub fn build_args(serial_log: &Path, dc402: &Path, dc501: &Path) -> Vec<String> 
         "-cpu".into(),
         "qemu64".into(),
     ]
+}
+
+/// 有窗口模式：保留 serial 日志，但显示 VBE 帧缓冲。
+pub fn build_args_gui(serial_log: &Path, dc402: &Path, dc501: &Path) -> Vec<String> {
+    let mut args = build_args(serial_log, dc402, dc501);
+    // 把 "-display" "none" 替换为 "-display" "gtk"
+    for i in 0..args.len() {
+        if args[i] == "none" && i > 0 && args[i - 1] == "-display" {
+            args[i] = "gtk".into();
+            break;
+        }
+    }
+    args
 }
 
 /// 无头启动 QEMU 并**等待退出**。用于 `xtask run`（用户想看到完整日志后再返回 shell）。
@@ -114,4 +127,32 @@ pub fn spawn_headless() -> Result<Child, String> {
         .args(&args)
         .spawn()
         .map_err(|e| format!("qemu spawn failed: {e}"))
+}
+
+/// 有窗口启动 QEMU 并**等待退出**。
+///
+/// 与 `run_headless` 相比，`-display none` 替换为 `-display gtk`，
+/// 保留 serial 日志文件，适合本地观察 VBE 开机动画。
+pub fn run_gui() -> Result<(), String> {
+    let logs = logs_dir();
+    let serial = logs.join("serial.log");
+    let dc402 = logs.join("debugcon-stage12.log");
+    let dc501 = logs.join("debugcon-kernel.log");
+
+    let _ = std::fs::remove_file(&serial);
+    let _ = std::fs::remove_file(&dc402);
+    let _ = std::fs::remove_file(&dc501);
+
+    let args = build_args_gui(&serial, &dc402, &dc501);
+    println!("[xtask] QEMU: qemu-system-x86_64 {}", args.join(" "));
+
+    let status = Command::new("qemu-system-x86_64")
+        .args(&args)
+        .status()
+        .map_err(|e| format!("qemu spawn failed: {e}"))?;
+
+    if !status.success() {
+        return Err(format!("QEMU exited with {status}"));
+    }
+    Ok(())
 }

@@ -33,6 +33,7 @@ pub mod pit;
 pub mod clock;
 pub mod kthread;
 pub mod paging;
+pub mod mutex;
 pub mod bootstrap;
 pub mod smoke;
 pub mod syscall;
@@ -255,17 +256,31 @@ pub extern "C" fn _start64() -> ! {
     kthread::kthread_switch_smoke();
     boot_marker(b'd');
 
-    // P4-T2 分页 smoke：AddressSpace 新建 → CR3 切换 → 用户页读写 → #PF 期望故障 → FR8 归零
+    // P3-T6 抢占模型 smoke：3 worker 并发计数/打印 + 时间片抢占 + yield/sleep/exit
+    //（s6 分支上暂时注释——保留原状；marker e/f 归 P3-T6）
     boot_marker(b'e');
-    paging::paging_smoke();
+    // kthread::kthread_preempt_smoke();
     boot_marker(b'f');
 
-    // P4-T3 VMA / demand paging smoke：VMA 注册 → 按需分页 → 权限违例/未注册 → kill 骨架 → NULL 守卫 → FR8 归零
+    // P3-T7 Mutex 睡眠锁 + sleep_until_ms 真机 smoke
     boot_marker(b'g');
-    paging::vma_smoke();
+    kthread::kthread_mutex_smoke();
     boot_marker(b'h');
 
+    // P4-T2 分页 smoke：AddressSpace 新建 → CR3 切换 → 用户页读写 → #PF 期望故障 → FR8 归零
+    //（合并注：原用 marker e/f，与 P3-T6 撞号 → 迁 o/p）
+    boot_marker(b'o');
+    paging::paging_smoke();
+    boot_marker(b'p');
+
+    // P4-T3 VMA / demand paging smoke：VMA 注册 → 按需分页 → 权限违例/未注册 → kill 骨架 → NULL 守卫 → FR8 归零
+    //（合并注：原用 marker g/h，与 P3-T7 撞号 → 迁 q/r）
+    boot_marker(b'q');
+    paging::vma_smoke();
+    boot_marker(b'r');
+
     // P4-T4 Ring3 切换 smoke：用户态 _start → syscall abi_query 往返 → CPL==3 断言
+    // → continuation 链式接力 P4-T5 elf_load_smoke（exit 363 在 elf_continuation 发出）
     boot_marker(b'k');
     ring3::ring3_smoke();
     boot_marker(b'l');

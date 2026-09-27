@@ -131,8 +131,11 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 // "offset is not a multiple of 16" 编译错误。用 global_asm! 在汇编层实现 trampoline，
 // 调用普通 C 函数完成实际 panic 逻辑。
 //
-// CPU push layout (48 bytes, 16-aligned):
-//   [...|SS(8)|RSP(8)|RFLAGS(8)|CS(8)|RIP(8)|err_code(8)] <- rsp
+// CPU push layout (ring 0 → ring 0, no privilege change, 32 bytes):
+//   [...|RFLAGS(8)|CS(8)|RIP(8)|err_code(8)] <- rsp
+// For IST handlers (DF), same layout applies since exceptions originate in ring 0.
+// For exceptions with privilege change (ring 3 → 0), SS/RSP(old) are pushed too:
+//   [...|SS(8)|RSP(8)|RFLAGS(8)|CS(8)|RIP(8)|err_code(8)] <- rsp  (48 bytes)
 
 extern "C" {
     fn double_fault_trampoline_asm();
@@ -147,7 +150,7 @@ extern "C" {
 core::arch::global_asm!(
     ".global double_fault_trampoline_asm",
     "double_fault_trampoline_asm:",
-    "mov rdi, [rsp + 8]",    // rdi = instruction_pointer (RIP)
+    "mov rdi, [rsp + 8]",    // rdi = RIP（ring-0 异常帧中 RIP 在 [rsp+8]；[rsp+16] 是 CS）
     "mov rsi, [rsp]",        // rsi = error_code
     "and rsp, -16",
     "call double_fault_inner",
@@ -166,8 +169,8 @@ extern "C" fn double_fault_inner(ip: u64, error_code: u64) -> ! {
 core::arch::global_asm!(
     ".global general_protection_trampoline_asm",
     "general_protection_trampoline_asm:",
-    "mov rdi, [rsp + 8]",
-    "mov rsi, [rsp]",
+    "mov rdi, [rsp + 8]",    // rdi = RIP
+    "mov rsi, [rsp]",        // rsi = error_code
     "and rsp, -16",
     "call general_protection_inner",
     "ud2",
@@ -296,9 +299,15 @@ extern "C" fn page_fault_inner(ip: u64, error_code: u64) -> u64 {
 // 硬件中断处理器
 // ============================================================================
 
+/// IRQ0 定时器：tick 计数 → **EOI 先行** → 中断返回边界调度检查点（P3-T6）。
+///
+/// EOI 必须先于 `on_timer_irq`：检查点可能把本线程切走（xv6 同模型，详见
+/// kthread.rs P3-T6 模块头）——若切换发生在 EOI 之前，PIC 仍处于 IRQ0 屏蔽
+/// 状态，接管线程将永远收不到下一次定时器中断（调度死锁）。
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::pit::timer_interrupt_handler();
     unsafe {
         crate::pic::send_eoi(0);
     }
+    crate::kthread::on_timer_irq();
 }

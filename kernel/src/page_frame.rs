@@ -264,6 +264,10 @@ pub fn init_page_frame_allocator() {
     // 步骤 2.5（P4-T5）: 保留 initramfs 驻留区（stage2 连续加载在内核镜像
     // 之后，基址/长度来自 0x20100 引导记录，见 initrd.rs）。不出账则分配器
     // 会把 initrd 页清零复用 → cpio 归档被破坏。
+    //
+    // 合并注（P3-T7 侧的"步骤 3: 保留低 640K [0..0xA0000)"修复与本侧步骤 1.5
+    // 的 0..1MB 整段保留重叠——1.5 是其超集，独立修复同一问题（kthread 栈
+    // 拿到 PA 0 踩 IVT/boot 页表），此处不再重复出账）。
     if let Some((ird_base, ird_size)) = crate::initrd::region() {
         alloc.mark_range_used(ird_base, ird_size);
         info!(

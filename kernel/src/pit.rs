@@ -117,11 +117,12 @@ pub unsafe fn read_counter() -> u16 {
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// 时钟中断处理器 (由 IDT 调用)
+///
+/// 单一职责：tick 计数。P3-T6 起调度接线在 idt.rs handler 尾部（EOI 之后）
+/// 调 `crate::kthread::on_timer_irq()` —— CPU 记账 / 唤醒 / need_resched /
+/// 检查点切换全部走 sched + kthread 层，本函数不感知。
 pub fn timer_interrupt_handler() {
     TICK_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    // 未来：在这里调用调度器检查是否需要切换任务
-    // scheduler::timer_tick();
 }
 
 /// 获取 tick 计数

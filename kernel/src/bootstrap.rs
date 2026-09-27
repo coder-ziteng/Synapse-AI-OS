@@ -20,6 +20,12 @@ use synapse_cap::{CapError, CapRef, Rights};
 
 use crate::kstate;
 
+// 开机视觉序列（原生帧缓冲动画，规格见 synapse-aios/boot-animation）。
+// 模块挂在 bootstrap 下而非 main.rs：main.rs 正被他窗并行修改（P3 线程基建），
+// 钩子放此干净文件以避免跨窗口合并冲突；播放时机 = cap/ipc bootstrap 之前。
+#[path = "bootanim/mod.rs"]
+pub mod bootanim;
+
 /// bootstrap 产物：init 进程持有的根 capability 槽位。
 pub struct BootstrapRefs {
     /// init 的 IPC endpoint 根 cap（用于 `SpawnParams::death_endpoint`）。
@@ -32,6 +38,11 @@ pub struct BootstrapRefs {
 ///
 /// 重复调用 panic（[`kstate::kstate_init`] 自身有 double-init guard）。
 pub fn kernel_bootstrap() -> BootstrapRefs {
+    // 开机动画：P3 线程基建期间临时禁用——bootanim 模块把内核膨胀到 ~12MB，
+    // 4MB E820 usable 区间只剩 ~2MB 给栈/堆，kthread 栈被分配到低 640K 触发
+    // #DF/#UD（P3-T7 mutex smoke 调试发现）。S6 显示 preresearch 完成后再开。
+    // bootanim::run();
+
     info!("[bootstrap] step 1/3: kstate_init");
     kstate::kstate_init();
 
