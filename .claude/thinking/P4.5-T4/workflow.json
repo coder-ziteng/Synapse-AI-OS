@@ -1,0 +1,28 @@
+{
+  "featureName": "P4.5-T4",
+  "description": "virtio-net 用户态驱动预研 + diplomat spawn 接入契约",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T4a-userland-virtio-net-skeleton": "pending",
+    "T4b-bar-mmap-userland-path": "pending",
+    "T4c-smoltcp-phy-trait-stub": "pending",
+    "T4d-diplomat-spawn-contract": "pending",
+    "T4e-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "user/diplomat/src/driver/virtio_net.rs（virtio-net legacy MMIO 驱动结构 + smoltcp PHY trait 实现骨架）；BAR mmap 由用户态进程发起（kernel/src/mmio_user.rs 或复用 umem，仅外交工具进程持 NIC Device cap）；diplomat 进程启动契约 + 提交路径测试",
+    "design-contract": "Doc 04 §3.1 唯一网络出口不变量；Doc 07 §1.1 + Doc 08 §1.1 一致契约；本期仅预研不发真实包（P5-T3 实做）",
+    "scope-defer": "真实 smoltcp PHY 完整实现、ARP/IPv4 全协议栈 → P5-T3；本期仅结构骨架 + dummy submit 用 used ring 回调验证 IRQ_BIND 链路通",
+    "cross-task-dep": "P4.5-T2 IRQ_BIND（用户态订阅 IRQ）；P4.5-T1 pci 抽离"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

@@ -1,0 +1,29 @@
+{
+  "featureName": "P5-T9",
+  "description": "P5 集成 smoke + 端到端 demo + 闸门验收（Doc 04 §3.2 E1/E2/E3 + Doc 06 §4.2）",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T9a-init-chain-reorder": "pending",
+    "T9b-e2e-demo-user-shell": "pending",
+    "T9c-acceptance-gate-script": "pending",
+    "T9d-decision-log-entries": "pending",
+    "T9e-readme-section3-sync": "pending",
+    "T9f-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "kernel/src/main.rs init 链 page_frame→pci→virtio_blk_register→cap/ipc/proc init→init spawn diplomat(pid=2)→supervisor(pid=3)→user-shell(pid=4)；user-shell 经 AgentBus→Planner→Executor→diplomat API Channel→回包→输出；xtask tests/acceptance/P5 闸门脚本（E1/E2/E3）；decision_log 三条（spawn cap delegate 与 Doc 04 §3.1 唯一不变量耦合 / diplomat Supervisor 互重启策略 / API Channel 默认白名单）；README §3 P5 行更新；Doc 04 状态 PROPOSED→DECIDED",
+    "design-contract": "Doc 04 §3.2 E1/E2/E3 + Doc 06 §4.2 端到端 demo；Doc 02 §6.2 启动链扩展",
+    "cross-task-dep": "P5-T1~T8 全部完成",
+    "exit-criteria": "QEMU -net user,hostfwd=tcp::8080-:80 → 内核启动 → init 派生 3 子进程 → user-shell 'get time' → 端到端 ≤5s → exit=363"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

@@ -1,0 +1,31 @@
+{
+  "featureName": "P5-T4",
+  "description": "API Channel 最小子集：HTTPS 出站 + 域名白名单 + Schema 校验",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T4a-api-channel-codec": "pending",
+    "T4b-https-rustls-stack": "pending",
+    "T4c-domain-allowlist": "pending",
+    "T4d-json-schema-minimal": "pending",
+    "T4e-timeout-rate-limit": "pending",
+    "T4f-audit-event-kind": "pending",
+    "T4g-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "diplomat/src/channel/api.rs（ChannelKind=Api 实现，编译期注册）+ HTTPS 出站（smoltcp + rustls no_std 适配 + 域名白名单）+ JSON Schema 最小子集 + 10s 超时 + 限流令牌桶 + 审计 EventKind::ApiCall",
+    "design-contract": "Doc 04 §5.4 API Channel + §11 Phase 5 仅 API Channel 范围约束；Doc 04 §7.1 Standard 路径 <1ms 预算",
+    "cross-task-dep": "P5-T3 virtio-net 用户态 + P5-T2 Network+Channel cap 扩展",
+    "mvp-omission": "Doc 04 §11 列出 File/Web/Stream/Realtime 四类通道仅接口草案，本期不进入 P5 退出标准",
+    "default-allowlist": "httpbin.org / api.github.com / localhost 等公开测试域（首期允许），首期写入 init 启动参数"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

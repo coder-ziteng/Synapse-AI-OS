@@ -1,0 +1,28 @@
+{
+  "featureName": "P4.5-T1",
+  "description": "内核 PCI 子系统抽象（kernel/src/pci.rs）+ 抽离 bootanim/block 私有拷贝",
+  "mode": "create",
+  "currentStage": "done",
+  "stages": {
+    "01-analysis": "done",
+    "02-architecture": "done",
+    "03-planning": "done",
+    "04-codegen": "done",
+    "05-integration": "done"
+  },
+  "subtaskCompletion": {
+    "T1a-pci-module-design": "done",
+    "T1b-bootanim-priv-copy-removal": "done",
+    "T1c-block-priv-copy-removal": "done",
+    "T1d-cfg-test-mock": "done",
+    "T1e-real-machine-validation": "done"
+  },
+  "notes": {
+    "scope": "kernel/src/pci.rs 抽离 bootanim/vbe.rs 与 kernel/src/block.rs 内的私有 PCI walker（约 30 行复制）；提供 pci_read(bus,dev,fn,reg) / pci_bar_mem / pci_enable_bus_master / pci_msi_cap 系列 API；#[cfg(test)] mock 端口（不依赖真实 0xCF8/0xCFC IO，宿主 cargo test 跑通）",
+    "design-contract": "Doc 07 §3 + Doc 08 §3 都依赖 PCI 子系统作为驱动底层；P4.5-T3 virtio-blk 实做 + P4.5-T4 virtio-net 预研均依赖此；rule.md §10 防冲突：跨窗口抽公共模块须双方协商",
+    "cross-window-dep": "bootanim 窗口未公开 PCI API，本模块自维护最小拷贝；P4.5 抽离后删除两边副本（bootanim 改 import + block 改 import）",
+    "mvp-omission": "MSI/MSI-X capability locate API 仅占位（T2 IRQ_BIND 走 legacy PIC IRQ，P6 SMP 才用 MSI-X）"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

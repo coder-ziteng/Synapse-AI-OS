@@ -1,0 +1,30 @@
+{
+  "featureName": "P4.5-T3",
+  "description": "virtio-blk legacy MMIO 驱动实做（替换 kernel/src/block.rs stub）",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T3a-bar5-mapping-supervisor-only": "pending",
+    "T3b-virtio-status-machine": "pending",
+    "T3c-virtqueue-0-negotiation": "pending",
+    "T3d-blk-t-in-out-submit": "pending",
+    "T3e-interrupt-kick-poll": "pending",
+    "T3f-real-disk-image-rw": "pending",
+    "T3g-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "替换 block.rs stub；magic/version 校验（virtio spec §3.1：0x74726976/version=1）+ Device Status reset→ACK→DRIVER→DRIVER_OK；virtqueue 0 协商（queue_sel/queue_num=128/queue_desc|avail|used PA 三段 4KB 对齐）；VIRTIO_BLK_T_IN/T_OUT 三段描述符（req header 16B + data 512B + status 1B）+ avail push + kick；中断走 P4.5-T2 IRQ_BIND → kthread_block 等 Notification → poll used ring",
+    "design-contract": "Doc 08 §3.1 P0 后端；保留 BlockDevice trait 接口不变（Doc 08 §3.1）",
+    "failure-modes": "BAR5 映射失败 → NotReady；kick 后无中断 → 超时 IoError；status byte != OK → IoError；DMA 缓冲非 8B 对齐 → panic（绝不静默截断）",
+    "verifier": "QEMU -drive file=disk.img,format=raw,if=virtio 启动 → 探测到 → read sector 0 → 与镜像字节一致 → write sector 1 → read 1 → 一致"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

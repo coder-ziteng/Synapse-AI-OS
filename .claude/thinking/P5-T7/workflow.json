@@ -1,0 +1,30 @@
+{
+  "featureName": "P5-T7",
+  "description": "Agent 雏形：AgentBus + Planner + Executor 最小子集（Doc 06 §4 S2）",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T7a-agentbus-pubsub": "pending",
+    "T7b-planner-llm-caller": "pending",
+    "T7c-executor-tool-dispatch": "pending",
+    "T7d-tool-capability-check": "pending",
+    "T7e-end-to-end-demo": "pending",
+    "T7f-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "user/agentbus/ 新 bin（pub/sub 基于 IPC Notification + agent_id 主题订阅）；user/planner/ 新 bin（自然语言意图 → API Channel 远程 LLM → DAG 任务节点 JSON Schema）；user/executor/ 新 bin（执行 DAG 任务节点，工具集 file_read/gettime/diplomat_send）；tool 权限契约（无 cap → 拒绝 + 审计）；事件流经 AgentBus 订阅可观察",
+    "design-contract": "Doc 06 §4.2 S2 退出标准（端到端 demo）；Doc 04 §5.4 + Doc 01 §3 权限模型",
+    "cross-task-dep": "P5-T4 API Channel + P5-T5 spawn 放开（AgentBus/Planner/Executor 三个进程）",
+    "verifier": "输入 'what time is it' → Planner → Executor gettime → [hh:mm:ss] + AgentBus 3 条 EventKind::AgentEvent",
+    "mvp-omission": "tool 仅 3 个（file_read/gettime/diplomat_send），不覆盖 OpenAPI/Function Calling 全集；DAG 节点仅顺序执行，无并行/重试/超时"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

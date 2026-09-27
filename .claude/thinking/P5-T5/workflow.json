@@ -1,0 +1,29 @@
+{
+  "featureName": "P5-T5",
+  "description": "spawn 限制放开 + SupervisorTree 雏形（Doc 02 §5.2 + Doc 06 §5）",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T5a-spawn-syscall-cap-gate": "pending",
+    "T5b-process-spawn-cap-delegate": "pending",
+    "T5c-supervisor-bin-crate": "pending",
+    "T5d-restart-policy-data-struct": "pending",
+    "T5e-cold-start-default-policy": "pending",
+    "T5f-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "spawn syscall 校验发起方持 PROCESS::SPAWN cap（原仅 init 限定放开）→ cap delegate 到子进程；user/supervisor/ 新 bin crate（subtree 注册表 + RestartPolicy{max_restarts, window_secs, backoff, on_exhausted} + death_endpoint 监听）；冷启动默认策略（外交工具 3/10s 通知用户；用户态 Agent 10/60s 冻结+通知）",
+    "design-contract": "Doc 02 §5.2 spawn 限制放开 PROPOSED → DECIDED；Doc 06 §5 监督树 + Doc 02 §5.4 RestartPolicy",
+    "cross-task-dep": "P4-T13 cap_invoke（持 PROCESS::SPAWN cap 校验）；P4-T9 death notification 通路",
+    "mvp-omission": "compute_backoff 精确计时（TSC）→ P5.1；on_exhausted 全枚举行为（Degrade/Freeze/AlertUser 三选一）"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

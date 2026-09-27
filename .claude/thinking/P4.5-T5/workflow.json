@@ -1,0 +1,28 @@
+{
+  "featureName": "P4.5-T5",
+  "description": "P4.5 集成 smoke + 真机基线（PCI 抽离 + IRQ 转发 + 真实块设备）",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T5a-init-chain-reorder": "pending",
+    "T5a-disk-smoke": "pending",
+    "T5c-decision-log-entry": "pending",
+    "T5d-readme-section3-sync": "pending",
+    "T5e-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "kernel/src/main.rs init 链调整（mm→sched→ipc→cap→clock→pci→block/virtio_blk_register→既有 smoke→exit）；smoke [block] register virtio-blk + read sector 0 'Synapse!' magic；decision_log 三条（PCI 抽离对 bootanim 影响 / IRQ_BIND 单持有者 / BAR mmio 用户态 W^X）；README §3 进度表 P4.5 行更新",
+    "design-contract": "与 P3-T8 / P4-T5 类似 init 链增量；不破坏既有 11 smoke 套件",
+    "cross-task-dep": "P4.5-T1~T4 全部完成才能进入 P4.5-T5",
+    "exit-criteria": "QEMU -drive file=disk.img 启动 → 内核探测到 virtio-blk → read sector 0 → magic 序列 → 11 smoke 全套全绿 → exit=363"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

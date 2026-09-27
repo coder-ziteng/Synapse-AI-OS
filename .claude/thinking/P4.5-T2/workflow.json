@@ -1,0 +1,29 @@
+{
+  "featureName": "P4.5-T2",
+  "description": "IRQ 用户态化：IRQ_BIND capability + irq_bind/irq_forward syscall",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T2a-device-cap-IRQ_BIND-rights": "pending",
+    "T2b-irq-bind-forward-table": "pending",
+    "T2c-syscall-irq-bind": "pending",
+    "T2d-idt-handler-forward": "pending",
+    "T2e-audit-event-point": "pending",
+    "T2f-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "kernel/src/irq_forward.rs（IRQ 0~23 静态绑定表 + Notification CapRef + 进程 PID）；Device kind 新增 IRQ_BIND 权限位；syscall irq_bind(device_cap, irq_vector, notification_cap, rights_mask)；idt#IRQ handler 尾巴调 irq_forward_dispatch(vector) → signal notification；审计埋点 EventKind::IrqBind",
+    "design-contract": "Doc 07 §1.1 + Doc 08 §1.1 一致契约：内核只做 MMIO/IRQ 转发（capability 控制）；Doc 04 §3.1 唯一网络出口不变量的物理基础",
+    "cross-task-dep": "依赖 P4-T7 IPC 通路 + P4-T11 审计；与 P4-T13 cap_invoke 共用 cap_resolve helper",
+    "extension-defer": "扩展 IRQ 24~47（IOAPIC）留 P6 SMP；本期仅 legacy PIC IRQ 0~15 + cascade 2~3"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

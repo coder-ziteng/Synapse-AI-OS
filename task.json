@@ -3,10 +3,10 @@
   "schema_version": "1",
   "last_update": "2026-09-27",
   "session": {
-    "current_phase": "P3",
-    "current_task": "P3-T8",
-    "status": "completed",
-    "notes": "2026-09-25: 设计文档纯设计审查完成 (claude/design-pure-review 分支)。\nDoc 01~06 全部升级为 PROPOSED 完成，添加决策汇总表。Phase 4/5/6+ 核心设计收敛。\n\n2026-09-25: 需求评审 §6 Phase 4 硬性闸门设计缺口补全完成 (f253114, 92f7201, 53b89b1)。\n- Doc 01 §4.2: 对象生命周期状态机 + generation 校验 + 进程退出回收顺序\n- Doc 02 §4.5: ABI 版本策略 (abi_query + 消息头 version + rights 只追加) + 5 新错误码\n- Doc 02 §5.5: 每进程资源配额模型 (Quota struct + 管理规则 + FR8 关系)\n- Doc 02 §5.1/§3.2: MVP-3 单线程约束 + PCID 可选优化说明\n- Doc 03 §5.1: IPC 错误语义 + 对端死亡处理规则\n- Doc 04: Phase 5 MVP 范围约束 (仅 API Channel)\n- Doc 06 §2.1: 服务层依赖级别 (P0/P1/P2) + 各阶段首期承诺\n\n需求评审 §6 的 12 项 Phase 4 闸门决策：11 项已收敛，1 项 (基准测试配置) 属测试/CI 范畴。\n\n2026-09-25: CI/xtask 落地完成 (d3c4994)。P1-T4 boot 调试发现：\n- QEMU trace 显示 #PF @ IP=0x2068dc CR2=0xC0000080\n- IP=0x2068dc 在 raw_cpuid 库代码中，不在 _start64 (0x200d90)\n- rsp 被破坏（应为 0x15008，实际 0xC0000072）\n- stage2 debugcon 输出到 'L' (jmp rax 前) 后无 'AB' 从 _start64\n- 结论：stage2 的 jmp rax 未成功到达 _start64，或到达后 rsp 被破坏\n- 可能原因：stage2 页表/栈设置问题，或 _start64 入口约定不符\n- 内核 ELF 有 Xen PVH note (entry=0x200018)，但 QEMU -kernel 未走 PVH\n下一步：P1-T5 (log + panic handler) 不依赖 boot，可并行推进。\n\n2026-09-25: P1-T6 (HAL SerialDevice trait) + P1-T7 (UART HAL化) 完成。HAL 提供零成本抽象 + cfg(test) fake impl。\n\nP1-T5 (log + logger) 完成。内核集成 log crate，KernelLogger 输出到串口。\n\n2026-09-26: synapse-cap crate 落地 (cap/)。能力子系统核心全部实现并宿主测试通过 (22 tests)：\n- error.rs: CapError 15 错误码 + errno 映射 (-1..-15, Doc 02 §4.3/§4.5)\n- rights.rs: 权限位掩码 (零依赖手写 bitflags, 保留位掩掉防 ABI 漂移)\n- types.rs: CapRef=u8 / ObjRef{index,generation} / Capability{obj,rights,badge,parent} / ObjKind 10 类\n- table.rs: 256 槽 CapTable (slot 0 NULL trap) + delegate(attenuation-only, 需 GRANT) + revoke_cascade(不动点迭代, 无递归)\n- object.rs: ObjectTable 1024 槽 + generation 历史独立于槽位 (防复用复活) + Live→Revoking→Retired→Freed 状态机\n- quota.rs: Quota/DEFAULT_QUOTA/QuotaUsage charge-release (O(1), 超限 QuotaExceeded 不阻塞) + spawn 划拨校验 (Doc 02 §5.5)\n- transfer.rs: atomic all-or-nothing 跨进程转移 (5 步预检查零副作用, MAX_TRANSFER=8, Doc 03 §5)\n- 附带修复: Doc 01 §4.2 E_OBJECT_RETIRED errno -10→-12 (与 Doc 02 对齐); Doc 03 §5.1 transfer 表满 E_PERMISSION→E_NO_MEMORY; Doc 01 free_top u8→u16\n下一步: 内核集成层 (Spinlock 包装 + syscall 绑定) 待 boot 打通后接入。\n\n2026-09-26: synapse-ipc crate 落地 (ipc/)。IPC 核心宿主测试通过 (14 tests)：\n- header.rs: IpcHeader repr(C) 20B 固定 ABI (version/header_len 前向兼容, flags 严格 0) + AgentId 数值盖章 (字符串↔数值映射归 init, Doc 01 §7) + validate (AbiMismatch/-11, cap 数超限/-1, payload>min(quota,4KB)/-13)\n- path.rs: 三档传输路径分类 (≤32B 寄存器直传 / ≤4KB kmap 单拷贝 / >4KB grant 描述符, Doc 03 §4.3)\n- notification.rs: 位图 u64 OR 聚合 + 读清 poll (Doc 03 §6.2, O(1))\n- endpoint.rs: 单接收者同步端点环形队列 (32 深) + try_send(Delivered/Queued/WouldBlock) + cancel_sender 对端死亡摘除 (FIFO 保持, 等待接收者不受扰, Doc 03 §5.1)\n调度/kmap memcpy/cap 安装留给内核集成层；synapse-ipc 已验证可链入 x86_64-bootloader.json 目标。\n\n2026-09-26: synapse-proc crate 落地 (proc/)。进程模型核心宿主测试通过 (14 tests)：\n- process.rs: ProcessTable(128 槽) + Pcb + 状态机 Created→Running⇄Blocked→Exited/Faulted→Zombie→reap (Doc 02 §5.3)；spawn 六步校验链 (仅 init 可 spawn/agent 查重/配额划拨预留)；exit/fault 返回 DeathSignal (集成层投递 death_endpoint)；孤儿过继 init；freeze/thaw 行为围栏 (E_FROZEN -8)；pid 单调分配不复用；配额 carve/uncarve (spawn 预留、reap 归还)\n- agent.rs: 内核侧数值 agent_id 唯一性注册表 (字符串映射归 init 用户态, Doc 01 §7)\n- grant.rs: spawn 初始 caps 安装复用 transfer_caps atomic 语义 (衰减+GRANT 校验+零副作用回滚)\n资源释放顺序契约 (页帧→CapTable→agent_id→pid) 前两步归集成层、后两步在 reap。三 crate 累计 50 宿主测试全绿，均可链入 x86_64-bootloader.json。\n\n2026-09-26: P1-T4 boot 链路全通 + P1-T5 真机验收 (claude/design-pure-review 分支)。QEMU 退出码 107, serial '[INFO] Hello, Synapse!', dbg501 'ABCDEF', 21/21 块加载回读与镜像一致, panic backtrace 4 帧符号化有效。三个根因: ① 内核栈误放 0xF0000 (QEMU isa-bios ROM 区, CPU 写入被静默忽略→retf 弹垃圾→三重故障), 移至 0x60008 并满足 Rust ABI 入口 rsp%16==8; ② stage2 加载循环 debug16 标记 '3'/'4' 的 mov al,imm8 污染 EAX → LBA/dst 双推进错误 → 内核镜像重叠错位入 RAM (仅 14% 字节正确); ③ 复制段 mov esi 缺 0x66 前缀 (顺带解开'删 buffer 检查即挂'旧谜)。详见 decision_log 2026-09-26 三条。\n下一步: P1-T8 (test_framework 集成) 为 P1 唯一 pending 项; boot 已通, cap/ipc/proc 内核集成层可启动。\n[claude/design-pure-review | P1-T4 host cores] abi/ crate (10/10 测试, clippy 干净, kernel 目标 OK) + audit/ crate (6/6 测试, clippy 干净, kernel 目标 OK) 完成；工作区 cap+ipc+proc+abi+audit 共 66/66 全绿。Doc 02 §0/§4.2 syscall 计数 18→19 已修正。\n[claude/design-pure-review | P1-T4 host cores] user/ crate (30/30 测试, clippy 干净, kernel 目标 OK) 完成；工作区 cap+ipc+proc+abi+audit+user 共 96/96 全绿。19 个 syscall 帧编码器 + 类型化包装器 + CapRef(u16) 严格校验 + decode 闭环验证。\n[claude/design-pure-review | P1-T4 host cores] kint/ crate (14/14 测试, clippy 干净) 完成；工作区 cap+ipc+proc+abi+audit+user+kint 共 110/110 全绿。MockKernelState + dispatch(frame) → i64 把 6 个纯逻辑 crate 粘合 为宿主可测的 syscall 分发器。\n\n2026-09-26: P3-T2 (FR8 资源核算原语) 完成。sched crate 增 Tcb.cpu_time + Scheduler.account_cpu/total_cpu（CPU 维度守恒记账）+ accounting.rs PageLedger（per-process 页账本，drain 清算泄漏供 FR9 审计）。sched 46/46，workspace 161/161 全绿，内核构建不受影响。下一步: P3-T3 (FR10 冻结/频率计数) 或 P3-T4 (kthread 栈+CpuContext)，二者可并行。\n\n2026-09-26: P3-T3 (FR10 冻结/频率计数原语) 完成。rate.rs RateTable：per-process syscall/IPC 固定窗口计数 + 粘性超限标志（enforcement 留用户态监督树）；freeze/thaw 验证强化（冻结线程永不被调度、thaw 恢复原优先级触发抢占）。sched 56/56，workspace 171/171，clippy 零警告。下一步: P3-T4 (内核侧 kthread 栈 + CpuContext，真机 smoke)。\n\n2026-09-26: P3-T4 (内核侧 kthread 基建) 完成。kernel/src/kthread.rs：CpuContext（8 字 callee-saved，映射 sched ContextSlot）+ 5 帧栈（1 guard 毒化 + 16KB）+ SCHED 全局 SpinLock + boot 线程收编 + kthread_create 预置统一 ret 首切上下文（trampoline/entry-in-rbx，P3-T5 直接消费）。真机三重判定全绿：363 / 62+27 checks / markers …ZIab。顺带修复 P2 潜伏 bug：page_frame.free_contiguous_frames 帧号当地址传 → used 漂移+帧 0 污染（kthread 栈释放首次真机触发暴露），已修复+回归测试。下一步: P3-T5 (switch_to 手写汇编，消费 kthread_create 预置的上下文)。\n\n2026-09-27: P3-T5 完成 — switch_to 手写汇编真机贯通（exit 363, markers …Iabcd, 62/62+27/27+9/9）。首跑 #DF 双根因（-> ! 死代码删除 + current 陈旧自切换）修复入 decision_log。下一步 P3-T6 抢占模型接线（IRQ0 置 need_resched + 中断返回边界调度）。\n\n2026-09-27: P3-T6 完成 — 抢占模型接线真机贯通（exit 363, markers …Iabcdef, 62/62+27/27+9/9+9/9 preempt smoke；106 switches / 7 IRQ 抢占）。两个真机挂死根因（trampoline 缺 sti → IF=0 永久化；最后线程退出后 Switch{prev:None} 无保存目标 → IDLE_SCRATCH）与 xv6 式 handler 尾部切换取向入 decision_log。下一步 P3-T7（Mutex 睡眠锁 + sleep_until 定时唤醒，kthread_block_current 已备好阻塞原语）。"
+    "current_phase": "P4",
+    "current_task": "P4-T10",
+    "status": "in_progress",
+    "notes": "2026-09-25: 设计文档纯设计审查完成 (claude/design-pure-review 分支)。\nDoc 01~06 全部升级为 PROPOSED 完成，添加决策汇总表。Phase 4/5/6+ 核心设计收敛。\n\n2026-09-25: 需求评审 §6 Phase 4 硬性闸门设计缺口补全完成 (f253114, 92f7201, 53b89b1)。\n- Doc 01 §4.2: 对象生命周期状态机 + generation 校验 + 进程退出回收顺序\n- Doc 02 §4.5: ABI 版本策略 (abi_query + 消息头 version + rights 只追加) + 5 新错误码\n- Doc 02 §5.5: 每进程资源配额模型 (Quota struct + 管理规则 + FR8 关系)\n- Doc 02 §5.1/§3.2: MVP-3 单线程约束 + PCID 可选优化说明\n- Doc 03 §5.1: IPC 错误语义 + 对端死亡处理规则\n- Doc 04: Phase 5 MVP 范围约束 (仅 API Channel)\n- Doc 06 §2.1: 服务层依赖级别 (P0/P1/P2) + 各阶段首期承诺\n\n需求评审 §6 的 12 项 Phase 4 闸门决策：11 项已收敛，1 项 (基准测试配置) 属测试/CI 范畴。\n\n2026-09-25: CI/xtask 落地完成 (d3c4994)。P1-T4 boot 调试发现：\n- QEMU trace 显示 #PF @ IP=0x2068dc CR2=0xC0000080\n- IP=0x2068dc 在 raw_cpuid 库代码中，不在 _start64 (0x200d90)\n- rsp 被破坏（应为 0x15008，实际 0xC0000072）\n- stage2 debugcon 输出到 'L' (jmp rax 前) 后无 'AB' 从 _start64\n- 结论：stage2 的 jmp rax 未成功到达 _start64，或到达后 rsp 被破坏\n- 可能原因：stage2 页表/栈设置问题，或 _start64 入口约定不符\n- 内核 ELF 有 Xen PVH note (entry=0x200018)，但 QEMU -kernel 未走 PVH\n下一步：P1-T5 (log + panic handler) 不依赖 boot，可并行推进。\n\n2026-09-25: P1-T6 (HAL SerialDevice trait) + P1-T7 (UART HAL化) 完成。HAL 提供零成本抽象 + cfg(test) fake impl。\n\nP1-T5 (log + logger) 完成。内核集成 log crate，KernelLogger 输出到串口。\n\n2026-09-26: synapse-cap crate 落地 (cap/)。能力子系统核心全部实现并宿主测试通过 (22 tests)：\n- error.rs: CapError 15 错误码 + errno 映射 (-1..-15, Doc 02 §4.3/§4.5)\n- rights.rs: 权限位掩码 (零依赖手写 bitflags, 保留位掩掉防 ABI 漂移)\n- types.rs: CapRef=u8 / ObjRef{index,generation} / Capability{obj,rights,badge,parent} / ObjKind 10 类\n- table.rs: 256 槽 CapTable (slot 0 NULL trap) + delegate(attenuation-only, 需 GRANT) + revoke_cascade(不动点迭代, 无递归)\n- object.rs: ObjectTable 1024 槽 + generation 历史独立于槽位 (防复用复活) + Live→Revoking→Retired→Freed 状态机\n- quota.rs: Quota/DEFAULT_QUOTA/QuotaUsage charge-release (O(1), 超限 QuotaExceeded 不阻塞) + spawn 划拨校验 (Doc 02 §5.5)\n- transfer.rs: atomic all-or-nothing 跨进程转移 (5 步预检查零副作用, MAX_TRANSFER=8, Doc 03 §5)\n- 附带修复: Doc 01 §4.2 E_OBJECT_RETIRED errno -10→-12 (与 Doc 02 对齐); Doc 03 §5.1 transfer 表满 E_PERMISSION→E_NO_MEMORY; Doc 01 free_top u8→u16\n下一步: 内核集成层 (Spinlock 包装 + syscall 绑定) 待 boot 打通后接入。\n\n2026-09-26: synapse-ipc crate 落地 (ipc/)。IPC 核心宿主测试通过 (14 tests)：\n- header.rs: IpcHeader repr(C) 20B 固定 ABI (version/header_len 前向兼容, flags 严格 0) + AgentId 数值盖章 (字符串↔数值映射归 init, Doc 01 §7) + validate (AbiMismatch/-11, cap 数超限/-1, payload>min(quota,4KB)/-13)\n- path.rs: 三档传输路径分类 (≤32B 寄存器直传 / ≤4KB kmap 单拷贝 / >4KB grant 描述符, Doc 03 §4.3)\n- notification.rs: 位图 u64 OR 聚合 + 读清 poll (Doc 03 §6.2, O(1))\n- endpoint.rs: 单接收者同步端点环形队列 (32 深) + try_send(Delivered/Queued/WouldBlock) + cancel_sender 对端死亡摘除 (FIFO 保持, 等待接收者不受扰, Doc 03 §5.1)\n调度/kmap memcpy/cap 安装留给内核集成层；synapse-ipc 已验证可链入 x86_64-bootloader.json 目标。\n\n2026-09-26: synapse-proc crate 落地 (proc/)。进程模型核心宿主测试通过 (14 tests)：\n- process.rs: ProcessTable(128 槽) + Pcb + 状态机 Created→Running⇄Blocked→Exited/Faulted→Zombie→reap (Doc 02 §5.3)；spawn 六步校验链 (仅 init 可 spawn/agent 查重/配额划拨预留)；exit/fault 返回 DeathSignal (集成层投递 death_endpoint)；孤儿过继 init；freeze/thaw 行为围栏 (E_FROZEN -8)；pid 单调分配不复用；配额 carve/uncarve (spawn 预留、reap 归还)\n- agent.rs: 内核侧数值 agent_id 唯一性注册表 (字符串映射归 init 用户态, Doc 01 §7)\n- grant.rs: spawn 初始 caps 安装复用 transfer_caps atomic 语义 (衰减+GRANT 校验+零副作用回滚)\n资源释放顺序契约 (页帧→CapTable→agent_id→pid) 前两步归集成层、后两步在 reap。三 crate 累计 50 宿主测试全绿，均可链入 x86_64-bootloader.json。\n\n2026-09-26: P1-T4 boot 链路全通 + P1-T5 真机验收 (claude/design-pure-review 分支)。QEMU 退出码 107, serial '[INFO] Hello, Synapse!', dbg501 'ABCDEF', 21/21 块加载回读与镜像一致, panic backtrace 4 帧符号化有效。三个根因: ① 内核栈误放 0xF0000 (QEMU isa-bios ROM 区, CPU 写入被静默忽略→retf 弹垃圾→三重故障), 移至 0x60008 并满足 Rust ABI 入口 rsp%16==8; ② stage2 加载循环 debug16 标记 '3'/'4' 的 mov al,imm8 污染 EAX → LBA/dst 双推进错误 → 内核镜像重叠错位入 RAM (仅 14% 字节正确); ③ 复制段 mov esi 缺 0x66 前缀 (顺带解开'删 buffer 检查即挂'旧谜)。详见 decision_log 2026-09-26 三条。\n下一步: P1-T8 (test_framework 集成) 为 P1 唯一 pending 项; boot 已通, cap/ipc/proc 内核集成层可启动。\n[claude/design-pure-review | P1-T4 host cores] abi/ crate (10/10 测试, clippy 干净, kernel 目标 OK) + audit/ crate (6/6 测试, clippy 干净, kernel 目标 OK) 完成；工作区 cap+ipc+proc+abi+audit 共 66/66 全绿。Doc 02 §0/§4.2 syscall 计数 18→19 已修正。\n[claude/design-pure-review | P1-T4 host cores] user/ crate (30/30 测试, clippy 干净, kernel 目标 OK) 完成；工作区 cap+ipc+proc+abi+audit+user 共 96/96 全绿。19 个 syscall 帧编码器 + 类型化包装器 + CapRef(u16) 严格校验 + decode 闭环验证。\n[claude/design-pure-review | P1-T4 host cores] kint/ crate (14/14 测试, clippy 干净) 完成；工作区 cap+ipc+proc+abi+audit+user+kint 共 110/110 全绿。MockKernelState + dispatch(frame) → i64 把 6 个纯逻辑 crate 粘合 为宿主可测的 syscall 分发器。\n\n2026-09-26: P3-T2 (FR8 资源核算原语) 完成。sched crate 增 Tcb.cpu_time + Scheduler.account_cpu/total_cpu（CPU 维度守恒记账）+ accounting.rs PageLedger（per-process 页账本，drain 清算泄漏供 FR9 审计）。sched 46/46，workspace 161/161 全绿，内核构建不受影响。下一步: P3-T3 (FR10 冻结/频率计数) 或 P3-T4 (kthread 栈+CpuContext)，二者可并行。\n\n2026-09-26: P3-T3 (FR10 冻结/频率计数原语) 完成。rate.rs RateTable：per-process syscall/IPC 固定窗口计数 + 粘性超限标志（enforcement 留用户态监督树）；freeze/thaw 验证强化（冻结线程永不被调度、thaw 恢复原优先级触发抢占）。sched 56/56，workspace 171/171，clippy 零警告。下一步: P3-T4 (内核侧 kthread 栈 + CpuContext，真机 smoke)。\n\n2026-09-26: P3-T4 (内核侧 kthread 基建) 完成。kernel/src/kthread.rs：CpuContext（8 字 callee-saved，映射 sched ContextSlot）+ 5 帧栈（1 guard 毒化 + 16KB）+ SCHED 全局 SpinLock + boot 线程收编 + kthread_create 预置统一 ret 首切上下文（trampoline/entry-in-rbx，P3-T5 直接消费）。真机三重判定全绿：363 / 62+27 checks / markers …ZIab。顺带修复 P2 潜伏 bug：page_frame.free_contiguous_frames 帧号当地址传 → used 漂移+帧 0 污染（kthread 栈释放首次真机触发暴露），已修复+回归测试。下一步: P3-T5 (switch_to 手写汇编，消费 kthread_create 预置的上下文)。\n\n2026-09-27: P3-T5 完成 — switch_to 手写汇编真机贯通（exit 363, markers …Iabcd, 62/62+27/27+9/9）。首跑 #DF 双根因（-> ! 死代码删除 + current 陈旧自切换）修复入 decision_log。下一步 P3-T6 抢占模型接线（IRQ0 置 need_resched + 中断返回边界调度）。\n\n2026-09-27: P3-T6 完成 — 抢占模型接线真机贯通（exit 363, markers …Iabcdef, 62/62+27/27+9/9+9/9 preempt smoke；106 switches / 7 IRQ 抢占）。两个真机挂死根因（trampoline 缺 sti → IF=0 永久化；最后线程退出后 Switch{prev:None} 无保存目标 → IDLE_SCRATCH）与 xv6 式 handler 尾部切换取向入 decision_log。下一步 P3-T7（Mutex 睡眠锁 + sleep_until 定时唤醒，kthread_block_current 已备好阻塞原语）。\n\n2026-09-27: P4 收尾任务清单 + P4.5/P5 设计+小任务切分落地完成。\n- P4 待办: T10 用户态 init 启动链收口 / T11 FR9 审计内核接线 / T12 PCID + Phase 4 集成收尾 / T13 cap syscall 接线 + 安全回归 / T14 NFR2 基准 + idle 线程根治\n- P4.5 新增 (5 任务, PCI 用户态化基线): T1 PCI 子系统抽象 + T2 IRQ_BIND cap + T3 virtio-blk legacy MMIO 实做 + T4 virtio-net 用户态驱动预研 + T5 P4.5 集成 smoke\n- P5 新增 (9 任务, 外交工具 + Agent 雏形): T1 diplomat 进程骨架 / T2 Network+Channel cap 扩展 / T3 virtio-net 用户态实做+smoltcp / T4 API Channel 最小子集 / T5 spawn 放开+SupervisorTree / T6 CryptoProvider+Ed25519 / T7 Agent 雏形(AgentBus+Planner+Executor) / T8 Security Gateway 最小子集 / T9 P5 集成 smoke + 端到端 demo\n- 关键契约: Doc 07/08 一致要求内核只做 MMIO/IRQ 转发 (capability 控制), Doc 04 §11 Phase 5 仅 API Channel 范围约束, Doc 06 §13.2 CryptoProvider + Signature 廉价埋点为 Phase 6 PQC 替换铺路\n- 当前会话切到 P4 收尾 (current_task=P4-T10), 并行窗口可认领 P4.5-T1 (PCI 抽离) 或 P4-T11 (FR9 审计接线), 互不冲突"
   },
   "env_prerequisites": {
     "install_root": "D:\\envTools",
@@ -885,6 +885,1006 @@
           "estimate": "1 窗口"
         }
       ]
+    },
+    {
+      "phase": "P4.5",
+      "name": "PCI 枚举 / IRQ 用户态化 / virtio 驱动实做",
+      "ref": "需求目标 §三 Phase 5 前置 + Doc 07 §1.1 + Doc 08 §1.1 + Doc 04 §3 唯一网络出口不变量物理基础",
+      "exit_criteria": [
+        "内核 PCI 子系统（kernel/src/pci.rs）抽离完成，bootanim + block.rs 私有 PCI walker 删除，统一调用 pci.rs",
+        "Device capability 扩展 IRQ_BIND 权限位 + irq_bind syscall 接线（Doc 01 §2.1 + Doc 07 §1.1 + Doc 08 §1.1 一致契约）",
+        "IRQ 用户态化：用户态进程订阅 device cap 后，IRQ 触发经内核转发投递 Notification cap（无 IPC hop）",
+        "virtio-blk legacy MMIO 驱动实做：BAR5 映射（paging.map_mmio + supervisor-only）+ virtqueue 0 协商 + VIRTIO_BLK_T_IN/OUT 三段描述符 + interrupt 走 IRQ_BIND",
+        "QEMU -drive file=disk.img 真机挂盘 + read/write sector 字节级回读一致（Doc 08 §3.1 后端矩阵 P0 virtio-blk legacy）",
+        "virtio-net 用户态驱动预研：与 P5 外交工具解耦验证（用户态 BAR mmap + virtqueue 提交回路，smoltcp PHY 接口预留）",
+        "真机三重判定全绿（exit=363 + 无 PANIC + N/N）；宿主 workspace 单元测试全绿"
+      ],
+      "tasks": [
+        {
+          "id": "P4.5-T1",
+          "name": "内核 PCI 子系统抽象（kernel/src/pci.rs）+ 抽离 bootanim/block 私有拷贝",
+          "status": "done",
+          "deliverables": [
+            "kernel/src/pci.rs：统一模块，提供 pci_read(bus,dev,fn,reg) / pci_bar_mem / pci_enable_bus_master / pci_msi_cap 系列 API",
+            "#[cfg(test)] mock 端口（不依赖真实 0xCF8/0xCFC IO，宿主 cargo test -p synapse-kernel --features pci_test 跑通）",
+            "删除 bootanim/vbe.rs 内私有 pci 拷贝与 kernel/src/block.rs 内私有 pci 拷贝，统一调用 kernel/src/pci.rs（rule.md §10 防冲突：跨窗口抽公共模块须双方协商）"
+          ],
+          "verify": [
+            "真机：boot 链路 bootanim 输出与抽离前完全一致（PCI walker 同序扫描）",
+            "真机：[block] init 探测 virtio-blk 候选数与抽离前完全一致（≤1 偏差属 QEMU 配置无关）",
+            "宿主：cfg(test) mock PCI 单测 ≥8 项（read 边界 / BAR 32-bit / BAR 64-bit / IO BAR / enable bit / msix cap locate）"
+          ],
+          "deps": [],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P4.5-T2",
+          "name": "IRQ 用户态化：IRQ_BIND capability + irq_bind/irq_forward syscall",
+          "status": "pending",
+          "deliverables": [
+            "kernel/src/irq_forward.rs：IRQ 0~23 静态绑定表（扩展 24~47 走 IOAPIC 留 P6 SMP）+ 每项保存 Notification CapRef + 进程 PID",
+            "Capability 扩展：Device kind 新增 IRQ_BIND 权限位；持卡进程可调 irq_bind",
+            "syscall：irq_bind(device_cap, irq_vector, notification_cap, rights_mask) → 成功注册；权限/类型校验走 P4-T13 cap_invoke helper",
+            "idt.rs #IRQ handler 尾巴调 irq_forward_dispatch(vector) → 查表 → signal notification（无 IPC hop；Doc 07 §1.1 'IRQ_BIND' 契约）",
+            "审计埋点：irq_bind 注册/解绑 → P4-T11 audit EventKind::IrqBind"
+          ],
+          "verify": [
+            "真机：用户态测试进程持有 PIT-cap device 订阅 IRQ 0 → 触发 PIT tick → Notification 信号到达 → 用户态读出 bits",
+            "真机：无 cap 进程尝试 irq_bind → E_PERMISSION；vector ≥24 范围外 → E_INVALID_ARG；Notification cap 非本进程 → E_PERMISSION",
+            "宿主：irq_forward 绑定表查找 + 替换 + 释放单测 ≥6 项"
+          ],
+          "deps": [
+            "P4-T7",
+            "P4-T11"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P4.5-T3",
+          "name": "virtio-blk legacy MMIO 驱动实做（替换 kernel/src/block.rs stub）",
+          "status": "pending",
+          "deliverables": [
+            "kernel/src/pci.rs 加 map_mmio_bus_master(bar_paddr, len) → paging 映射到内核虚拟地址（supervisor-only）+ 触发 PCID 失效（如启用）",
+            "kernel/src/block/virtio.rs 实做：magic/version 校验（virtio spec §3.1：0x74726976 / version=1）→ Device Status reset→ACK→DRIVER→DRIVER_OK 序列",
+            "virtqueue 0 协商：queue_sel/queue_num（=128）/queue_desc|avail|used PA（三段 4KB 对齐 page_frame 分配）",
+            "请求提交：VIRTIO_BLK_T_IN/T_OUT 三段描述符链（req header 16B + data 512B + status 1B）+ avail ring push + MMIO kick",
+            "中断处理：irq_bind IRQ vector → kthread_block 等待 Notification → 轮询 used ring → 唤醒等待者",
+            "read_sector/write_sector 真实实现；保留 BlockDevice trait 接口不变（Doc 08 §3.1）"
+          ],
+          "verify": [
+            "真机：QEMU -drive file=disk.img,format=raw,if=virtio → 探测到 virtio-blk → read sector 0 → 回读与镜像字节一致 → write sector 1 后 read 1 → 一致",
+            "真机：BAR5 映射失败（PCI 配置缺）→ 返回 NotReady 不 panic；kick 后无中断（设备故障注入）→ 超时返 IoError",
+            "宿主：virtqueue avail/used ring 单调推进单测 + 三段描述符 8B 对齐检查 ≥6 项"
+          ],
+          "deps": [
+            "P4.5-T1",
+            "P4.5-T2"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P4.5-T4",
+          "name": "virtio-net 用户态驱动预研 + diplomat spawn 接入契约",
+          "status": "pending",
+          "deliverables": [
+            "user/diplomat/src/driver/virtio_net.rs：virtio-net legacy MMIO 驱动结构（与 P4.5-T3 同构，仅设备 ID 不同）+ smoltcp PHY trait 实现骨架（send/receive 钩子指向 virtqueue）",
+            "BAR mmap 由用户态进程通过 P4-T4 paging 路径发起（kernel/src/mmio_user.rs 或复用 umem）：把设备 BAR 映射到用户态虚拟地址（Doc 01 §2.1 capability 控制：仅外交工具进程持 NIC Device cap）",
+            "diplomat 进程启动契约：init spawn → diplomat 入参含 NIC device cap → diplomat 启动用户态驱动 → 提交路径测试（不发真实包）"
+          ],
+          "verify": [
+            "真机：init spawn diplomat → diplomat 启动 → 探测到 virtio-net → 协商 queue 成功 → 提交一个 dummy 包 → used ring 回调触发（不发到外部）",
+            "真机：非外交工具进程尝试获取 NIC Device cap → E_PERMISSION（Doc 04 §3.2 E1）",
+            "宿主：virtio-net 驱动结构 + smoltcp PHY trait 实现编译通过（cfg(test) mock）"
+          ],
+          "deps": [
+            "P4.5-T2",
+            "P4.5-T3"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P4.5-T5",
+          "name": "P4.5 集成 smoke + 真机基线（PCI 抽离 + IRQ 转发 + 真实块设备）",
+          "status": "pending",
+          "deliverables": [
+            "kernel/src/main.rs init 链调整：mm → sched → ipc → cap → clock → block(原 stub) → virtio_blk_register(实做) → 既有 smoke → exit",
+            "smoke：[block] register virtio-blk + read sector 0 'Synapse!' magic → 真机序列输出",
+            "decision_log：① PCI 抽离对 bootanim 路径影响；② IRQ_BIND cap 注入策略（持卡进程 = 仅外交工具，单一不变量）；③ BAR mmio 用户态映射的 W^X 决策",
+            "README §3 进度表 P4.5 行从 '预研启动' 更新为具体子任务状态；Doc 08 状态从 DECIDED 升级为 IMPLEMENTING"
+          ],
+          "verify": [
+            "真机：QEMU -drive file=disk.img 启动 → 内核探测到 virtio-blk → read 真实 sector 0 → 输出 magic → 既有 P4 smoke 全套（11 smoke 套件）全绿 → exit=363",
+            "宿主：workspace 单元测试套件数 ≥既有（cap 22 + ipc 14 + proc 14 + sched 56 + user 30 + kint 18 + elf 18 + vma 20 + xtask 11 + audit + pci/irq_forward 新增）全绿",
+            "决策：PCI walker 抽离 vs Doc 07 §3 IRQ 用户态化顺序；与 S6 显示栈 PoC 不冲突"
+          ],
+          "deps": [
+            "P4.5-T1",
+            "P4.5-T2",
+            "P4.5-T3",
+            "P4.5-T4"
+          ],
+          "estimate": "1 窗口"
+        }
+      ]
+    },
+    {
+      "phase": "P5",
+      "name": "外交工具与 Agent 雏形",
+      "ref": "需求目标 §三 Phase 5 + Doc 04 §3/§5.4/§11 + Doc 06 §S2",
+      "exit_criteria": [
+        "外交工具进程（pid=2，init=1）持有 NIC Device + IRQ cap；其他进程物理无网可上（Doc 04 §3.2 E1/E2/E3 验收）",
+        "API Channel 最小子集实做：HTTPS 出站 + 固定域名白名单 + 请求/响应 schema 校验 + 超时 + 限流 + 审计摘要（Doc 04 §5.4 + §11 范围约束）",
+        "smoltcp + virtio-net 用户态驱动在 diplomat 进程内贯通：UDP/ARP 实通（QEMU -net user 后端可嗅探）",
+        "Network + Channel capability 类型扩展：scope=domain-list 限制 + ChannelKind 枚举 + 衰减权限",
+        "spawn 限制放开：持有 PROCESS::SPAWN cap 的进程可 spawn（不再仅 init），SupervisorTree 用户态雏形（Doc 02 §5.2 + Doc 06 §5）",
+        "CryptoProvider trait 落地：Ed25519 实现 + Signature 不透明类型 + 审计事件签名字段升级（Doc 06 §13.2 廉价埋点，Phase 6 PQC 替换不破格式）",
+        "Agent 雏形（Doc 06 §4 S2 范围）：AgentBus + Planner + Executor 最小子集；用户输入 '意图' → Planner 远程 LLM → Executor 执行 → 端到端 demo",
+        "Security Gateway 最小子集：出站脱敏（SSN/email/IP）+ 入站 schema 校验 + 失败熔断外交工具（Doc 04 §6 + §11 强安全决策）",
+        "真机三重判定全绿（exit=363 + 无 PANIC + QEMU 三重）+ 端到端 demo 跑通；宿主 workspace 全绿"
+      ],
+      "tasks": [
+        {
+          "id": "P5-T1",
+          "name": "外交工具进程骨架 + IPC 接入（init spawn diplomat pid=2）",
+          "status": "pending",
+          "deliverables": [
+            "user/diplomat/ 新 bin crate（no_std target + 用户态 runtime + DiplomatCapSet 入参）",
+            "init 进程升级：spawn diplomat 子进程（pid=2）→ 注入 NIC Device + IRQ cap + 子端点 cap（Doc 04 §3.1 唯一网络出口）",
+            "diplomat 主循环：ep_recv(diplomat_kernel_ep) → 路由命令 → ep_reply",
+            "启动日志：'[diplomat] pid=2 ep_cap=X nic_cap=Y irq_cap=Z up' 真机序列"
+          ],
+          "verify": [
+            "真机：init spawn diplomat → diplomat 启动 → kernel 日志打印 nic/irq cap 编号 → diplomat recv 自环消息 → reply 成功",
+            "宿主：diplomat 命令路由表单测 ≥6 项（未知 op / 权限不足 / cap 缺失等错误路径）"
+          ],
+          "deps": [
+            "P4.5-T4"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P5-T2",
+          "name": "Network + Channel capability 类型扩展（cap crate + syscall 接线）",
+          "status": "pending",
+          "deliverables": [
+            "synapse_cap::types::ObjKind 新增 Network(scope: SmallStr) + Channel(kind: ChannelKind)，rights 矩阵按 Doc 04 §5 通道权限细化",
+            "synapse_cap::types::Right 新增 NETWORK_CONNECT / NETWORK_LISTEN / CHANNEL_SEND / CHANNEL_RECV（仅追加，bit 7~31 保留；Doc 02 §4.5 ABI 规则）",
+            "k_cap_invoke 真实分发：Network op=Connect(target=domain) → 内核校验 scope 白名单 → 委托给 diplomat 经 IPC 通道（用户态路径，仅做 capability 校验层）",
+            "ABI_MINOR 4→5 增量；新增错误码 E_NETWORK_DENIED (-18) / E_CHANNEL_INVALID (-19)（Doc 08 §5.7 一致规则）"
+          ],
+          "verify": [
+            "真机：init 经 cap_invoke 铸造 Network(scope='api.example.com') cap → 转移给测试进程 → 测试进程 cap_invoke(Network::Connect, target='api.example.com') → 经 diplomat → 真出包",
+            "真机：scope 不匹配 / kind 不匹配 / 过期 generation → E_NETWORK_DENIED / E_CHANNEL_INVALID / E_OBJECT_RETIRED 三路径",
+            "宿主：cap crate rights 矩阵 + attenuation 单测 ≥10 项（与 T13 安全回归矩阵合并）"
+          ],
+          "deps": [
+            "P4-T13",
+            "P5-T1"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P5-T3",
+          "name": "virtio-net 用户态驱动实做 + smoltcp PHY 集成",
+          "status": "pending",
+          "deliverables": [
+            "user/diplomat/src/driver/virtio_net.rs 实做：BAR mmap 后 MMIO 读写 + virtqueue 提交 + interrupt Notification 接收",
+            "smoltcp 接入：PHY trait 包装 virtio-net（send/receive 钩子）+ IPv4 + ARP + ICMP + UDP 协议栈",
+            "smoltcp cfg：仅启用必要 feature（no_std + 静态缓冲 + 单网卡）→ 编译进 diplomat 用户态 ELF",
+            "diplomat 主循环新增网络线程：smoltcp poll → 收包 → 路由 → 唤醒等待 IPC recv 的用户"
+          ],
+          "verify": [
+            "真机：diplomat 启动 → ARP 广播 → QEMU -net user 后端嗅探到包 → 回应 → diplomat 收到 ARP reply → 表项建立",
+            "真机：用户态测试进程 cap_invoke(Network::Connect) → diplomat 经 smoltcp 发 UDP 到 10.0.2.2:9 → 外部可达（QEMU 内置 dhcp/dns forwarder）",
+            "宿主：smoltcp PHY trait send/receive 单测 ≥4 项（mock packet 注入）"
+          ],
+          "deps": [
+            "P5-T1"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P5-T4",
+          "name": "API Channel 最小子集：HTTPS 出站 + 域名白名单 + Schema 校验",
+          "status": "pending",
+          "deliverables": [
+            "diplomat/src/channel/api.rs：ChannelKind=Api 实现，固定编译期注册（Doc 04 §4.2 + §11 Phase 5 范围约束）",
+            "HTTPS 出站：smoltcp + rustls（no_std 适配 + 仅 TLS 1.3）+ 域名白名单（init 启动参数注入，全局 1 个默认白名单 + per-process scope 双重校验）",
+            "请求/响应 schema：JSON Schema 最小子集（type + required + properties，限定 doc 04 §5.4 范围）；schema 不匹配 → 拒绝 + 审计",
+            "超时：10s 默认（可被 ChannelPolicy 覆盖）；限流：每秒 10 req 令牌桶（per-agent_id）",
+            "审计：每次出站写 audit EventKind::ApiCall{actor, channel=Api, peer=domain, decision=Allow|Deny, content_hash=BLAKE3(payload)} → 走 P4-T11 链路"
+          ],
+          "verify": [
+            "真机：测试进程 cap_invoke(Api::Send, target='httpbin.org/get') → diplomat 经 API Channel → https://httpbin.org/get → 200 → content_hash 审计",
+            "真机：白名单外域名 → 拒绝 + E_NETWORK_DENIED + 审计 EventKind 落 audit；schema 不匹配 → 拒绝 + E_CHANNEL_INVALID",
+            "宿主：schema 校验 + 域名白名单 + 超时 + 限流单测 ≥12 项"
+          ],
+          "deps": [
+            "P5-T3",
+            "P5-T2"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P5-T5",
+          "name": "spawn 限制放开 + SupervisorTree 雏形（Doc 02 §5.2 + Doc 06 §5）",
+          "status": "pending",
+          "deliverables": [
+            "syscall 接线：spawn syscall 校验发起方持 PROCESS::SPAWN cap（原仅 init 限定放开）→ cap delegate 到子进程",
+            "doc 02 §5.2 PROPOSED 升级 DECIDED：PROCESS::SPAWN cap 由 init 授予受信任进程（如 Supervisor）",
+            "user/supervisor/ 新 bin crate：subtree 注册表 + RestartPolicy{max_restarts, window_secs, backoff, on_exhausted} 数据结构 + 死亡通知监听（death_endpoint）",
+            "冷启动默认策略落地：外交工具 max_restarts=3/10s/通知用户；用户态 Agent max_restarts=10/60s/冻结+通知（Doc 02 §5.4 默认值）"
+          ],
+          "verify": [
+            "真机：Supervisor spawn 子进程 → 子进程主动 process_exit(0) → death notification → 不重启（正常退出）",
+            "真机：Supervisor spawn crasher 子进程 → 子进程非法访问 SegFault → death notification → 重启 N 次（max_restarts 内）→ on_exhausted 触发（冻结或通知）",
+            "宿主：RestartPolicy 解析 + backoff 计算 + on_exhausted 动作枚举单测 ≥8 项"
+          ],
+          "deps": [
+            "P4-T13"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P5-T6",
+          "name": "CryptoProvider trait + Ed25519 实现 + 审计签名升级（Doc 06 §13.2 廉价埋点）",
+          "status": "pending",
+          "deliverables": [
+            "user/diplomat/src/crypto/provider.rs：CryptoProvider trait（sign/verify/kx_ephemeral/kx_derive/hash）+ SigAlgorithm/KxAlgorithm/HashAlgorithm 枚举（首期只实现 Ed25519/X25519/Sha256/BLAKE3，预留 PQC 位）",
+            "Signature 不透明类型：alg: SigAlgorithm + bytes: Vec<u8>，业务层不得解析内部字节",
+            "ed25519-dalek + x25519-dalek + sha2 + blake3 用户态依赖（no_std 适配层），CryptoProvider 单例注入到 diplomat 与 audit 服务",
+            "audit AuditEvent.signature 字段升级 [u8;64] → Signature 类型（Doc 06 §13.2.2 跨文档对齐 Doc 04 §8.1）；ABI 已有 audit 序列化层同步"
+          ],
+          "verify": [
+            "真机：审计事件导出 → 用 Ed25519 公钥验签 → 通过；改 Signature.alg=Ed25519 为 MlDsa65 → 验证路径失败（按算法标识分发）",
+            "宿主：CryptoProvider trait + Ed25519 实现 + signature verify 单测 ≥10 项"
+          ],
+          "deps": [
+            "P4-T11",
+            "P5-T4"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P5-T7",
+          "name": "Agent 雏形：AgentBus + Planner + Executor 最小子集（Doc 06 §4 S2）",
+          "status": "pending",
+          "deliverables": [
+            "user/agentbus/ 新 bin crate：pub/sub 事件总线，基于 IPC Notification（Doc 03 §6）+ agent_id 主题订阅",
+            "user/planner/ 新 bin crate：自然语言意图 → 调用 API Channel 远程 LLM → 拆解为 DAG 任务节点（JSON Schema 描述）",
+            "user/executor/ 新 bin crate：执行 DAG 任务节点；本期工具集：file_read（Doc 08 用户态 path → FS syscall stub）/ gettime / diplomat_send",
+            "tool 权限契约：每个 tool 调用必检 capability rights（Doc 04 §5.4 + Doc 01 §3 权限模型），无 cap → 拒绝 + 审计",
+            "exit 标准事件流：用户输入 → Planner 解析 → Executor 执行 → EventKind::AgentEvent 经 AgentBus 订阅可观察"
+          ],
+          "verify": [
+            "真机：测试输入 'what time is it' → Planner 远程 LLM 拆解 → Executor 执行 gettime syscall → 输出 [hh:mm:ss] → AgentBus 收到 3 条 EventKind::AgentEvent（PlanStart/PlanEnd/Execute）",
+            "真机：Executor 调 file_read 无 FS cap → 拒绝 + 审计；调 diplomat_send 经白名单校验通过",
+            "宿主：AgentBus pub/sub 单测 ≥8 项；Planner DAG 解析单测 ≥6 项；Executor tool 权限校验 ≥8 项"
+          ],
+          "deps": [
+            "P5-T4",
+            "P5-T5"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P5-T8",
+          "name": "Security Gateway 最小子集：出站脱敏 + 入站 schema 校验（Doc 04 §6）",
+          "status": "pending",
+          "deliverables": [
+            "diplomat/src/gateway/ 出站脱敏：内置规则（SSN \\d{3}-\\d{2}-\\d{4} / email / IPv4）+ 用户可配（per-process PolicySet）",
+            "脱敏触发：API Channel 出站前对 payload 字符串字段做正则扫描 → 命中 → 拒绝 + E_GATEWAY_DENIED (-20) + 审计 EventKind::GatewayDeny",
+            "入站：API Channel 响应 schema 校验（与 T4 schema 链路共用），失败 → 拒绝 + 审计",
+            "网关失败熔断外交工具（Doc 04 §11 强安全决策）：连续 3 次 gateway 失败 → diplomat process_exit(1) → init Supervisor 按 max_restarts=3/10s 重启（呼应 T5 监督树）"
+          ],
+          "verify": [
+            "真机：API Channel 发请求 body 含 SSN 字符串 → 拒绝 + E_GATEWAY_DENIED + 审计；body 含 email → 拒绝；body 无敏感词 → 通过",
+            "真机：响应 schema 不匹配 → 拒绝 + 审计；连续 3 次网关失败 → diplomat 主动 exit → Supervisor 重启",
+            "宿主：脱敏正则引擎 + per-process PolicySet + 熔断计数器单测 ≥10 项"
+          ],
+          "deps": [
+            "P5-T4"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P5-T9",
+          "name": "P5 集成 smoke + 端到端 demo + 闸门验收（Doc 04 §3.2 E1/E2/E3 + Doc 06 §4.2）",
+          "status": "pending",
+          "deliverables": [
+            "kernel/src/main.rs init 链：page_frame → pci → virtio_blk_register → cap/ipc/proc init → init spawn diplomat(pid=2) → init spawn supervisor(pid=3) → init spawn user-shell(pid=4) → exit",
+            "端到端 demo：user-shell 接受用户输入 → 经 AgentBus → Planner → Executor → diplomat API Channel → 回包 → 输出",
+            "闸门验收脚本 xtask tests/acceptance/P5：E1（其他进程无 NIC cap）+ E2（外交冻结即断网）+ E3（无 NIC cap 进程无法发包）",
+            "decision_log：① spawn cap delegate 路径与 Doc 04 §3.1 唯一不变量的耦合；② diplomat Supervisor 互重启策略；③ API Channel 默认白名单策略（首期允许 httpbin.org/api.github.com 等公开测试域）",
+            "README §3 进度表 P5 行更新；Doc 04 状态 PROPOSED → DECIDED 升级（核心决策收敛）"
+          ],
+          "verify": [
+            "真机：QEMU -net user,hostfwd=tcp::8080-:80 → 内核启动 → init 派生 3 个子进程 → user-shell 输入 'get time' → 端到端 5s 内出结果 → exit=363",
+            "真机：E1 测试进程尝试 spawn 持 NIC cap 的子进程 → E_PERMISSION；E2 freeze diplomat → 用户 shell API call 超时；E3 测试进程直接 mmap NIC BAR → #PF 杀进程 + 审计",
+            "宿主：P5 全套 workspace 测试 ≥ 既有 + 新增 ≥50 项全绿"
+          ],
+          "deps": [
+            "P5-T1",
+            "P5-T2",
+            "P5-T3",
+            "P5-T4",
+            "P5-T5",
+            "P5-T6",
+            "P5-T7",
+            "P5-T8"
+          ],
+          "estimate": "1 窗口"
+        }
+      ]
+    },
+    {
+      "phase": "P6",
+      "name": "远期：内存自适应 + SMP + 存储栈 + IOMMU + 本地推理 + 跨 OS 外交 + 外设栈 + 安全强化 + 用户会话决策",
+      "ref": "需求目标 §三 Phase 6 + Doc 04-08 + Doc 05 §1~§6 + task.json requirement_gaps GAP-1~4",
+      "exit_criteria": [
+        "内存自适应三件套：E820 真实探测恢复 + buddy 分配器替换位图（解除 128MB 上限）+ 高端映射（>4GiB）→ 32G/64G 真机即插即用（GAP-4）",
+        "SMP：AP 启动（INIT-SIPI-SIPI）+ per-CPU runqueue + IPI 调度 + 自适应 SpinLock（短忙等 + 长 MCS queue lock）+ 跨核 IPC 基准（p50/p95/p99 < 2× 单核延迟）",
+        "存储栈：virtio-blk 用户态驱动 + FS extent + summary slot（32B BLAKE3 + 8B 索引 cap）+ WAL journal + vectorfsd 单例 + FS syscall + FileSystem cap（Doc 08 DECIDED 落地）",
+        "IOMMU：Intel VT-d 探测 + 二级页表 + DmaRegion cap（用户态驱动 DMA 受限）→ 关闭'用户态 DMA 改写任意内存'攻击面",
+        "USB 主机栈：xHCI 驱动（仅必要寄存器 + 集合 TRB 环）+ HID class + mass storage class（真机外设接入；GAP-3 上半）",
+        "蓝牙栈：HCI 传输层（USB 优先，共 P6.5.1 xHCI 栈）+ L2CAP + A2DP/HID/GATT profiles（依赖 USB 主机栈；GAP-3 下半）",
+        "音频栈：virtio-snd 用户态驱动（QEMU 可调）+ HDA fallback（真机）+ AudioService（播放/采集）+ 接入 S6.3 语音闭环（GAP-2 语音听+说闭环）",
+        "本地推理：决策节点收敛（推荐承认外交工具仅远程 AI API 代理，避坑指南 §5）+ MVP 接入（按 I1 决策路径）",
+        "跨 OS 外交：DID/VC 身份协议（W3C 标准）+ 行为契约 + 信誉系统 + 外部 Agent 协议适配（Doc 05）",
+        "安全强化：KPTI（仅关键路径）+ W^X 强化 + 栈 canary + 同步 IPC 优先级继承（Doc 03 §7）+ CryptoProvider 接入硬件信任根（TPM/TEE/后量子 ML-KEM/ML-DSA，Doc 06 §13）",
+        "用户会话与登录体系：S6 桌面决策点收敛（capability 命名空间 + 会话 token 双轨）+ 多用户会话 + 锁屏设计（GAP-1）",
+        "真机三重判定全绿（exit=363 + 无 PANIC + QEMU 三重）+ 32G/64G 真机部署；宿主 workspace 全绿"
+      ],
+      "tasks": [
+        {
+          "id": "P6.0-T1",
+          "name": "E820 真实探测恢复（解 INT 15h 挂起，build_disk.py 移除硬编码）",
+          "status": "pending",
+          "deliverables": [
+            "build_disk.py 移除 stage2 16-bit 实模式硬编码 QEMU 内存布局（当前为 7 条 entries 168 字节的临时方案，决策日志 2026-09-26 P2-T1 条目已说明）",
+            "stage2 16-bit 实模式恢复 BIOS INT 15h AX=E820h 调用（解 stage2 挂起根因，已识别 PC 跳回 stage2 起点的具体原因）",
+            "保留 UEFI GetMemoryMap 路径为 fallback（q35/ovmf 机型走 UEFI）",
+            "memory_map.rs 解析器已就绪（256 条目容量，P2-T1 落地）无需重写"
+          ],
+          "verify": [
+            "真机：QEMU -m 8G + BIOS 模式下 E820 entries 完整（≥10 条，含 ACPI/Reserved/MMU 区间）+ SeaBIOS e820 map 输出完全一致",
+            "真机：QEMU -m 8G + UEFI 模式下走 GetMemoryMap → 同样 usable = ~7.9GiB",
+            "宿主：memory_map.rs 解析器单测对 256 条目规模无回归（已有 ≥20 项）"
+          ],
+          "deps": [
+            "P2-T1"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P6.0-T2",
+          "name": "buddy 分配器替换 page_frame 位图（解除 MAX_FRAMES=32768 = 128MB 上限）",
+          "status": "pending",
+          "deliverables": [
+            "kernel/src/buddy.rs：伙伴分配器，order=11（最大块 2^11 = 2048 页 = 8MB），Linux 风格 free_area[] + bitmap per order",
+            "替换 page_frame.rs 位图分配器；保持 alloc_frame/free_frame 接口语义（Doc 02 §3 一致契约）",
+            "迁移 alloc_contiguous_frames → buddy_alloc_contig（连续物理页跨 order 合并）",
+            "FR8 页账本记账 hook 不变（仅底层替换）"
+          ],
+          "verify": [
+            "宿主：buddy 单测 ≥25 项（含合并/拆分/跨 order 边界/双重释放幂等/碎片统计）",
+            "真机：QEMU -m 8G + 全部 11 套 smoke（含 P3 mutex/P4 elf-smoke/spawn-smoke/vma-smoke 等）全绿；FR8 归零",
+            "真机：原有 page_frame 单测 6 项全绿（接口语义兼容）"
+          ],
+          "deps": [
+            "P6.0-T1"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.0-T3",
+          "name": "高端内存映射（>4GiB 直通）+ 32G/64G 真机验收",
+          "status": "pending",
+          "deliverables": [
+            "恒等映射扩展到 0-64GiB（覆盖 32G/64G 真机上限；当前仅 0-4GiB）",
+            "per-CPU 临时映射（kmap atomic）支持高端页：高端页帧临时映射到低地址区供内核短时访问",
+            "Doc 02 §3.1 高端映射方案落地（PROPOSED → DECIDED）",
+            "真机部署报告：32G + 64G 各一份落 logs/real-machine-{32g,64g}-{ts}.txt"
+          ],
+          "verify": [
+            "真机：QEMU -m 32G + QEMU -m 64G 全套 11 套 smoke 全绿；FR8 归零；buddy 分配高端页往返",
+            "真机：所有 PCDP/PIRQ/ACPI 表解析正确（避免 BIOS 配置差异致 boot 失败）",
+            "宿主：kmap atomic 单测 ≥8 项（含边界/竞争/嵌套/中断窗口）"
+          ],
+          "deps": [
+            "P6.0-T2"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.1-T1",
+          "name": "AP 启动（INIT-SIPI-SIPI 协议）+ per-CPU 栈 + IA32_KERNEL_GS_BASE 配置",
+          "status": "pending",
+          "deliverables": [
+            "kernel/src/smp/boot_ap.s：AP 启动序列（INIT → SIPI → SIPI 三段）+ 等待 AP 到达 trampoline 的 BSP/AP 同步原语",
+            "per-CPU 栈：扩展 kthread 栈为 per-CPU（每 CPU 一份 kstack_top + kstack_base）",
+            "MSR IA32_KERNEL_GS_BASE 配置（per-CPU 数据访问）",
+            "AP 启动 marker 序列：'AP0 started' / 'AP1 started' / ..."
+          ],
+          "verify": [
+            "真机：QEMU -smp 4 → BSP + 3 AP 全部打印启动 marker；各 AP 跑独立 kthread → 全部启动成功",
+            "真机：AP 异常路径 → 内核 #DF handler 正确恢复（AP 单独 panic 不影响 BSP）",
+            "宿主：BSP/AP 同步原语（spin-wait + AP ready 标志位）单测 ≥6 项"
+          ],
+          "deps": [
+            "P6.0-T3"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P6.1-T2",
+          "name": "per-CPU runqueue + IPI 跨核调度 + 自适应 SpinLock",
+          "status": "pending",
+          "deliverables": [
+            "sched::Scheduler 拆 per-CPU runqueue（每 CPU 一份）+ cross-migrate 策略（负载均衡）",
+            "IPI 调度：reschedule IPI + TLB shootdown IPI（arch/x86_64 specific）",
+            "自适应 SpinLock：短忙等（单次 atomic CAS）+ 长 MCS queue lock（等待者链表）→ 自动阈值切换",
+            "锁升级验证脚本：单核 → 多核的所有现有 mutex/IPC smoke 全绿（无锁顺序违反）"
+          ],
+          "verify": [
+            "真机：QEMU -smp 4 + 8 worker（每 CPU 2 worker）→ 全部跨核交错运行；stress smoke 互斥守门 CRITICAL_IN 恒 0/1",
+            "真机：IPI 跨核迁移 → 负载均衡生效（各 CPU runqueue 长度方差 < 阈值）",
+            "宿主：自适应锁阈值切换 + MCS queue lock 单测 ≥10 项；锁顺序静态分析无违规"
+          ],
+          "deps": [
+            "P6.1-T1"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P6.1-T3",
+          "name": "跨核 IPC + 基准（p50/p95/p99）+ 锁升级验证",
+          "status": "pending",
+          "deliverables": [
+            "跨核 IPC bench：两 user process 跑在不同 CPU 上 → ping/pong 1000 round-trip → p50/p95/p99",
+            "NFR2 基准报告：跨核 IPC 延迟对照 P4-T14 单核基线（预算 < 2× 单核延迟）",
+            "xtask bench 命令扩展：--smp N + --cross-core 选项",
+            "基准结果落 logs/bench-smp-{ts}.txt + task.json actual_approach 引用"
+          ],
+          "verify": [
+            "真机：QEMU -smp 4 + 跨核 ping/pong → p50 < 6µs / p95 < 9µs / p99 < 12µs（参考 Doc 03 §8 预算 < 3µs 单核 × 2 ~ 6µs 跨核）",
+            "真机：所有原有 11 套 smoke + P3-T7 mutex smoke 全绿（锁升级无回归）",
+            "宿主：bench harness 跨核场景 + 统计脚本单测 ≥4 项"
+          ],
+          "deps": [
+            "P6.1-T2"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P6.2-T1",
+          "name": "virtio-blk 用户态驱动（PCI 中断走 Notification，Doc 08 §3 落地）",
+          "status": "pending",
+          "deliverables": [
+            "user/storage-blk/ 新 bin crate（no_std target + 用户态 runtime + BlockDeviceCap 入参）",
+            "virtio-blk PCI 驱动：BAR5 mmap（paging.map_mmio supervisor-only）+ virtqueue 0 协商 + VIRTIO_BLK_T_IN/OUT 三段描述符 + interrupt 走 IRQ_BIND Notification",
+            "512B sector 读写接口（Doc 08 §3 一致契约）+ raw read/write 测试程序",
+            "P4.5-T4 块设备驱动预研基础上扩展：MMIO 配置 + virtqueue 提交回路已通，本任务补完用户态 ELF + 三段描述符 + interrupt Notification 路由"
+          ],
+          "verify": [
+            "真机：QEMU -drive file=disk.img + diplomat spawn storage-blk 子进程 → 读 sector 0 字节级一致 → 写 sector 0 → 重启 QEMU 回读字节级一致",
+            "真机：interrupt Notification 路由触发（写盘后 IRQ → Notification.signal → 用户态 wait）",
+            "宿主：virtio-blk 三段描述符 + virtqueue 单测 ≥8 项（mock BAR 读写）"
+          ],
+          "deps": [
+            "P4.5-T4",
+            "P6.3-T2"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.2-T2",
+          "name": "FS 元数据：extent + summary slot + WAL journal（Doc 08 §4 落地）",
+          "status": "pending",
+          "deliverables": [
+            "kernel/src/fs/ extent-based 文件系统（类似 ext4）：extent tree 描述文件块布局 + inode 扩展区",
+            "summary slot：inode 末尾预留 32B BLAKE3 hash + 8B 索引 cap 指针；写文件时同步落盘（Doc 08 §4.2）",
+            "WAL journal：write-ahead log 保障 crash 恢复一致性",
+            "Doc 08 §4 PROPOSED → DECIDED 升级（实现期 TBD 见 Doc 08 §9，本任务先收 §4）"
+          ],
+          "verify": [
+            "宿主：FS extent + summary slot + WAL 单测 ≥30 项（含 crash recovery / hash 一致性 / journal rollback）",
+            "真机：QEMU 挂盘 → FS 挂载 → 文件读写往返 → summary slot 落盘一致 → journal 异常注入恢复",
+            "真机：crash 模拟（QEMU -no-reboot + kill -9）→ 重启 mount → 数据完整 + journal replay 成功"
+          ],
+          "deps": [
+            "P6.2-T1"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P6.2-T3",
+          "name": "vectorfsd 单例（pid=2）+ IPC 协议 + 模型加载 + 摘要计算（Doc 08 §5 落地）",
+          "status": "pending",
+          "deliverables": [
+            "user/vectorfsd/ 新 bin crate：init=1 + storage=2 已占，vectorfsd=pid=3（Doc 08 §1.3 进程拓扑修正：FS 服务 pid=3、vectorfsd pid=2；与 P5 外交工具 pid 协调后定）",
+            "Doc 08 §5 IPC 协议：vectorfsd 暴露 Endpoint（cptr 由 init 铸造并 grant 所有用户进程）+ Endpoint (SEND|RECV) cap + badge=agent_id",
+            "HNSW 索引（ANN 检索，主内存 + 索引文件 mmap）+ B+Tree 元数据",
+            "模型加载器（bge-small 等 no_std 友好嵌入向量模型，可热替换）+ 摘要计算（写时同步，Doc 08 §5.3）+ Sweep Worker（crash 重索引、模型升级全量重建）"
+          ],
+          "verify": [
+            "真机：写文件触发摘要计算 → vectorfsd 收到 InodeChanged → 计算 embedding → 写入 summary slot + HNSW",
+            "真机：vectorfsd IPC 检索 → top-K 返回（结果与 brute-force 余弦相似度误差 < 5%）",
+            "宿主：HNSW + B+Tree + 摘要计算单测 ≥20 项（含模型替换热加载 / Sweep Worker 增量重建）"
+          ],
+          "deps": [
+            "P6.2-T2",
+            "P5-T4"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P6.2-T4",
+          "name": "文件系统 syscall 接线 + FileSystem cap（Doc 02 §4 补 fs_*）",
+          "status": "pending",
+          "deliverables": [
+            "abi 增 fs_open/fs_read/fs_write/fs_close/fs_seek/fs_stat/fs_rename/fs_unlink 等 syscall（Doc 02 §4 增 §4.7 FS 一节，Doc 02 §4.5 ABI 规则仅追加）",
+            "synapse_cap::types::ObjKind 新增 FileSystem (R|W|X) cap（Doc 01 §3 一致契约）",
+            "kstate 接 FileSystem cap 类型 + k_fs_open/read/write 真实分发（用户态路径仅做能力校验层，物理读写走 vectorfsd 或 storage-blk 子进程）",
+            "ABI_MINOR 5→6 增量（如 P5-T2 已升级到 5，本任务到 6）；新增错误码 E_FS_DENIED (-21) / E_FS_NOT_FOUND (-22) / E_FS_IO_ERROR (-23)"
+          ],
+          "verify": [
+            "真机：user/crasher 改造（持 FileSystem (R) cap）→ fs_open('/') + fs_read → 字节级一致",
+            "真机：无 cap 进程 fs_open → -1 E_FS_DENIED + 审计",
+            "宿主：FileSystem cap rights 矩阵 + attenuation 单测 ≥10 项"
+          ],
+          "deps": [
+            "P6.2-T3",
+            "P4-T13"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.3-T1",
+          "name": "IOMMU 抽象（Intel VT-d 探测 + DMAR 表解析 + 二级页表）",
+          "status": "pending",
+          "deliverables": [
+            "kernel/src/iommu.rs：Intel VT-d 探测（pci_cap locate）+ DMAR ACPI 表解析 + 二级地址翻译（IOVA → PA）",
+            "QEMU -device intel-iommu 真机验证（DMAR 表存在 + 二级页表往返）",
+            "Doc 06 §13 硬件信任根埋点延伸（IOMMU 视为硬件信任根的物理基础）",
+            "AMD-Vi 同步支持（QEMU -device amd-iommu 真机验证）"
+          ],
+          "verify": [
+            "真机：QEMU -device intel-iommu + DMAR 表解析 → 二级页表建立 + IOVA→PA 翻译往返正确",
+            "真机：IOMMU fault 触发 → 内核 #DF handler 归因 → 关联驱动被审计",
+            "宿主：IOMMU 二级页表单测 ≥12 项（含 4KB/2MB 大页 / 权限位 / 缓存属性）"
+          ],
+          "deps": [
+            "P6.1-T2"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.3-T2",
+          "name": "用户态驱动 DMA 授权 API（DmaRegion cap，关闭 DMA 攻击面）",
+          "status": "pending",
+          "deliverables": [
+            "abi 增 dma_region_alloc/release syscall + DmaRegion cap 类型（限定 VA 范围 + length + 权限）",
+            "驱动申请 cap → 内核配 IOMMU 二级页表 → 用户态 DMA 经此 cap 受限",
+            "驱动越界 DMA → IOMMU fault → 内核归因审计 + 进程杀",
+            "P6.2-T1（virtio-blk）/ P6.4-T1（virtio-gpu）/ P6.5-T1（xHCI）/ P6.7-T1（音频）皆消费此 API"
+          ],
+          "verify": [
+            "真机：构造驱动越界 DMA → IOMMU 拦截 → 审计 + kill_path",
+            "真机：合法 DMA 申请 cap → 传输完成 → release 归还",
+            "宿主：DmaRegion cap 权限矩阵 + IOMMU 翻译单测 ≥10 项"
+          ],
+          "deps": [
+            "P6.3-T1"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P6.4-T1",
+          "name": "virtio-gpu 用户态驱动 + framebuffer cap（Doc 07 §1.3 落地）",
+          "status": "pending",
+          "deliverables": [
+            "user/display/ 新 bin crate（接 S6 PoC 视觉）：virtio-gpu PCI 驱动（2D 模式 + resource create/attach + set_scanout）+ framebuffer cap 类型",
+            "BAR mmap + virtqueue 提交 + cursor 更新（含 cursor 2D blit 加速）",
+            "interrupt 走 IRQ_BIND Notification → 用户态 wait → 帧完成事件",
+            "S6 PoC 1080p 整帧 ~105ms 现状下，先做驱动 + framebuffer 双向通路验证，不强求 16.6ms 预算（预算由 P6.4-T2 达成）"
+          ],
+          "verify": [
+            "真机：QEMU -device virtio-gpu-pci + diplomat spawn display 子进程 → 写 framebuffer → QMP screendump 看到画面",
+            "真机：interrupt Notification 路由（帧完成事件）",
+            "宿主：virtio-gpu resource/transfer 单测 ≥6 项（mock BAR 读写）"
+          ],
+          "deps": [
+            "P6.1-T2",
+            "P6.3-T2"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.4-T2",
+          "name": "显示栈 PoC 接入真后端（脏矩形 + 渐变 shader，达成 16.6ms 预算）",
+          "status": "pending",
+          "deliverables": [
+            "display crate 接入 virtio-gpu 真后端（替换 tiny-skia 软光栅输出为 framebuffer mmap + 2D blit）",
+            "脏矩形增量渲染（仅 dirty region 重绘，Doc 07 §5 阶段划分）",
+            "渐变 shader（背景逐格 fill_path 替换为单次 GPU 渐变）",
+            "S6 PoC 视觉回归（玄武品牌视觉 + 7 卡 Bento + Liquid Glass 全保留）"
+          ],
+          "verify": [
+            "真机：1080p 整帧 < 16.6ms（60 FPS 预算达成）",
+            "真机：S6 PoC 视觉回归（4 表情 PNG + Bento + Liquid Glass 全部一致）",
+            "宿主：脏矩形 + 渐变单测 ≥8 项"
+          ],
+          "deps": [
+            "P6.4-T1"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P6.5-T1",
+          "name": "xHCI 驱动（USB host controller，仅必要寄存器 + 集合 TRB 环）",
+          "status": "pending",
+          "deliverables": [
+            "user/usb-xhci/ 新 bin crate：xHCI 驱动（仅必要寄存器：USBCMD/USBSTS/Doorbell/PortStatus + 集合 TRB ring）",
+            "BAR mmap + cap locate（xHCI capability registers）+ device slot 分配 + endpoint 上下文",
+            "中断走 IRQ_BIND Notification（控制 + 端口状态变化）",
+            "设备描述符读取（GET_DESCRIPTOR control transfer）真机验证"
+          ],
+          "verify": [
+            "真机：QEMU -device usb-ehci + -device usb-tablet → xHCI 识别 + 设备描述符读取字节级一致",
+            "真机：xHCI 中断路由（设备插入/拔出 → Notification.signal）",
+            "宿主：xHCI 寄存器读写 + TRB 提交单测 ≥10 项"
+          ],
+          "deps": [
+            "P6.3-T2"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P6.5-T2",
+          "name": "USB HID class 驱动（键鼠，中断传输 + boot protocol）",
+          "status": "pending",
+          "deliverables": [
+            "user/usb-hid/ 新 bin crate：HID class 驱动（中断传输 + boot protocol + report descriptor 解析）",
+            "InputService 系统服务（pid 预留）+ input_event IPC 协议（Doc 07 §6 VoiceEvent 同构）",
+            "键盘 + 鼠标输入事件转发到用户态进程（经 Endpoint）",
+            "绝对坐标（tablet）/ 多点触控（HID digitizer）扩展预留"
+          ],
+          "verify": [
+            "真机：QEMU -device usb-kbd + -device usb-mouse → 键鼠输入事件 → 用户态进程收到 input_event",
+            "真机：boot protocol 兼容（无需 HID report descriptor 完整解析）",
+            "宿主：HID 报告解析 + input_event 序列化单测 ≥8 项"
+          ],
+          "deps": [
+            "P6.5-T1"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.5-T3",
+          "name": "USB mass storage class（bulk-only transport + SCSI 命令集）",
+          "status": "pending",
+          "deliverables": [
+            "user/usb-storage/ 新 bin crate：mass storage class 驱动（bulk-only transport + SCSI 命令集：READ/WRITE/INQUIRY/READ_CAPACITY）",
+            "可与 P6.5-T2 并行认领（独立 task，共享 xHCI 栈）",
+            "FS 集成：mount 到文件系统（与 P6.2-T2 FS 元数据协同）"
+          ],
+          "verify": [
+            "真机：QEMU -device usb-storage + USB U 盘镜像 → 读写往返字节级一致",
+            "真机：FS 挂载 USB U 盘 → 文件读写",
+            "宿主：bulk-only transport 状态机 + SCSI 命令单测 ≥6 项"
+          ],
+          "deps": [
+            "P6.5-T1"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P6.6-T1",
+          "name": "HCI 传输层（USB 优先，UART 延后）",
+          "status": "pending",
+          "deliverables": [
+            "user/bt-hci/ 新 bin crate：HCI 传输层（USB transport 优先，共 P6.5.1 xHCI 栈；UART HCI 延后真机时实现）",
+            "HCI 三通道：Command（发送 HCI 命令）/ Event（接收 HCI 事件）/ Data（ACL/SCO 数据）",
+            "HCI 命令集：Reset / Read_Local_Version_Information / Read_BD_ADDR / Inquiry 等基础命令",
+            "QEMU 模拟蓝牙适配器（暂用 USB 蓝牙 dongle 镜像模拟，真机待 P6.0-T3 真机部署后接入）"
+          ],
+          "verify": [
+            "真机：QEMU -device usb-bt-dongle + HCI Reset 命令 → 响应 OK；Read_BD_ADDR → 真实 BD 地址读取",
+            "真机：HCI Event（Command Complete）→ 用户态 wait 收到",
+            "宿主：HCI 命令/事件/数据三通道单测 ≥8 项"
+          ],
+          "deps": [
+            "P6.5-T1"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.6-T2",
+          "name": "L2CAP + profiles（A2DP/HID/GATT）",
+          "status": "pending",
+          "deliverables": [
+            "user/bt-l2cap/ 新 bin crate：L2CAP 信道（connection-oriented + connectionless）+ SDU/PDU 重组",
+            "A2DP profile（音频 sink，与 P6.7 音频栈协同）",
+            "HID profile（蓝牙键鼠，与 P6.5-T2 USB HID 共享 InputService）",
+            "GATT profile（低功耗 BLE 设备 service discovery + read/write/notify）"
+          ],
+          "verify": [
+            "真机：QEMU 模拟 BLE 设备 + GATT service discovery → service/characteristic/enumeration 正确",
+            "真机：HID over GATT（蓝牙键鼠）→ input_event 转发",
+            "宿主：L2CAP 信道 + GATT client 单测 ≥10 项"
+          ],
+          "deps": [
+            "P6.6-T1"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P6.7-T1",
+          "name": "音频设备驱动（virtio-snd 优先 / HDA fallback 真机）",
+          "status": "pending",
+          "deliverables": [
+            "user/audio/ 新 bin crate（接 S6.3 语音交互）：virtio-snd PCI 驱动（PCM stream + control queue + jack event）",
+            "HDA 真机 fallback（Intel HDA spec 兼容，QEMU -device ich9-intel-hda 模拟 + 真机驱动适配）",
+            "DMA region cap 申请 → IOMMU 限制（接 P6.3-T2）",
+            "选型决策记录：virtio-snd vs HDA → 优先 virtio-snd（QEMU 可调，文档一致性），HDA 真机部署前适配"
+          ],
+          "verify": [
+            "真机：QEMU -device virtio-snd + PCM 播放/采集 → 音频样本回读一致",
+            "真机：jack event（插入/拔出耳机）→ Notification.signal → 用户态 wait",
+            "宿主：virtio-snd PCM stream + control queue 单测 ≥8 项"
+          ],
+          "deps": [
+            "P6.3-T2"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.7-T2",
+          "name": "AudioService + 接入 S6.3 语音交互闭环（听+说）",
+          "status": "pending",
+          "deliverables": [
+            "user/audio-service/ 新 bin crate：AudioService 系统服务（播放队列 + 采集 ring buffer）",
+            "播放（TTS 通道）：外交工具 Realtime Channel 收到的 TTS 音频 → AudioService 播放队列",
+            "采集（麦克风）：AudioService 采集 → 外交工具 Realtime Channel STT 输入（Doc 07 §6 语音交互闭环）",
+            "S7 候选阶段同步登记：AudioService 接入 S7（外设服务层）"
+          ],
+          "verify": [
+            "真机：TTS 文本 → Realtime Channel → AudioService 播放（音频样本输出）",
+            "真机：麦克风采集 → Realtime Channel → STT 输入（音频样本上传）",
+            "宿主：播放队列 + 采集 ring buffer 单测 ≥6 项"
+          ],
+          "deps": [
+            "P6.7-T1",
+            "S6.3"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.8-T1",
+          "name": "本地推理决策（Rust 推理栈 vs 用户态 libc shim + llama.cpp）",
+          "status": "pending",
+          "deliverables": [
+            "决策报告（落 docs/design/09-local-inference-decision.md）：三候选对比",
+            "候选 A：candle/burn no_std 裁剪版（Rust 原生推理栈）",
+            "候选 B：极简 libc shim + llama.cpp（依赖 libc/POSIX C++ 代码，本项目裸机用户态跑不起来）",
+            "候选 C：承认外交工具仅远程 AI API 代理（避坑指南 §5 推荐）",
+            "推荐方案 + 用户决策通过（决策点阻塞 P6.8-T2 启动）"
+          ],
+          "verify": [
+            "用户决策通过：候选 C / A / B 任选",
+            "决策日志：决策依据 + 风险 + 实施路径",
+            "决策文档：与现有 Doc 04/05/06 一致性自检"
+          ],
+          "deps": [],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P6.8-T2",
+          "name": "MVP 推理接入外交工具（脱机能力，按 P6.8-T1 决策路径执行）",
+          "status": "pending",
+          "deliverables": [
+            "按 P6.8-T1 决策路径执行：",
+            "选 C（推荐）：文档化远端 API 切换脱机路径（外交工具配置项，不部署本地推理）",
+            "选 A：candle/burn no_std 裁剪版接入外交工具（推理栈集成 + 模型加载 + 推理请求路由）",
+            "选 B：极简 libc shim + llama.cpp 适配（最大工作量，避坑指南 §5 警示）",
+            "决策日志：MVP 范围 + 验收标准 + 后续规划"
+          ],
+          "verify": [
+            "选 C：决策记录 + 外交工具远端/脱机切换配置项落地",
+            "选 A：推理栈真机推理 1 个测试用例（输入 → 输出 < 5s）+ 与外交工具协同",
+            "选 B：libc shim 真机推理 1 个测试用例 + llama.cpp 集成路径完整",
+            "宿主：推理栈单测（如选 A/B）+ 外交工具路由单测 ≥4 项"
+          ],
+          "deps": [
+            "P6.8-T1",
+            "P5-T3"
+          ],
+          "estimate": "1-3 窗口（按决策路径）"
+        },
+        {
+          "id": "P6.9-T1",
+          "name": "DID/VC 身份协议实现（Doc 05 §3 落地）",
+          "status": "pending",
+          "deliverables": [
+            "user/diplomat-did/ 新 bin crate：DID method（W3C 标准）+ 可信 DID（decentralized identifier）",
+            "VC 颁发（issuer）+ 验证（verifier）流程（Doc 05 §3.2 + W3C VC Data Model）",
+            "跨 OS 身份认证：外交工具向远程 Synapse 实例发起身份认证 → VC 验证通过 → 信任建立",
+            "CryptoProvider 集成（依赖 P5-T6 Ed25519 实现 + P6.10-T4 后量子扩展）"
+          ],
+          "verify": [
+            "真机：两个 Synapse 实例（不同 QEMU VM）跨 OS DID 认证往返 → 双方信任建立",
+            "真机：VC 颁发 → 第三方验证 → 通过；伪造 VC → 拒绝 + 审计",
+            "宿主：DID/VC 协议解析 + 验签单测 ≥10 项"
+          ],
+          "deps": [
+            "P5-T4",
+            "P6.10-T4"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.9-T2",
+          "name": "行为契约 + 信誉系统（Doc 05 §4 落地）",
+          "status": "pending",
+          "deliverables": [
+            "user/reputation/ 新 bin crate：行为契约 schema（Doc 05 §4.1）+ 信誉评分算法（本地 + 跨 OS 同步）",
+            "信誉查询 IPC 接口（接受方 + 提交方双向）",
+            "信誉持久化（vectorfsd 存储信誉记录，依赖 P6.2-T3）",
+            "信誉阈值：自动仲裁 vs 人工仲裁切换（Doc 05 §4.3）"
+          ],
+          "verify": [
+            "真机：本地信誉计算（基于审计事件） + 跨 OS 信誉查询往返",
+            "真机：信誉阈值触发自动仲裁 / 人工仲裁切换",
+            "宿主：信誉算法 + 持久化单测 ≥8 项"
+          ],
+          "deps": [
+            "P6.9-T1",
+            "P6.2-T3"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.9-T3",
+          "name": "外部 Agent 协议适配（Doc 05 §6：MCP / A2A 等候选）",
+          "status": "pending",
+          "deliverables": [
+            "user/protocol-adapt/ 新 bin crate：外部 Agent 协议适配层（候选：MCP / A2A / 其他，按 P6.8-T1 决策路径选型）",
+            "外交工具 ChannelRegistry 接入适配层（编译期静态注册 + 运行期可配置）",
+            "互操作测试（与候选协议参考实现真机互通）",
+            "决策日志：协议选型 + 兼容性矩阵 + 后续演进路径"
+          ],
+          "verify": [
+            "真机：与候选协议参考实现互通（双向消息往返 + capability 协商）",
+            "真机：协议版本协商 + 不兼容降级",
+            "宿主：协议适配 + ChannelRegistry 单测 ≥6 项"
+          ],
+          "deps": [
+            "P6.9-T2"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P6.10-T1",
+          "name": "KPTI（内核页表隔离，消 Meltdown 侧信道）",
+          "status": "pending",
+          "deliverables": [
+            "用户页表内核区取消（替代当前 supervisor-only，Doc 02 §3.2 PROPOSED → DECIDED 升级）",
+            "entry_SYSCALL_64 / entry_interrupt 切页表 trampoline",
+            "Meltdown 攻击防护测试（公开 PoC 测试集 PASS）",
+            "回归所有 P4 用户态 smoke（用户页表内核区取消后 syscall 路径仍通）"
+          ],
+          "verify": [
+            "真机：Meltdown PoC 测试 → 无法读出内核数据（防护生效）",
+            "真机：所有 P4 用户态 smoke 全绿（syscall 路径回归）",
+            "宿主：页表切换单测 ≥6 项（边界/嵌套/中断窗口）"
+          ],
+          "deps": [
+            "P6.1-T2"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.10-T2",
+          "name": "W^X 强化 + 用户栈 canary",
+          "status": "pending",
+          "deliverables": [
+            "内核 .text 只读（write-protected，依赖 P6.3-T1 IOMMU 无关，是 CR0.WP 直接落地）",
+            "用户栈 canary：编译器层（LLVM `-stack-protector` 等价物）+ 内核检测",
+            "PT_GNU_STACK 检查：用户态 ELF 必带 PT_GNU_STACK，否则拒绝加载",
+            "栈溢出攻击 PoC 测试集 PASS"
+          ],
+          "verify": [
+            "真机：栈溢出 PoC（ROP/buffer overflow）→ 内核 canary 检测 → 进程被 SIGABRT 等价路径 kill + 审计",
+            "真机：所有 P4 用户态 smoke 全绿（canary 引入无回归）",
+            "宿主：canary 注入/检测单测 ≥6 项"
+          ],
+          "deps": [
+            "P6.1-T2"
+          ],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P6.10-T3",
+          "name": "同步 IPC 优先级继承（消除优先级反转，Doc 03 §7）",
+          "status": "pending",
+          "deliverables": [
+            "sched::Scheduler 增 priority_inherit（持锁线程继承等待者最高优先级）",
+            "IPC 路径接 priority_inherit（k_ipc_send/recv 持 Endpoint 时优先级传播）",
+            "优先级反转 stress smoke（高/中/低优先级线程 × 共享 Endpoint）",
+            "Doc 03 §7 PROPOSED → DECIDED 升级"
+          ],
+          "verify": [
+            "真机：高/中/低优先级线程 × 共享 Endpoint → 无饥饿（高优先级线程不被中优先级阻塞超过阈值）",
+            "真机：所有 P4 IPC smoke 全绿",
+            "宿主：优先级继承算法 + 优先级传播路径单测 ≥10 项"
+          ],
+          "deps": [
+            "P4-T7"
+          ],
+          "estimate": "1-2 窗口"
+        },
+        {
+          "id": "P6.10-T4",
+          "name": "CryptoProvider 接入硬件信任根（TPM/TEE/后量子 ML-KEM/ML-DSA）",
+          "status": "pending",
+          "deliverables": [
+            "CryptoProvider trait 实现（软件 fallback + 硬件后端 stub）：接 P5-T6 trait 落地",
+            "TPM 2.0 stub：PCR extend/seal/unseal + quote（硬件 stub，无真实 TPM 真机可测，QEMU -tpm 设备通过）",
+            "TEE stub：Intel SGX 风格 enclave 接口（远期，无真机 SGX 验证）",
+            "后量子密码：ML-KEM（Kyber）/ ML-DSA（Dilithium）软件实现 + 与 CryptoProvider 集成"
+          ],
+          "verify": [
+            "真机：QEMU -tpm dev + TPM PCR extend → quote → 验证通过；换密钥 → 验证失败",
+            "宿主：ML-KEM/ML-DSA 加密单元测试 + 性能 baseline",
+            "宿主：CryptoProvider trait 算法分发（按 SigAlgorithm/KxAlgorithm/HashAlgorithm 标识）单测 ≥10 项"
+          ],
+          "deps": [
+            "P5-T6"
+          ],
+          "estimate": "2 窗口"
+        },
+        {
+          "id": "P6.11-T1",
+          "name": "用户会话决策点（capability 命名空间 + 会话 token 双轨，S6 桌面设计时收敛）",
+          "status": "pending",
+          "deliverables": [
+            "决策报告（落 docs/design/10-user-session-decision.md）：",
+            "候选 A：capability 命名空间（多用户 → per-user CapTable + per-user 命名空间）",
+            "候选 B：会话 token（认证 → session token 颁发 + 撤销）",
+            "候选 C：双轨（capability 命名空间做隔离 + 会话 token 做认证，推荐）",
+            "与 S6 桌面（空间外壳）设计同步收敛（不阻塞 S6 自身推进）"
+          ],
+          "verify": [
+            "S6 桌面设计决策通过",
+            "决策日志：双轨方案选型 + 与 Doc 01 §7 agent_id 关系 + 后续 P6.11-T2 实施路径",
+            "决策文档：与现有 Doc 01/02/04 一致性自检"
+          ],
+          "deps": [],
+          "estimate": "1 窗口"
+        },
+        {
+          "id": "P6.11-T2",
+          "name": "多用户会话 + 锁屏设计（按 P6.11-T1 决策执行）",
+          "status": "pending",
+          "deliverables": [
+            "按 P6.11-T1 决策路径执行：",
+            "能力命名空间：per-user CapTable + 命名空间隔离（仅同 namespace cap 可访问）",
+            "会话 token：session token 颁发 + 撤销 + 过期机制",
+            "锁屏 UI：Doc 07 §6 联动 + S6 桌面集成（解锁需 session token 验证）",
+            "多用户切换 + 会话恢复（不重启进程，cap 重新授权 + 上下文切换）"
+          ],
+          "verify": [
+            "真机：多用户登录 + 切换 → cap 重新授权正确 + 会话恢复",
+            "真机：锁屏 → 输入 session token → 解锁",
+            "宿主：capability 命名空间 + session token 单测 ≥10 项"
+          ],
+          "deps": [
+            "P6.11-T1"
+          ],
+          "estimate": "1 窗口"
+        }
+      ]
     }
   ],
   "global_risks": [
@@ -1279,6 +2279,29 @@
       "date": "2026-09-27",
       "scope": "需求缺口登记（GAP-1~4）+ S7 候选阶段",
       "decision": "用户问答暴露 4 项规划缺口，三处同步登记（task.json requirement_gaps 新节 + 需求目标.md Phase 6 清单/S7 候选/Risk Register R13~R16）：① GAP-1 用户登录/会话体系——单用户 capability 模型无传统登录，多用户形态需专项设计（候选：capability 命名空间 + 会话 token），S6 桌面设计时决策；② GAP-2 音频栈——语音只有 STT 输入方向（Doc 07 §6），无 TTS 输出/麦克风驱动/音频设备选型（virtio-snd vs HDA）；③ GAP-3 蓝牙+USB 外设栈——真机部署缺口，全 virtio 无物理外设接入，工作量与内核本体相当；④ GAP-4 内存自适应——E820 硬编码 + MAX_FRAMES=128MB + 4GiB 映射上限，32G/64G 真机需三件套（E820 真实探测 + buddy + 高端映射），memory_map.rs 解析器已就绪。新增 S7 候选阶段（外设服务层：AudioService/BluetoothService/UsbDeviceManager，前置 P6 驱动栈 + S6 InputService），不阻塞 S1~S6 但真机部署前必须排期。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P6 设计启动 + 小任务切分（32 任务，12 sub-phase）",
+      "decision": "用户要求启动 P6 远期阶段设计及小任务切分，按 P4-T9/P4-T14 thinking workflow 模板落地：\n① 01-analysis 扫描现有材料（需求目标 §三 Phase 6 + Doc 04-08 + task.json requirement_gaps 4 GAP + 需求目标.md Risk Register R13~R16）形成 P6 范围图 + 12 sub-phase 清单\n② 02-architecture 形成 sub-phase 间依赖图 + 串/并行分组 + 串行关键路径（P6-A 内存自适应是瓶颈）\n③ 03-planning 把 P6 切分为 32 任务（12 sub-phase），落入 task.json plan 数组末尾\n\nP6 任务切分（共 32）：\n- P6.0 内存自适应（3 任务）：E820 真实探测 + buddy 分配器 + 高端映射 + 32G/64G 真机验收\n- P6.1 SMP（3 任务）：AP 启动 + per-CPU runqueue/IPI/自适应锁 + 跨核 IPC 基准 + 锁升级\n- P6.2 存储栈（4 任务）：virtio-blk 用户态驱动 + FS extent+summaryslot+WAL + vectorfsd 单例 + FS syscall + FileSystem cap\n- P6.3 IOMMU（2 任务）：Intel VT-d 抽象 + DmaRegion cap（驱动前置）\n- P6.4 显示驱动（2 任务）：virtio-gpu + framebuffer cap + 显示栈真后端（16.6ms 预算）\n- P6.5 USB 主机栈（3 任务）：xHCI + HID class + mass storage class\n- P6.6 蓝牙栈（2 任务）：HCI 传输 + L2CAP + A2DP/HID/GATT\n- P6.7 音频栈（2 任务）：virtio-snd + AudioService + 接入 S6.3 语音闭环\n- P6.8 本地推理（2 任务）：决策节点 + MVP 接入（按决策路径）\n- P6.9 跨 OS 外交（3 任务）：DID/VC + 行为契约/信誉 + 外部协议适配\n- P6.10 安全强化（4 任务）：KPTI + W^X/canary + IPC 优先级继承 + CryptoProvider 硬件信任根\n- P6.11 用户会话决策（2 任务）：会话决策点 + 多用户会话 + 锁屏\n\n总估算：40~50 窗口（每任务 1~2 窗口，部分 3 窗口按决策路径）；串行关键路径 P6.0-T1→T2→T3→P6.1-T1→T2→P6.3-T1→T2→P6.2-T1→T2→T3≈10 窗口，并行批次合流后总日历时间可压缩。\n\n关键决策：\n- P6-A 内存自适应作为 P6 全部子方向的硬前置（真机部署多核化都依赖此）\n- P6-D IOMMU 是 P6.2/4/5/7 驱动栈的共同前置（DMA 区域 cap）\n- P5（task.json 已有 9 任务详细分解 T1~T9）是 P6 多数 sub-phase 的硬前置\n- Doc 08 已 DECIDED（FS/AI Index 架构+IPC 协议），实现期 TBD 见 Doc 08 §9 由 P6.2 系列收口\n- Doc 06 §13 CryptoProvider 埋点已在 P5-T6 落地，P6.10-T4 接入硬件信任根\n- P6.8-T1 决策节点阻塞 P6.8-T2：候选 C（承认外交工具仅远程 API 代理，避坑指南 §5 推荐）/ 候选 A（candle/burn no_std 裁剪版）/ 候选 B（极简 libc shim + llama.cpp，最大工作量）\n- P6.11-T1 决策节点与 S6 桌面设计同步（不阻塞 S6 自身推进）\n- 各 sub-phase 起点 = Doc 04/05/06/07/08 现有 PROPOSED/DECIDED 设计\n\n工作流产物：\n- .claude/thinking/P6/workflow.json（按 P4-T9 模板：featureName + 5 stages + 32 subtaskCompletion）\n- .claude/thinking/P6/notes/01-analysis.md（范围图 + 12 sub-phase 来源对账 + 关键依赖图 + 9 风险点）\n- .claude/thinking/P6/notes/02-architecture.md（依赖图细化 + 串/并行分组 + 11 批次 + 10 关键决策点）\n- .claude/thinking/P6/notes/03-planning.md（32 任务详细切分 + 落入 task.json 策略）\n\n本会话产出的 P5 与 P6 关系修正：本会话初稿曾假设 P5 衔接需新建 7 任务，实查 task.json plan 数组确认 P5 已存在 9 任务详细分解（P5-T1~T9），故 thinking/P6/workflow.json 中 subtaskCompletion 仅保留 P6 32 任务，P5 9 任务归 P5 phase 节点自身管理。\n\n后续路径：当前分支 claude/p4-final-phase 处于 P4 阶段后期（P4 7/14 done，P4.5 预研中）；P6 任务被认领时按 thinking workflow 04-codegen 阶段执行（认领人细化 deliverables/verify/actual_approach）。多窗口防冲突按 rule.md 第 10 条：改 task.json 前 git status 防 M 文件冲突；改 README §3 P5/P6 行同步维护协议落地。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4.5/P5 设计与任务切分落地",
+      "summary": "在 P4 收尾(7/14 完成,T10~T14 pending)与 P6 远期之间,显式插入 P4.5 (PCI/IRQ/virtio 基线) 与 P5 (外交工具 + Agent 雏形) 两阶段,与 Doc 07/08 一致契约(内核只做 MMIO/IRQ 转发) + Doc 04 §11 Phase 5 仅 API Channel 范围约束 + Doc 06 §13.2 CryptoProvider 廉价埋点对齐。Why: 1) P4 现有 exit_criteria 未含 PCI/IRQ 用户态化,但 P5 外交工具的物理基础(NIC Device cap + IRQ 转发)必须先于 P5 落地;2) Doc 07 §1.1 + Doc 08 §1.1 是同一架构不变量(内核只做 capability 控制的转发),Doc 04 §3.1 唯一网络出口依赖其落地;3) Doc 04 §11 显式约束 Phase 5 仅 API Channel,防止'远程 API 代理'膨胀为通用网络平台(需求评审 R14);4) Doc 06 §13.2 CryptoProvider trait 是 Phase 6 PQC 替换的必备埋点,不提前做 Phase 6 返工成本高。How to apply: P4 收尾 5 任务并行推进(尤其 P4-T11 FR9 审计 + P4-T13 cap syscall 接线为 P5 基础设施);P4.5-T1 (PCI 抽离) 与 P4.5-T2 (IRQ_BIND) 可并行认领;P5 必须在 P4.5 收口后才启动 T3 virtio-net 用户态实做(避免依赖回环)。",
+      "alternatives_rejected": "① P4 直接覆盖 PCI/IRQ 而不独立 P4.5: 模糊 P4 (用户态 + IPC) 与 P5 (外交工具) 的边界,Doc 04 §3 唯一网络出口无显式闸门;② P5 跳过 API Channel 直接做全 5 通道: 违反 Doc 04 §11 范围约束,工作量翻倍且个人不可行(需求评审 R14);③ CryptoProvider trait 推迟到 Phase 6: 审计事件 signature 字段 [u8;64]→Signature 类型迁移成本随事件数 N×单事件成本上升,Phase 6 一次性迁移代价高昂(廉价埋点思想)。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4.5 范围与内核/用户态驱动拆分",
+      "summary": "P4.5 任务切分明确: kernel 侧实做 virtio-blk legacy MMIO 驱动 (T3, 替换 block.rs stub) + IRQ_BIND cap 转发原语 (T2);user 侧仅做 virtio-net 驱动预研 (T4) 与 diplomat 接入契约,真实 smoltcp PHY 推迟到 P5-T3。Why: 1) virtio-blk 服务于 P6 存储栈(FS 服务),需 kernel 信任根做 BAR 映射 + virtqueue;virtio-net 仅服务于外交工具,全程 user 态即可(只需 kernel 转发 MMIO 区域 mmap + IRQ 通知);2) Doc 08 §3.2 后端矩阵 P0 是 virtio-blk legacy,QEMU 默认即用,优先打通;3) Doc 04 §3.1 '唯一网络出口' 由 diplomat 进程持 NIC cap 实现,cap 创建期 cap_alloc 仅给 diplomat 进程发 NIC Device cap (P5-T2),其他进程物理无网可上,即使在 user 态跑驱动也无法启用。How to apply: P4.5-T1 (pci 抽离) 与 P4.5-T2 (IRQ_BIND) 可并行;P4.5-T3 与 P4.5-T4 串行(P4-T2 cap 通路是 T3/T4 共同基础);T5 集成 smoke 收口。",
+      "alternatives_rejected": "① P4.5 同时做 virtio-blk + virtio-net 内核驱动: 与架构哲学冲突 (Doc 04 §3.1 '唯一网络出口'),且工作量翻倍;② user 态 virtio-blk: 违反 Doc 08 §3.1 后端矩阵 P0 定义 (kernel trust root for BAR + DMA),DMA 缓冲分配与 FR8 页账本耦合复杂。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P5 范围: 仅 API Channel + CryptoProvider 埋点 + Agent 雏形最小子集",
+      "summary": "P5 严格收敛在 Doc 04 §11 范围约束: 仅实做 API Channel 最小子集 (HTTPS 出站 + 域名白名单 + Schema 校验 + 超时 + 限流 + 审计摘要);File/Web/Stream/Realtime 四类通道仅保留接口草案,不进入 P5 退出标准。Agent 雏形 (AgentBus + Planner + Executor) 仅满足 Doc 06 §4.2 S2 退出标准的'端到端 demo' (用户输入 → Planner 远程 LLM → Executor 执行 → 输出)。CryptoProvider trait + Ed25519 实现 + Signature 不透明类型 + 审计签名升级作为 Phase 6 PQC 替换的廉价埋点。Why: 1) Doc 04 §11 已显式约束 Phase 5 仅 API Channel,防'远程 API 代理'膨胀 (需求评审 R14);2) 个人项目工作量控制 (Doc 06 §12 风险表 'GUI 显示栈工作量巨大' 类比);3) CryptoProvider 提前做是唯一必须现在做的廉价埋点 (Doc 06 §13.2),其他 PQC 组件可推迟。How to apply: T1→T2→T3 串行 (diplomat 骨架 → cap 扩展 → smoltcp 集成);T4→T6→T8 围绕 API Channel 并行;T5 (spawn 放开 + SupervisorTree) 与 T7 (Agent 雏形) 依赖前序;T9 集成 smoke 收口。",
+      "alternatives_rejected": "① P5 覆盖全 5 类通道 (File/Web/Stream/API/Realtime): 违反 Doc 04 §11 范围约束,工作量不可行;② 跳过 CryptoProvider trait 直接硬编码 Ed25519: Phase 6 替换 ML-DSA 时业务层需大改 (signature: [u8;64] → Signature 类型),违反 Doc 06 §13.2 廉价埋点原则;③ P5 同时做本体引擎 + 动态 UI: 越界进入 S6 范围,前置 S5 + P6 GPU 驱动未落地。"
     }
   ],
   "current_task": "P3-T8",

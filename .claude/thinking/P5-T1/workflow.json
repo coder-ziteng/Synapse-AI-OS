@@ -1,0 +1,28 @@
+{
+  "featureName": "P5-T1",
+  "description": "外交工具进程骨架 + IPC 接入（init spawn diplomat pid=2）",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T1a-diplomat-bin-crate": "pending",
+    "T1b-init-spawn-upgrade": "pending",
+    "T1c-diplomat-ipc-loop": "pending",
+    "T1d-boot-log-output": "pending",
+    "T1e-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "user/diplomat/ 新 bin crate（no_std target + 用户态 runtime + DiplomatCapSet 入参）；init 升级 spawn diplomat 子进程（pid=2）→ 注入 NIC Device + IRQ cap + 子端点 cap；diplomat 主循环 ep_recv(diplomat_kernel_ep) → 路由命令 → ep_reply",
+    "design-contract": "Doc 04 §3.1 唯一网络出口不变量；Doc 02 §6.2 启动链扩展（kernel_main → init → diplomat → 其他）",
+    "cross-task-dep": "P4.5-T4（virtio-net 用户态驱动预研）",
+    "scope-defer": "真实网络协议栈 → P5-T3；本期 diplomat 仅 recv/reply 自环消息验证 IPC 通路"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

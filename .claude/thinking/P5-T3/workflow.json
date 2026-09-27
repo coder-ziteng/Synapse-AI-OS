@@ -1,0 +1,28 @@
+{
+  "featureName": "P5-T3",
+  "description": "virtio-net 用户态驱动实做 + smoltcp PHY 集成",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T3a-virtio-net-driver-real": "pending",
+    "T3b-smoltcp-phy-implementation": "pending",
+    "T3c-smoltcp-cfg-features": "pending",
+    "T3d-diplomat-poll-loop": "pending",
+    "T3e-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "user/diplomat/src/driver/virtio_net.rs 实做 BAR mmap 后 MMIO 读写 + virtqueue 提交 + interrupt Notification 接收；smoltcp PHY trait 包装（send/receive 钩子）+ IPv4 + ARP + ICMP + UDP；cfg 精简 feature（no_std + 静态缓冲 + 单网卡）",
+    "design-contract": "Doc 04 §3 唯一网络出口；Doc 05 协议主路径 A2A 仅指远期，本期仅 IP 层可达性",
+    "cross-task-dep": "P5-T1 diplomat 进程骨架 + P4.5-T4 用户态驱动结构",
+    "verifier": "diplomat 启动 → ARP 广播 → QEMU -net user 后端嗅探 → 回应 → 表项建立；UDP 10.0.2.2:9 可达（QEMU 内置 forwarder）"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

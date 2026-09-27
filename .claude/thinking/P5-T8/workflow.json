@@ -1,0 +1,28 @@
+{
+  "featureName": "P5-T8",
+  "description": "Security Gateway 最小子集：出站脱敏 + 入站 schema 校验（Doc 04 §6）",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T8a-gateway-skeleton": "pending",
+    "T8b-outbound-redact-rules": "pending",
+    "T8c-inbound-schema-verify": "pending",
+    "T8d-gateway-fail-trip": "pending",
+    "T8e-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "diplomat/src/gateway/ 出站脱敏（内置 SSN\\d{3}-\\d{2}-\\d{4}/email/IPv4 正则 + per-process PolicySet 用户可配）；入站响应 schema 校验（与 T4 链路共用）；连续 3 次网关失败 → diplomat process_exit(1) → init Supervisor 按 max_restarts=3/10s 重启（呼应 T5）",
+    "design-contract": "Doc 04 §6 + §11 强安全决策（网关失败熔断整个外交工具）；Doc 04 §7.1 Deep 路径（<100ms/文件）",
+    "cross-task-dep": "P5-T4 API Channel 链路；P5-T5 Supervisor 重启策略",
+    "mvp-omission": "流式扫描（视频/音频）→ P6 Realtime/Stream 通道落地；PII 模型扫描 → S5"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

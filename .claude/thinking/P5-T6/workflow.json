@@ -1,0 +1,29 @@
+{
+  "featureName": "P5-T6",
+  "description": "CryptoProvider trait + Ed25519 实现 + 审计签名升级（Doc 06 §13.2 廉价埋点）",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T6a-crypto-provider-trait": "pending",
+    "T6b-algorithm-enums": "pending",
+    "T6c-signature-opaque-type": "pending",
+    "T6d-ed25519-x25519-blake3-impl": "pending",
+    "T6e-audit-signature-upgrade": "pending",
+    "T6f-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "user/diplomat/src/crypto/provider.rs CryptoProvider trait（sign/verify/kx_ephemeral/kx_derive/hash）+ SigAlgorithm/KxAlgorithm/HashAlgorithm 枚举（首期实现 Ed25519/X25519/Sha256/BLAKE3，预留 PQC 位）+ Signature 不透明类型；ed25519-dalek/x25519-dalek/sha2/blake3 用户态依赖 no_std 适配；audit AuditEvent.signature 字段升级 [u8;64]→Signature 类型（Doc 06 §13.2.2 跨文档对齐 Doc 04 §8.1）",
+    "design-contract": "Doc 06 §13.2 廉价埋点；Phase 6 PQC 替换 ML-DSA 不改业务层",
+    "cross-task-dep": "P4-T11 审计事件流；P5-T4 API Channel 触发签名链路",
+    "poc-skip": "硬编码密钥（无 KDF/PEM 解析）；首期仅对称验证 + Ed25519 自签；密钥管理留 S5"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}

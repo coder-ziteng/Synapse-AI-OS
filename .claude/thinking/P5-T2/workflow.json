@@ -1,0 +1,28 @@
+{
+  "featureName": "P5-T2",
+  "description": "Network + Channel capability 类型扩展（cap crate + syscall 接线）",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "pending",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T2a-cap-kind-network-channel": "pending",
+    "T2b-rights-network-connect-listen": "pending",
+    "T2c-cap-invoke-real-dispatch": "pending",
+    "T2d-abi-minor-4-to-5": "pending",
+    "T2e-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "synapse_cap::types::ObjKind 新增 Network(scope: SmallStr) + Channel(kind: ChannelKind)；Right 新增 NETWORK_CONNECT/NETWORK_LISTEN/CHANNEL_SEND/CHANNEL_RECV（仅追加 bit 7~31 保留）；k_cap_invoke 真实分发 Network op=Connect → 内核校验 scope 白名单 → 委托 diplomat 经 IPC 通道；ABI_MINOR 4→5；新增错误码 E_NETWORK_DENIED(-18)/E_CHANNEL_INVALID(-19)",
+    "design-contract": "Doc 04 §3 唯一网络出口 + Doc 01 §2.1 capability 权限模型；Doc 02 §4.5 rights 只追加 ABI 规则",
+    "cross-task-dep": "P4-T13 cap_invoke；P5-T1 diplomat 进程骨架；与 P4-T13 安全回归矩阵合并",
+    "scope-defer": "Channel 全 kind 分发（File/Web/Stream/Realtime）→ P6+；本期仅 Api kind 路径真实化"
+  },
+  "createdAt": "2026-09-27T20:50:00",
+  "updatedAt": "2026-09-27T20:50:00"
+}
