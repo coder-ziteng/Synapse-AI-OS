@@ -54,7 +54,7 @@ use synapse_abi::{
 use synapse_cap::{ObjKind, Rights};
 use synapse_proc::process::{FaultKind, Pid};
 
-use crate::paging::{AddressSpace, PT_USER, PT_WRITABLE};
+use crate::paging::AddressSpace;
 
 // ---------------------------------------------------------------------------
 // MSR 常量（AMD64 Manual Vol.2 §5 MSRs）
@@ -356,6 +356,20 @@ fn dispatch_inner(frame: &SyscallFrame) -> i64 {
                 // SAFETY: spawned child 上下文，KERNEL_FRAME 已武装。
                 unsafe { crate::proc_life::terminate_current(None, code) }
             }
+            // FR9 审计：legacy 路径（init / 集成 smoke）的 exit 事件——
+            // terminate_current 路径在其内部自记，此处只补 legacy 分支。
+            // 必须在 handle_process_exit（永不返回）之前。
+            {
+                let pid = crate::proc_ext::current_pid();
+                let agent = crate::audit::agent_of_pub(pid);
+                crate::audit::process_ev(
+                    agent,
+                    synapse_audit::ProcOp::Exit,
+                    agent,
+                    u32::MAX,
+                    code,
+                );
+            }
             // SAFETY: smoke 上下文已武装 KERNEL_FRAME。
             unsafe { crate::ring3::handle_process_exit() }
         }
@@ -389,6 +403,10 @@ fn dispatch_inner(frame: &SyscallFrame) -> i64 {
                 Syscall::NotificationWait { notif, mask } => {
                     sys_notify_wait(notif, mask)
                 }
+                // P4-T13：capability syscall 接线（校验语义见 capsys 模块头）
+                Syscall::CapInvoke { .. } => crate::capsys::k_cap_invoke(frame),
+                Syscall::CapDelegate { .. } => crate::capsys::k_cap_delegate(frame),
+                Syscall::CapRevoke { .. } => crate::capsys::k_cap_revoke(frame),
                 Syscall::ProcessReap { pid } => {
                     // P4-T9d：reap 父进程持有的 zombie child。调用方 = caller
                     // （smoke 内是 init / spawn_continuation）；错误映射走
@@ -428,30 +446,14 @@ fn with_user_as(f: impl FnOnce(*mut AddressSpace) -> i64) -> i64 {
     f(p as *mut AddressSpace)
 }
 
-/// 用户指针区间校验：[va, va+len) 每页 present + PT_USER（+ PT_WRITABLE
-/// 若 `need_write`）。拒绝而非 fault——syscall 集成层不允许触发 #PF 路径
-/// （demand paging 只对 VMA 登记的懒映射区生效，gettime 输出指针不在其列）。
+/// 用户指针区间校验（P4-T13 起统一走 [`crate::uaccess`]；本包装保留
+/// `&AddressSpace` 签名 + syscall 侧「零长即拒」语义——gettime 输出 16B
+/// 定长，len==0 是调用方 bug 而非合法空缓冲）。
 fn user_mem_ok(as_user: &AddressSpace, va: u64, len: u64, need_write: bool) -> bool {
     if len == 0 {
         return false;
     }
-    let Some(end) = va.checked_add(len) else { return false };
-    let mut page = va & !0xFFF;
-    while page < end {
-        match as_user.walk_flags(page) {
-            Some((_, flags)) => {
-                if flags & PT_USER == 0 {
-                    return false;
-                }
-                if need_write && flags & PT_WRITABLE == 0 {
-                    return false;
-                }
-            }
-            None => return false,
-        }
-        page += 0x1000;
-    }
-    true
+    crate::uaccess::user_mem_ok(as_user as *const AddressSpace as u64, va, len, need_write)
 }
 
 /// `gettime(clock_id, ts_out)`（#30）实现。

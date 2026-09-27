@@ -4,9 +4,9 @@
   "last_update": "2026-09-27",
   "session": {
     "current_phase": "P4",
-    "current_task": "P4-T10",
+    "current_task": "P4-T14",
     "status": "in_progress",
-    "notes": "2026-09-25: 设计文档纯设计审查完成 (claude/design-pure-review 分支)。\nDoc 01~06 全部升级为 PROPOSED 完成，添加决策汇总表。Phase 4/5/6+ 核心设计收敛。\n\n2026-09-25: 需求评审 §6 Phase 4 硬性闸门设计缺口补全完成 (f253114, 92f7201, 53b89b1)。\n- Doc 01 §4.2: 对象生命周期状态机 + generation 校验 + 进程退出回收顺序\n- Doc 02 §4.5: ABI 版本策略 (abi_query + 消息头 version + rights 只追加) + 5 新错误码\n- Doc 02 §5.5: 每进程资源配额模型 (Quota struct + 管理规则 + FR8 关系)\n- Doc 02 §5.1/§3.2: MVP-3 单线程约束 + PCID 可选优化说明\n- Doc 03 §5.1: IPC 错误语义 + 对端死亡处理规则\n- Doc 04: Phase 5 MVP 范围约束 (仅 API Channel)\n- Doc 06 §2.1: 服务层依赖级别 (P0/P1/P2) + 各阶段首期承诺\n\n需求评审 §6 的 12 项 Phase 4 闸门决策：11 项已收敛，1 项 (基准测试配置) 属测试/CI 范畴。\n\n2026-09-25: CI/xtask 落地完成 (d3c4994)。P1-T4 boot 调试发现：\n- QEMU trace 显示 #PF @ IP=0x2068dc CR2=0xC0000080\n- IP=0x2068dc 在 raw_cpuid 库代码中，不在 _start64 (0x200d90)\n- rsp 被破坏（应为 0x15008，实际 0xC0000072）\n- stage2 debugcon 输出到 'L' (jmp rax 前) 后无 'AB' 从 _start64\n- 结论：stage2 的 jmp rax 未成功到达 _start64，或到达后 rsp 被破坏\n- 可能原因：stage2 页表/栈设置问题，或 _start64 入口约定不符\n- 内核 ELF 有 Xen PVH note (entry=0x200018)，但 QEMU -kernel 未走 PVH\n下一步：P1-T5 (log + panic handler) 不依赖 boot，可并行推进。\n\n2026-09-25: P1-T6 (HAL SerialDevice trait) + P1-T7 (UART HAL化) 完成。HAL 提供零成本抽象 + cfg(test) fake impl。\n\nP1-T5 (log + logger) 完成。内核集成 log crate，KernelLogger 输出到串口。\n\n2026-09-26: synapse-cap crate 落地 (cap/)。能力子系统核心全部实现并宿主测试通过 (22 tests)：\n- error.rs: CapError 15 错误码 + errno 映射 (-1..-15, Doc 02 §4.3/§4.5)\n- rights.rs: 权限位掩码 (零依赖手写 bitflags, 保留位掩掉防 ABI 漂移)\n- types.rs: CapRef=u8 / ObjRef{index,generation} / Capability{obj,rights,badge,parent} / ObjKind 10 类\n- table.rs: 256 槽 CapTable (slot 0 NULL trap) + delegate(attenuation-only, 需 GRANT) + revoke_cascade(不动点迭代, 无递归)\n- object.rs: ObjectTable 1024 槽 + generation 历史独立于槽位 (防复用复活) + Live→Revoking→Retired→Freed 状态机\n- quota.rs: Quota/DEFAULT_QUOTA/QuotaUsage charge-release (O(1), 超限 QuotaExceeded 不阻塞) + spawn 划拨校验 (Doc 02 §5.5)\n- transfer.rs: atomic all-or-nothing 跨进程转移 (5 步预检查零副作用, MAX_TRANSFER=8, Doc 03 §5)\n- 附带修复: Doc 01 §4.2 E_OBJECT_RETIRED errno -10→-12 (与 Doc 02 对齐); Doc 03 §5.1 transfer 表满 E_PERMISSION→E_NO_MEMORY; Doc 01 free_top u8→u16\n下一步: 内核集成层 (Spinlock 包装 + syscall 绑定) 待 boot 打通后接入。\n\n2026-09-26: synapse-ipc crate 落地 (ipc/)。IPC 核心宿主测试通过 (14 tests)：\n- header.rs: IpcHeader repr(C) 20B 固定 ABI (version/header_len 前向兼容, flags 严格 0) + AgentId 数值盖章 (字符串↔数值映射归 init, Doc 01 §7) + validate (AbiMismatch/-11, cap 数超限/-1, payload>min(quota,4KB)/-13)\n- path.rs: 三档传输路径分类 (≤32B 寄存器直传 / ≤4KB kmap 单拷贝 / >4KB grant 描述符, Doc 03 §4.3)\n- notification.rs: 位图 u64 OR 聚合 + 读清 poll (Doc 03 §6.2, O(1))\n- endpoint.rs: 单接收者同步端点环形队列 (32 深) + try_send(Delivered/Queued/WouldBlock) + cancel_sender 对端死亡摘除 (FIFO 保持, 等待接收者不受扰, Doc 03 §5.1)\n调度/kmap memcpy/cap 安装留给内核集成层；synapse-ipc 已验证可链入 x86_64-bootloader.json 目标。\n\n2026-09-26: synapse-proc crate 落地 (proc/)。进程模型核心宿主测试通过 (14 tests)：\n- process.rs: ProcessTable(128 槽) + Pcb + 状态机 Created→Running⇄Blocked→Exited/Faulted→Zombie→reap (Doc 02 §5.3)；spawn 六步校验链 (仅 init 可 spawn/agent 查重/配额划拨预留)；exit/fault 返回 DeathSignal (集成层投递 death_endpoint)；孤儿过继 init；freeze/thaw 行为围栏 (E_FROZEN -8)；pid 单调分配不复用；配额 carve/uncarve (spawn 预留、reap 归还)\n- agent.rs: 内核侧数值 agent_id 唯一性注册表 (字符串映射归 init 用户态, Doc 01 §7)\n- grant.rs: spawn 初始 caps 安装复用 transfer_caps atomic 语义 (衰减+GRANT 校验+零副作用回滚)\n资源释放顺序契约 (页帧→CapTable→agent_id→pid) 前两步归集成层、后两步在 reap。三 crate 累计 50 宿主测试全绿，均可链入 x86_64-bootloader.json。\n\n2026-09-26: P1-T4 boot 链路全通 + P1-T5 真机验收 (claude/design-pure-review 分支)。QEMU 退出码 107, serial '[INFO] Hello, Synapse!', dbg501 'ABCDEF', 21/21 块加载回读与镜像一致, panic backtrace 4 帧符号化有效。三个根因: ① 内核栈误放 0xF0000 (QEMU isa-bios ROM 区, CPU 写入被静默忽略→retf 弹垃圾→三重故障), 移至 0x60008 并满足 Rust ABI 入口 rsp%16==8; ② stage2 加载循环 debug16 标记 '3'/'4' 的 mov al,imm8 污染 EAX → LBA/dst 双推进错误 → 内核镜像重叠错位入 RAM (仅 14% 字节正确); ③ 复制段 mov esi 缺 0x66 前缀 (顺带解开'删 buffer 检查即挂'旧谜)。详见 decision_log 2026-09-26 三条。\n下一步: P1-T8 (test_framework 集成) 为 P1 唯一 pending 项; boot 已通, cap/ipc/proc 内核集成层可启动。\n[claude/design-pure-review | P1-T4 host cores] abi/ crate (10/10 测试, clippy 干净, kernel 目标 OK) + audit/ crate (6/6 测试, clippy 干净, kernel 目标 OK) 完成；工作区 cap+ipc+proc+abi+audit 共 66/66 全绿。Doc 02 §0/§4.2 syscall 计数 18→19 已修正。\n[claude/design-pure-review | P1-T4 host cores] user/ crate (30/30 测试, clippy 干净, kernel 目标 OK) 完成；工作区 cap+ipc+proc+abi+audit+user 共 96/96 全绿。19 个 syscall 帧编码器 + 类型化包装器 + CapRef(u16) 严格校验 + decode 闭环验证。\n[claude/design-pure-review | P1-T4 host cores] kint/ crate (14/14 测试, clippy 干净) 完成；工作区 cap+ipc+proc+abi+audit+user+kint 共 110/110 全绿。MockKernelState + dispatch(frame) → i64 把 6 个纯逻辑 crate 粘合 为宿主可测的 syscall 分发器。\n\n2026-09-26: P3-T2 (FR8 资源核算原语) 完成。sched crate 增 Tcb.cpu_time + Scheduler.account_cpu/total_cpu（CPU 维度守恒记账）+ accounting.rs PageLedger（per-process 页账本，drain 清算泄漏供 FR9 审计）。sched 46/46，workspace 161/161 全绿，内核构建不受影响。下一步: P3-T3 (FR10 冻结/频率计数) 或 P3-T4 (kthread 栈+CpuContext)，二者可并行。\n\n2026-09-26: P3-T3 (FR10 冻结/频率计数原语) 完成。rate.rs RateTable：per-process syscall/IPC 固定窗口计数 + 粘性超限标志（enforcement 留用户态监督树）；freeze/thaw 验证强化（冻结线程永不被调度、thaw 恢复原优先级触发抢占）。sched 56/56，workspace 171/171，clippy 零警告。下一步: P3-T4 (内核侧 kthread 栈 + CpuContext，真机 smoke)。\n\n2026-09-26: P3-T4 (内核侧 kthread 基建) 完成。kernel/src/kthread.rs：CpuContext（8 字 callee-saved，映射 sched ContextSlot）+ 5 帧栈（1 guard 毒化 + 16KB）+ SCHED 全局 SpinLock + boot 线程收编 + kthread_create 预置统一 ret 首切上下文（trampoline/entry-in-rbx，P3-T5 直接消费）。真机三重判定全绿：363 / 62+27 checks / markers …ZIab。顺带修复 P2 潜伏 bug：page_frame.free_contiguous_frames 帧号当地址传 → used 漂移+帧 0 污染（kthread 栈释放首次真机触发暴露），已修复+回归测试。下一步: P3-T5 (switch_to 手写汇编，消费 kthread_create 预置的上下文)。\n\n2026-09-27: P3-T5 完成 — switch_to 手写汇编真机贯通（exit 363, markers …Iabcd, 62/62+27/27+9/9）。首跑 #DF 双根因（-> ! 死代码删除 + current 陈旧自切换）修复入 decision_log。下一步 P3-T6 抢占模型接线（IRQ0 置 need_resched + 中断返回边界调度）。\n\n2026-09-27: P3-T6 完成 — 抢占模型接线真机贯通（exit 363, markers …Iabcdef, 62/62+27/27+9/9+9/9 preempt smoke；106 switches / 7 IRQ 抢占）。两个真机挂死根因（trampoline 缺 sti → IF=0 永久化；最后线程退出后 Switch{prev:None} 无保存目标 → IDLE_SCRATCH）与 xv6 式 handler 尾部切换取向入 decision_log。下一步 P3-T7（Mutex 睡眠锁 + sleep_until 定时唤醒，kthread_block_current 已备好阻塞原语）。\n\n2026-09-27: P4 收尾任务清单 + P4.5/P5 设计+小任务切分落地完成。\n- P4 待办: T10 用户态 init 启动链收口 / T11 FR9 审计内核接线 / T12 PCID + Phase 4 集成收尾 / T13 cap syscall 接线 + 安全回归 / T14 NFR2 基准 + idle 线程根治\n- P4.5 新增 (5 任务, PCI 用户态化基线): T1 PCI 子系统抽象 + T2 IRQ_BIND cap + T3 virtio-blk legacy MMIO 实做 + T4 virtio-net 用户态驱动预研 + T5 P4.5 集成 smoke\n- P5 新增 (9 任务, 外交工具 + Agent 雏形): T1 diplomat 进程骨架 / T2 Network+Channel cap 扩展 / T3 virtio-net 用户态实做+smoltcp / T4 API Channel 最小子集 / T5 spawn 放开+SupervisorTree / T6 CryptoProvider+Ed25519 / T7 Agent 雏形(AgentBus+Planner+Executor) / T8 Security Gateway 最小子集 / T9 P5 集成 smoke + 端到端 demo\n- 关键契约: Doc 07/08 一致要求内核只做 MMIO/IRQ 转发 (capability 控制), Doc 04 §11 Phase 5 仅 API Channel 范围约束, Doc 06 §13.2 CryptoProvider + Signature 廉价埋点为 Phase 6 PQC 替换铺路\n- 当前会话切到 P4 收尾 (current_task=P4-T10), 并行窗口可认领 P4.5-T1 (PCI 抽离) 或 P4-T11 (FR9 审计接线), 互不冲突"
+    "notes": "2026-09-25: 设计文档纯设计审查完成 (claude/design-pure-review 分支)。\nDoc 01~06 全部升级为 PROPOSED 完成，添加决策汇总表。Phase 4/5/6+ 核心设计收敛。\n\n2026-09-25: 需求评审 §6 Phase 4 硬性闸门设计缺口补全完成 (f253114, 92f7201, 53b89b1)。\n- Doc 01 §4.2: 对象生命周期状态机 + generation 校验 + 进程退出回收顺序\n- Doc 02 §4.5: ABI 版本策略 (abi_query + 消息头 version + rights 只追加) + 5 新错误码\n- Doc 02 §5.5: 每进程资源配额模型 (Quota struct + 管理规则 + FR8 关系)\n- Doc 02 §5.1/§3.2: MVP-3 单线程约束 + PCID 可选优化说明\n- Doc 03 §5.1: IPC 错误语义 + 对端死亡处理规则\n- Doc 04: Phase 5 MVP 范围约束 (仅 API Channel)\n- Doc 06 §2.1: 服务层依赖级别 (P0/P1/P2) + 各阶段首期承诺\n\n需求评审 §6 的 12 项 Phase 4 闸门决策：11 项已收敛，1 项 (基准测试配置) 属测试/CI 范畴。\n\n2026-09-25: CI/xtask 落地完成 (d3c4994)。P1-T4 boot 调试发现：\n- QEMU trace 显示 #PF @ IP=0x2068dc CR2=0xC0000080\n- IP=0x2068dc 在 raw_cpuid 库代码中，不在 _start64 (0x200d90)\n- rsp 被破坏（应为 0x15008，实际 0xC0000072）\n- stage2 debugcon 输出到 'L' (jmp rax 前) 后无 'AB' 从 _start64\n- 结论：stage2 的 jmp rax 未成功到达 _start64，或到达后 rsp 被破坏\n- 可能原因：stage2 页表/栈设置问题，或 _start64 入口约定不符\n- 内核 ELF 有 Xen PVH note (entry=0x200018)，但 QEMU -kernel 未走 PVH\n下一步：P1-T5 (log + panic handler) 不依赖 boot，可并行推进。\n\n2026-09-25: P1-T6 (HAL SerialDevice trait) + P1-T7 (UART HAL化) 完成。HAL 提供零成本抽象 + cfg(test) fake impl。\n\nP1-T5 (log + logger) 完成。内核集成 log crate，KernelLogger 输出到串口。\n\n2026-09-26: synapse-cap crate 落地 (cap/)。能力子系统核心全部实现并宿主测试通过 (22 tests)：\n- error.rs: CapError 15 错误码 + errno 映射 (-1..-15, Doc 02 §4.3/§4.5)\n- rights.rs: 权限位掩码 (零依赖手写 bitflags, 保留位掩掉防 ABI 漂移)\n- types.rs: CapRef=u8 / ObjRef{index,generation} / Capability{obj,rights,badge,parent} / ObjKind 10 类\n- table.rs: 256 槽 CapTable (slot 0 NULL trap) + delegate(attenuation-only, 需 GRANT) + revoke_cascade(不动点迭代, 无递归)\n- object.rs: ObjectTable 1024 槽 + generation 历史独立于槽位 (防复用复活) + Live→Revoking→Retired→Freed 状态机\n- quota.rs: Quota/DEFAULT_QUOTA/QuotaUsage charge-release (O(1), 超限 QuotaExceeded 不阻塞) + spawn 划拨校验 (Doc 02 §5.5)\n- transfer.rs: atomic all-or-nothing 跨进程转移 (5 步预检查零副作用, MAX_TRANSFER=8, Doc 03 §5)\n- 附带修复: Doc 01 §4.2 E_OBJECT_RETIRED errno -10→-12 (与 Doc 02 对齐); Doc 03 §5.1 transfer 表满 E_PERMISSION→E_NO_MEMORY; Doc 01 free_top u8→u16\n下一步: 内核集成层 (Spinlock 包装 + syscall 绑定) 待 boot 打通后接入。\n\n2026-09-26: synapse-ipc crate 落地 (ipc/)。IPC 核心宿主测试通过 (14 tests)：\n- header.rs: IpcHeader repr(C) 20B 固定 ABI (version/header_len 前向兼容, flags 严格 0) + AgentId 数值盖章 (字符串↔数值映射归 init, Doc 01 §7) + validate (AbiMismatch/-11, cap 数超限/-1, payload>min(quota,4KB)/-13)\n- path.rs: 三档传输路径分类 (≤32B 寄存器直传 / ≤4KB kmap 单拷贝 / >4KB grant 描述符, Doc 03 §4.3)\n- notification.rs: 位图 u64 OR 聚合 + 读清 poll (Doc 03 §6.2, O(1))\n- endpoint.rs: 单接收者同步端点环形队列 (32 深) + try_send(Delivered/Queued/WouldBlock) + cancel_sender 对端死亡摘除 (FIFO 保持, 等待接收者不受扰, Doc 03 §5.1)\n调度/kmap memcpy/cap 安装留给内核集成层；synapse-ipc 已验证可链入 x86_64-bootloader.json 目标。\n\n2026-09-26: synapse-proc crate 落地 (proc/)。进程模型核心宿主测试通过 (14 tests)：\n- process.rs: ProcessTable(128 槽) + Pcb + 状态机 Created→Running⇄Blocked→Exited/Faulted→Zombie→reap (Doc 02 §5.3)；spawn 六步校验链 (仅 init 可 spawn/agent 查重/配额划拨预留)；exit/fault 返回 DeathSignal (集成层投递 death_endpoint)；孤儿过继 init；freeze/thaw 行为围栏 (E_FROZEN -8)；pid 单调分配不复用；配额 carve/uncarve (spawn 预留、reap 归还)\n- agent.rs: 内核侧数值 agent_id 唯一性注册表 (字符串映射归 init 用户态, Doc 01 §7)\n- grant.rs: spawn 初始 caps 安装复用 transfer_caps atomic 语义 (衰减+GRANT 校验+零副作用回滚)\n资源释放顺序契约 (页帧→CapTable→agent_id→pid) 前两步归集成层、后两步在 reap。三 crate 累计 50 宿主测试全绿，均可链入 x86_64-bootloader.json。\n\n2026-09-26: P1-T4 boot 链路全通 + P1-T5 真机验收 (claude/design-pure-review 分支)。QEMU 退出码 107, serial '[INFO] Hello, Synapse!', dbg501 'ABCDEF', 21/21 块加载回读与镜像一致, panic backtrace 4 帧符号化有效。三个根因: ① 内核栈误放 0xF0000 (QEMU isa-bios ROM 区, CPU 写入被静默忽略→retf 弹垃圾→三重故障), 移至 0x60008 并满足 Rust ABI 入口 rsp%16==8; ② stage2 加载循环 debug16 标记 '3'/'4' 的 mov al,imm8 污染 EAX → LBA/dst 双推进错误 → 内核镜像重叠错位入 RAM (仅 14% 字节正确); ③ 复制段 mov esi 缺 0x66 前缀 (顺带解开'删 buffer 检查即挂'旧谜)。详见 decision_log 2026-09-26 三条。\n下一步: P1-T8 (test_framework 集成) 为 P1 唯一 pending 项; boot 已通, cap/ipc/proc 内核集成层可启动。\n[claude/design-pure-review | P1-T4 host cores] abi/ crate (10/10 测试, clippy 干净, kernel 目标 OK) + audit/ crate (6/6 测试, clippy 干净, kernel 目标 OK) 完成；工作区 cap+ipc+proc+abi+audit 共 66/66 全绿。Doc 02 §0/§4.2 syscall 计数 18→19 已修正。\n[claude/design-pure-review | P1-T4 host cores] user/ crate (30/30 测试, clippy 干净, kernel 目标 OK) 完成；工作区 cap+ipc+proc+abi+audit+user 共 96/96 全绿。19 个 syscall 帧编码器 + 类型化包装器 + CapRef(u16) 严格校验 + decode 闭环验证。\n[claude/design-pure-review | P1-T4 host cores] kint/ crate (14/14 测试, clippy 干净) 完成；工作区 cap+ipc+proc+abi+audit+user+kint 共 110/110 全绿。MockKernelState + dispatch(frame) → i64 把 6 个纯逻辑 crate 粘合 为宿主可测的 syscall 分发器。\n\n2026-09-26: P3-T2 (FR8 资源核算原语) 完成。sched crate 增 Tcb.cpu_time + Scheduler.account_cpu/total_cpu（CPU 维度守恒记账）+ accounting.rs PageLedger（per-process 页账本，drain 清算泄漏供 FR9 审计）。sched 46/46，workspace 161/161 全绿，内核构建不受影响。下一步: P3-T3 (FR10 冻结/频率计数) 或 P3-T4 (kthread 栈+CpuContext)，二者可并行。\n\n2026-09-26: P3-T3 (FR10 冻结/频率计数原语) 完成。rate.rs RateTable：per-process syscall/IPC 固定窗口计数 + 粘性超限标志（enforcement 留用户态监督树）；freeze/thaw 验证强化（冻结线程永不被调度、thaw 恢复原优先级触发抢占）。sched 56/56，workspace 171/171，clippy 零警告。下一步: P3-T4 (内核侧 kthread 栈 + CpuContext，真机 smoke)。\n\n2026-09-26: P3-T4 (内核侧 kthread 基建) 完成。kernel/src/kthread.rs：CpuContext（8 字 callee-saved，映射 sched ContextSlot）+ 5 帧栈（1 guard 毒化 + 16KB）+ SCHED 全局 SpinLock + boot 线程收编 + kthread_create 预置统一 ret 首切上下文（trampoline/entry-in-rbx，P3-T5 直接消费）。真机三重判定全绿：363 / 62+27 checks / markers …ZIab。顺带修复 P2 潜伏 bug：page_frame.free_contiguous_frames 帧号当地址传 → used 漂移+帧 0 污染（kthread 栈释放首次真机触发暴露），已修复+回归测试。下一步: P3-T5 (switch_to 手写汇编，消费 kthread_create 预置的上下文)。\n\n2026-09-27: P3-T5 完成 — switch_to 手写汇编真机贯通（exit 363, markers …Iabcd, 62/62+27/27+9/9）。首跑 #DF 双根因（-> ! 死代码删除 + current 陈旧自切换）修复入 decision_log。下一步 P3-T6 抢占模型接线（IRQ0 置 need_resched + 中断返回边界调度）。\n\n2026-09-27: P3-T6 完成 — 抢占模型接线真机贯通（exit 363, markers …Iabcdef, 62/62+27/27+9/9+9/9 preempt smoke；106 switches / 7 IRQ 抢占）。两个真机挂死根因（trampoline 缺 sti → IF=0 永久化；最后线程退出后 Switch{prev:None} 无保存目标 → IDLE_SCRATCH）与 xv6 式 handler 尾部切换取向入 decision_log。下一步 P3-T7（Mutex 睡眠锁 + sleep_until 定时唤醒，kthread_block_current 已备好阻塞原语）。\n\n2026-09-27: P4 收尾任务清单 + P4.5/P5 设计+小任务切分落地完成。\n- P4 待办: T10 用户态 init 启动链收口 / T11 FR9 审计内核接线 / T12 PCID + Phase 4 集成收尾 / T13 cap syscall 接线 + 安全回归 / T14 NFR2 基准 + idle 线程根治\n- P4.5 新增 (5 任务, PCI 用户态化基线): T1 PCI 子系统抽象 + T2 IRQ_BIND cap + T3 virtio-blk legacy MMIO 实做 + T4 virtio-net 用户态驱动预研 + T5 P4.5 集成 smoke\n- P5 新增 (9 任务, 外交工具 + Agent 雏形): T1 diplomat 进程骨架 / T2 Network+Channel cap 扩展 / T3 virtio-net 用户态实做+smoltcp / T4 API Channel 最小子集 / T5 spawn 放开+SupervisorTree / T6 CryptoProvider+Ed25519 / T7 Agent 雏形(AgentBus+Planner+Executor) / T8 Security Gateway 最小子集 / T9 P5 集成 smoke + 端到端 demo\n- 关键契约: Doc 07/08 一致要求内核只做 MMIO/IRQ 转发 (capability 控制), Doc 04 §11 Phase 5 仅 API Channel 范围约束, Doc 06 §13.2 CryptoProvider + Signature 廉价埋点为 Phase 6 PQC 替换铺路\n- 当前会话切到 P4 收尾 (current_task=P4-T10), 并行窗口可认领 P4.5-T1 (PCI 抽离) 或 P4-T11 (FR9 审计接线), 互不冲突\n\n[2026-09-27 claude/p4-final-phase(P6.0-T1)] P6.0-T1 E820 真实探测完成：stage2 恢复 INT 15h 循环探测（终止双判据：CF=1 丢弃 / EBX=0 计数后结束；SeaBIOS rel-1.17 从不置 CF = P2-T1 挂起真因）+ 硬编码 fallback 保留 + INITRD_INFO_ADDR 0x21000 碰撞修复。三重证据 -m 128M/1024M/8G 均与 SeaBIOS e820 map 逐字节一致；xtask run=363、xtask ci=OK、basic_boot 4/4、workspace host tests 全绿。顺带收口 P4 WIP 的 AddressSpace 双 drop（take_user_as 单所有者契约），heap 临时诊断代码已全部移除。注意：手动 QEMU 退出码经 Git Bash 会 mod 256（363→107），以 xtask 捕获为准。下一步按用户指定顺序：P6.8-T1、P6.11-T1 决策报告。\n\n[2026-09-27 claude/p4.5-pci-extract(P4.5-T3)] P4.5-T3 virtio-blk 真实驱动实做完成：本机 QEMU 11.1 已移除 virtio 0.9.5 legacy 数据通路（寄存器回显正常但 32-bit feature 通路表达不了 VERSION_1 → kick 后队列不动），按 modern virtio 1.x 路线实做（transitional vendor cap 16B 短布局解析，详见 decision_log 2026-09-27 两条）；真机 exit 363 + data.img 字节级回读（签名 + 15 sector 索引 + 写回读）PASS + 宿主 abi 18/cap 22 全绿（worktree d:/ai-os-p4.5 @287771c）。下一步：P4.5-T4 virtio-net 用户态预研。\n[2026-09-27 claude/p4-final-phase(P6.8-T1)] 推理决策报告落 docs/design/09（DECIDED）；用户批准候选 C=远程代理+InferenceProvider 埋点，拒 A（内存/存储双重排期阻塞）拒 B（POSIX×cap 冲突）；P6.8-T2 解锁（交付缩为切换配置+fail-fast+埋点，≤1 窗口）；需求目标 Phase 6 行标 DECIDED。决策依据/触发条件见 decision_log 末条与 Doc 09 §4。\n[2026-09-27 claude/p4-final-phase(P6.11-T1)] 会话决策报告落 docs/design/10（DECIDED）；用户批准候选 C=双轨制（cap 命名空间内核隔离 + 会话 token 用户态认证，接缝=SessionManager 翻译为 cap 铸造/撤销），拒 A（无认证 bearer）拒 B（token 二难）；登出复用 derivation tree 级联撤销无新内核原语；首期单用户不启用零破坏；P6.11-T2 解锁。需求目标 Phase 6 行 [x]、R13 处置更新。详见 decision_log 末条与 Doc 10 §1~§5。\n"
   },
   "env_prerequisites": {
     "install_root": "D:\\envTools",
@@ -797,7 +797,7 @@
         {
           "id": "P4-T10",
           "name": "用户态 init 进程 + gettime 服务端到端",
-          "status": "pending",
+          "status": "completed",
           "deliverables": [
             "user/init bin：abi_query 版本协商（major 不匹配拒绝运行）→ IPC 请求服务 → gettime 打印时间戳",
             "启动链收口（Doc 02 §6.2）：kernel_main → 解析 initramfs → spawn init(Root Agent) → 移交控制权"
@@ -808,12 +808,13 @@
           "deps": [
             "P4-T9"
           ],
-          "estimate": "1 窗口"
+          "estimate": "1 窗口",
+          "actual_approach": "user/init（no_std bin）：abi_query 版本协商（major 不匹配即拒绝）→ gettime(MONOTONIC) nsec<1e9 校验 → cap syscall 证据链（见 T13）→ exit(0)。ring3 无 UART（outb→#GP），验证靠 assert 反证（panic→hlt→#GP→355）+ 内核侧 init_continuation：FR8 账本归零 + abi_query_count≥1 + '[init-smoke] PASS'。启动链 ring3_smoke→…→init_smoke→init_continuation→QEMU exit 363。真机 serial-1790521810.log 全绿。"
         },
         {
           "id": "P4-T11",
           "name": "FR9 审计事件流内核接线",
-          "status": "pending",
+          "status": "completed",
           "deliverables": [
             "audit crate 内核集成：capability 校验、IPC send/recv/reply、进程生命周期（spawn/exit/fault/reap）事件点 → append-only 环形缓冲",
             "查询接口（内核侧 QUERY 能力，Doc 01 AuditLog 行）；溢出策略（覆盖最旧 + 计数）写入 decision_log"
@@ -826,7 +827,8 @@
             "P4-T7",
             "P4-T9"
           ],
-          "estimate": "1 窗口"
+          "estimate": "1 窗口",
+          "actual_approach": "kernel/src/audit.rs（新模块）：AUDIT = SpinLock<Option<AuditQueue<256>>>（synapse-audit 环形队列，drop-oldest + overflow 计数）+ AUDIT_PUSHED 原子计数。事件点接线：① cap 校验——ipc.rs resolve_endpoint 成功/失败双路径 cap_verify(pid, obj, need, ok)（NULL cptr 也记，UNKNOWN_OBJ 哨兵）；② cap 生命周期——kstate.rs k_mint_root 成功后 cap_lifecycle(Mint)（Delegate/Revoke 留 P4-T13 cap syscall 接线时补）；③ IPC——k_ipc_send/try_send（Delivered+Queued 双路径）/recv/reply 四个原语 ipc(pid, dir, endpoint, label)；④ 进程——spawn.rs do_spawn + ipc_pong_smoke do_pong_spawn 的 process_spawn、proc_life terminate_current 的 Exit/Fault 归因（actor=垂死进程 agent，步骤 1 临界区内预抽避免 Zombie 后反查）、sys_reap 的 Reap（reap 前预抽 target_agent）、syscall.rs legacy init exit 路径。锁纪律：AUDIT 为叶子锁，agent_of（PROCS）严禁与 AUDIT 嵌套——先顺序取 agent 再 push。audit_init 位置契约：clock::calibrate 之后（时间戳有意义）、一切 smoke 之前（全事件覆盖）。查询接口（内核侧 QUERY，P5 审计服务前的过渡形态）：len/pushed_total/overflow/drain。真机验证：init_continuation 末尾 verify_audit_trail()——零溢出断言 + drain 54 事件 + 首事件 System(Startup) + 时间戳单调不减 + crasher Process{Fault,parent=1} 存在 + ipc-pong 有序子序列严格匹配（Spawn(pid=4)→CapVerify{SEND,ok}→IpcSend→Exit(0)→Reap→init Exit(0)，actor/agent/pid 一致性全查）+ 种类分布摘要（CapVerify=19 CapLifecycle=16 Ipc=7 Process=11 System=1）。三重判定：exit 363 + 无 PANIC + 宿主 audit 6/6 + kint 17/17。顺带修复真机挂死根因（AddressSpace 双重 drop → 堆 free-list 自环），详见 decision_log。"
         },
         {
           "id": "P4-T12",
@@ -849,7 +851,7 @@
         {
           "id": "P4-T13",
           "name": "Capability syscall 接线（invoke/delegate/revoke）+ Phase 4 安全回归专项",
-          "status": "pending",
+          "status": "completed",
           "deliverables": [
             "cap_invoke(10)/cap_delegate(11)/cap_revoke(12) 内核接线：CapTable O(1) 校验 + generation 匹配（旧句柄稳定返回 E_OBJECT_RETIRED，Phase 4 退出标准第 4 条）+ revoke cascade（复用 cap crate 不动点迭代）+ delegate attenuation-only",
             "用户指针校验统一路径（评审 §5 契约「地址」行）：长度/对齐/溢出/区间重叠/跨页授权检查，mmap 与 IPC 缓冲区校验共用一套 helper",
@@ -864,7 +866,8 @@
             "P4-T7",
             "P4-T9"
           ],
-          "estimate": "1-2 窗口"
+          "estimate": "1-2 窗口",
+          "actual_approach": "① capsys.rs：resolve_cap(pid,cptr,need)（O(1) CapTable get + Rights 子集校验 + ObjectTable check_live 三态：Live→放行 / ObjectRetired→稳定 E_OBJECT_RETIRED(-12) / Revoking→-12 / 其它→-1）；k_cap_invoke（校验通过后 E_NOT_IMPLEMENTED(-10)，op 表留给 P5 service 对象）；k_cap_delegate（mask 未知位→E_PERMISSION；单 OBJECTS→CAP_TABLES 临界区 delegate + write_user_bytes 回写 child cptr，失败回滚 free）；k_cap_revoke（需 GRANT；begin_revoke→k_revoke_cascade_global 跨全部 CapTable 不动点级联→retire，返回释放槽数）。syscall.rs dispatch 接线 #10/#11/#12。② uaccess.rs 统一用户指针校验（len/对齐/checked_add 溢出/逐页 walk PT_USER+PT_WRITABLE/ranges_overlap/write_user_bytes all-or-nothing），syscall.rs mmap 路径与 ipc.rs 收发路径共用（删除两份本地拷贝）。③ R12 退出唤醒：proc_life.terminate_current step 2.5（资源回收之前）调 ipc::cancel_inflight_for(pid,agent)——收集垂死进程 cap 表中带 RECV 的 endpoint（≤16，截断 warn），k_ep_cancel_sender 摘排队 send + AUX senders FIFO 逐个 set_send_cancel(E_PEER_DIED) + kthread_unblock；阻塞 send 两臂 block_current 后 take_send_cancel≠0 即返回取消码。④ security_smoke（marker y/z，ring3_smoke 前）：pid 120/121，仅 MemoryRegion 对象（Endpoint 实体槽 64 上限在 boot 后期可能耗尽）。9 组：非法 cptr×2 / 无 GRANT delegate拒绝+attenuation-only（ALL 无放大、EXEC 被剥）/ revoke 级联释放 3 槽+旧 cptr 失效 / E_OBJECT_RETIRED 稳定（Retired×2+Revoking×1）/ generation 复用旧句柄拒绝 / 表满注入（filled=252→NoMemory，零 panic）/ 伪造 agent_id spawn→AgentIdConflict / 重复回收零 panic / 跨进程级联（swept 253）。真机 20/20 PASS。⑤ user/init ring3 证据链：delegate(SEND)→Ok / invoke(200)→-1 / revoke 无 GRANT→-7 / invoke 合法 cap→-10 / delegate(SEND|GRANT)+revoke→Ok / invoke 已撤销→-1。真机：exit 363 + 零 PANIC + [sec-smoke] 20/20 + [init-smoke] PASS + [audit-verify] PASS（78 events：CapVerify=35 CapLifecycle=24，链完整）。宿主：abi18/audit6/cap22/ipc14/kint17/proc14/user 全绿。"
         },
         {
           "id": "P4-T14",
@@ -941,8 +944,8 @@
         },
         {
           "id": "P4.5-T3",
-          "name": "virtio-blk legacy MMIO 驱动实做（替换 kernel/src/block.rs stub）",
-          "status": "pending",
+          "name": "virtio-blk 真实驱动实做（替换 kernel/src/block.rs stub；实做改 modern virtio 1.x 路线，见 decision_log 2026-09-27 两条）",
+          "status": "done",
           "deliverables": [
             "kernel/src/pci.rs 加 map_mmio_bus_master(bar_paddr, len) → paging 映射到内核虚拟地址（supervisor-only）+ 触发 PCID 失效（如启用）",
             "kernel/src/block/virtio.rs 实做：magic/version 校验（virtio spec §3.1：0x74726976 / version=1）→ Device Status reset→ACK→DRIVER→DRIVER_OK 序列",
@@ -960,12 +963,13 @@
             "P4.5-T1",
             "P4.5-T2"
           ],
-          "estimate": "2 窗口"
+          "estimate": "2 窗口",
+          "actual_approach": "2026-09-27 真机验收（worktree d:/ai-os-p4.5 分支 claude/p4.5-pci-extract @287771c）。\n【口径偏离】按任务书原口径先做 legacy 路线，实做证实本机 QEMU 11.1 已移除 virtio 0.9.5 legacy 数据通路：legacy 寄存器读写回显全部正常（magic/version/queue 配置看似成功），但 T_IN 提交 kick 后 used_idx 恒 0——设备核心要求 VERSION_1（bit32），legacy 32-bit feature 通路无法表达，队列永不动；force-legacy 属性已从 QEMU 删除。驱动改 modern virtio 1.x capability 路线实做（决策见 decision_log 2026-09-27 两条 P4.5-T3），BlockDevice trait 与 Doc 08 §3.1 接口口径不变。\n【实现】kernel/src/block.rs：PCI 探测 0x1AF4:{0x1001,0x1042} → transitional vendor cap 短布局（16B/条：cfg_type@3/bar@4/offset u32@+8/length u32@+12/notify_off_multiplier u32@+16）定位 BAR4 上 common/notify/device cfg → 协商序列 reset(status→0 轮询)→ACK|DRIVER→VERSION_1(feature 高窗口 bit0)+blk 低 32 位 features→FEATURES_OK 回读→queue0 设置（queue_num=16，desc+avail 页/used 页共 2 连续帧，PA 低/高 u32 分写）→enable→queue_notify_off→notify=notify_base+off*multiplier→capacity（device cfg 2×u32）→DRIVER_OK。IO 路径：VIRTIO_BLK_T_IN/T_OUT 三段描述符链（hdr 16B+data 512B+status 1B）+ avail ring push + fence(SeqCst) + notify kick + used ring 轮询（POLL_BUDGET=400M 超时 warn 转储 vring 状态→IoError）；中断阻塞路径（IRQ_BIND→Notification 等 used）留 T5/P5 接线。impl BlockDevice for SpinLock<VirtioBlk> 注册进 REGISTRY slot 0。page_frame.rs 导出 alloc/free_contiguous_frames 快捷包装。xtask：qemu.rs 追加第二盘 if=none,virtio-blk-pci；build.rs 生成 16MiB data.img（sector0 签名 SYNAPSE-P45-VBLK + sector1..16 前 8 字节 LE u64 索引）。\n【真机三重证据】① xtask run exit 363；② serial 无 PANIC；③ serial：[block] virtio-blk registered at slot 0 (feat=0x101:0x30006e54 qnum=16 notify=0xfe003000 cap=32768) + smoke OK: sig + 15 sector-index checks + write/readback pass（sector16 写回读字节级一致）。boot marker w/x 全程。\n【宿主】abi 18 + cap 22 全绿；workspace 无回归。"
         },
         {
           "id": "P4.5-T4",
-          "name": "virtio-net 用户态驱动预研 + diplomat spawn 接入契约",
-          "status": "pending",
+          "name": "virtio-net 用户态驱动预研 + diplomat spawn 接入契约（实做 modern 1.x 协商 + device_map #52，路线口径见 decision_log 2026-09-27 P4.5-T3 两条 + T4 两条）",
+          "status": "done",
           "deliverables": [
             "user/diplomat/src/driver/virtio_net.rs：virtio-net legacy MMIO 驱动结构（与 P4.5-T3 同构，仅设备 ID 不同）+ smoltcp PHY trait 实现骨架（send/receive 钩子指向 virtqueue）",
             "BAR mmap 由用户态进程通过 P4-T4 paging 路径发起（kernel/src/mmio_user.rs 或复用 umem）：把设备 BAR 映射到用户态虚拟地址（Doc 01 §2.1 capability 控制：仅外交工具进程持 NIC Device cap）",
@@ -980,7 +984,8 @@
             "P4.5-T2",
             "P4.5-T3"
           ],
-          "estimate": "1-2 窗口"
+          "estimate": "1-2 窗口",
+          "actual_approach": "2026-09-27 真机验收（worktree d:/ai-os-p4.5 分支 claude/p4.5-pci-extract @1cc97ff）。\n【实现】kernel/src/mmio_user.rs：boot 期 init_net 扫 PCI bus0 找 0x1AF4:{0x1041,0x1000}（transitional find_cap 短布局复用 T3）→ BAR4 四区页对齐并集 + 使能 MEM|bus-master → 分配 8 连续帧 DMA arena（RX desc+avail/页0、RX used/页1、TX desc+avail/页2、TX used/页3、报文缓冲/页4~7，内核用户两侧同源契约）→ 注册 ObjKind::Device。新 syscall DeviceMap #52（ABI_MINOR 5→6）：resolve_device_map（slot0/空槽/非 Device kind → E_INVALID_CAP，缺 MAP 权 → E_PERMISSION，retired → -12）+ obj==注册 NIC 比对 → BAR 并集(4页)+arena(8页)映进调用方 AS（USER|WRITABLE|NX，0x4800_0000 起，AlreadyMapped 拒绝不覆盖）→ DeviceMapInfo(80B) 经 write_user_chunked 8B 分块写出参（info_out 8B 对齐 + user_mem_ok 逐页围栏，违例 -2 拒绝而非 fault）→ rax 返回 mmio VA；MAPS 幂等表（重复调用返同组 VA）。kernel/src/net_smoke.rs：进 ring-3 前 kthread 直调 1 正 + 3 负断言 → spawn diplomat（slot1 MAP 正 cap + slot2 缺 MAP + slot3 错 kind 负 fixture；E1 口径：NIC cap 只铸 diplomat，负 fixture 非第二出口）→ 续体确证（幂等表条目=device_map 真被调用的直接证据 + death fault=0/exit_code=1 + FR8 回基线）。user/diplomat：负路径 4 断言在 ring-3 直接观测（-7/-1/-2/-2）→ 正路径 → modern 协商（VERSION_1+MRG_RXBUF+MAC）→ RX/TX 双队列 setup（notify_off*mult kick、used_off 与内核 arena 对账）→ dummy TX（12B hdr+60B 帧，广播 dst/设备 MAC src/0x8863）→ DRIVER_OK 后 kick → used 轮询 → exit(TX 完成数=1)。user/src/net.rs 纯 kit（三环算术/帧构造/PHY trait 骨架，宿主单测与内核布局同源对账，smoltcp 真依赖留 P5-T1/T3）。\n【真机修复三处】① ring3.rs handle_process_exit swapgs 条件化：syscall 源（GS 已入口交换）补平衡 swapgs、fault 源（异常递送不动 GS，合同已正确）跳过——判别器 rdmsr(0xC0000102)==&PER_CPU；无条件补 swapgs 会翻转合同，毒化下一 ring-3 会话首次 syscall（gs:[8] 垃圾栈指针 → push fault → 递送再失败 #DF，exit 355）。与 P4-T7 的 ensure_kernel_gs_base 同根因的另一半收敛；② diplomat DRIVER_OK 必须先于任何 notify（spec §2.4；QEMU 未 OK 不启动队列处理，kick 被丢 → used 恒 0 → 轮询超时 exit 0）；③ 设备/arena 页回收先 unmap_device_pages（只解映射）再 free_all_user_pages——DMA arena 是内核持有设备资源，误 free = FR8 账本 -8（真机 used 258≠266 暴露）+ 伙伴系统二次分配踩脏。\n【真机三重证据】① xtask run exit 363（marker $）；② serial [net-smoke] PASS（resolve 4 断言 + device_map 往返记录 + exit_code=1/fault=0 + FR8 回基线 266）；③ 前序 8 smoke（ipc/notif/irq/ring3/elf/spawn/crash/net）全 PASS 无 PANIC。\n【宿主】cargo test --workspace --exclude synapse-kernel 全绿（abi 18 + user 57 含 8 新 #52/net 布局测 + kint DeviceMap 桩臂）。【口径注】任务书 legacy 口径已被 T3 实测推翻（QEMU 11.1 无 legacy 通路），real 路线 = modern 1.x + #52 用户态映射；PHY 为骨架非 smoltcp 实装（P5-T1/T3）。"
         },
         {
           "id": "P4.5-T5",
@@ -1239,7 +1244,7 @@
         {
           "id": "P6.0-T1",
           "name": "E820 真实探测恢复（解 INT 15h 挂起，build_disk.py 移除硬编码）",
-          "status": "in_progress",
+          "status": "completed",
           "deliverables": [
             "build_disk.py 移除 stage2 16-bit 实模式硬编码 QEMU 内存布局（当前为 7 条 entries 168 字节的临时方案，决策日志 2026-09-26 P2-T1 条目已说明）",
             "stage2 16-bit 实模式恢复 BIOS INT 15h AX=E820h 调用（解 stage2 挂起根因，已识别 PC 跳回 stage2 起点的具体原因）",
@@ -1254,7 +1259,8 @@
           "deps": [
             "P2-T1"
           ],
-          "estimate": "1 窗口"
+          "estimate": "1 窗口",
+          "actual_approach": "stage2 16-bit 实模式恢复 BIOS INT 15h AX=E820h 循环探测：EAX/EDX/ECX 全 66 前缀 32 位寄存器（EDX='SMAP'、ECX=20），ES:DI=0x20004 步长 24B（BIOS 写 20B 恰落内核 24B 记录前半，零转换）。\n【终止双判据（P2-T1 真因收口）】每轮 9C/5E pushf→pop si + test si,1：CF=1 视为 ACPI 收尾、当前槽作废丢弃；否则 inc bp 计数，再 test ebx,ebx：continuation 归 0 则该槽有效且为最后一条，结束。本机 SeaBIOS rel-1.17.0 实测**从不置 CF**，仅在返回最后一条后把 continuation 归零——只认 CF 无限循环，即 P2-T1「PC 跳回 stage2 起点」挂起真根因（旧注释归因寄存器污染为另一独立问题，早已修复）。\n【fallback】bp==0 → debugcon 'p' 标记 + 硬编码 -m 128M 7 条 rep movsb（本机真机从不走，保留为兜底）。\n【碰撞修复】INITRD_INFO_ADDR 0x20100→0x21000：E820 >10 条时 16B initrd 记录会压垮 entry[10]；127 条上限下 entries 最远 0x20BE4 < 0x21000。\n【三重证据（最终树，诊断代码已移除）】① -m 128M：7 条 == SeaBIOS，exit 363；② -m 1024M：7 条（entry[03] usable 0x100000..0x3FFE0000）== SeaBIOS，全 smoke 绿，xtask run=363 / xtask ci=OK；③ -m 8G：8 条与 SeaBIOS final「e820 map has 8 items」逐字节一致（RAM 三段 + Reserved 四段 + 高端 0xfd0000000 段），usable=0x1fff7fc00。basic_boot 4/4；workspace host tests（exclude kernel）全绿。\n【verify 口径修正】(a)「-m 8G ≥10 条含 ACPI」为规划期机型假设——SeaBIOS(默认 pc 机型)只产 8 条且无 type-3，以「与 SeaBIOS e820 map 完全一致」为准（已达成）；(b)「UEFI GetMemoryMap fallback」超出范围——stage2 属 legacy BIOS MBR 链路，ovmf 下该链路根本不执行，fallback 即硬编码 BIOS 布局。\n【宿主测试口径】memory_map.rs 5 项 #[cfg(test)] 单元测因 [[bin]] test=false（P1-T8 self-contained 设计）历史上即不可经裸 cargo test 触达（裸跑会踩 nightly -Zbuild-std 双 core 坑），解析器无回归以三档真机 1:1 比对替代。\n【顺带收口（P4 WIP，另见相邻 decision_log 条目）】ipc_pong_continuation/init_continuation 对栈上 AddressSpace 双 drop → owned_tables Vec 二次 dealloc → heap free-list 自环（verify_audit_trail 首次堆分配挂死真因）；修复=take_user_as 单所有者契约，heap.rs 双释放检测/free-list 转储等临时诊断已全部移除。\n【测量口径】手动 QEMU 在 Git Bash 下 $? 按 mod 256 截断（363→107），历史 notes「exit=107」均此因；以 xtask（Rust 原样捕获）或 python subprocess 读 363 为准。"
         },
         {
           "id": "P6.0-T2",
@@ -1663,7 +1669,7 @@
         {
           "id": "P6.8-T1",
           "name": "本地推理决策（Rust 推理栈 vs 用户态 libc shim + llama.cpp）",
-          "status": "in_progress",
+          "status": "completed",
           "deliverables": [
             "决策报告（落 docs/design/09-local-inference-decision.md）：三候选对比",
             "候选 A：candle/burn no_std 裁剪版（Rust 原生推理栈）",
@@ -1677,7 +1683,8 @@
             "决策文档：与现有 Doc 04/05/06 一致性自检"
           ],
           "deps": [],
-          "estimate": "1 窗口"
+          "estimate": "1 窗口",
+          "actual_approach": "决策报告落 docs/design/09-local-inference-decision.md（六段：问题约束 C1~C6 / 三候选对比矩阵 / 推荐 / 再决策触发条件 / 决策记录 / 一致性自检）。用户批准候选 C（2026-09-27，AskUserQuestion）：外交工具仅远程 AI API 代理，不部署本地推理；P6.8-T2 收敛为 ≤1 窗口交付=远端/脱机切换配置项 + 脱机 fail-fast（InferenceUnavailable 结构化错误 + 审计）+ InferenceProvider trait 埋点（remote 实装/local 占位）。拒 A 理由：被 P6.0-T2/T3（buddy/高端映射）+ 存储栈（R6）双重排期阻塞，1B 模型装不进 128MB 帧上限，实为 3~6+ 窗口子系统量级；拒 B 理由：libc shim ≈ mini Linux 用户态，POSIX 语义与 cap 模型结构性冲突（暗道绕校验），6+ 窗口高失败率。再决策触发条件已登记（Doc 09 §4）：前置=内存三件套+存储栈；触发=脱机硬需求/S4 embedding 成本/隐私不出机，默认路径回 A。需求目标.md Phase 6 本地推理行标 DECIDED [x]；Doc 04/05/06 一致性自检通过（Doc 04 §5.4 远程 API=首期主路径，C 为忠实延续）。"
         },
         {
           "id": "P6.8-T2",
@@ -1847,7 +1854,7 @@
         {
           "id": "P6.11-T1",
           "name": "用户会话决策点（capability 命名空间 + 会话 token 双轨，S6 桌面设计时收敛）",
-          "status": "in_progress",
+          "status": "completed",
           "deliverables": [
             "决策报告（落 docs/design/10-user-session-decision.md）：",
             "候选 A：capability 命名空间（多用户 → per-user CapTable + per-user 命名空间）",
@@ -1861,7 +1868,8 @@
             "决策文档：与现有 Doc 01/02/04 一致性自检"
           ],
           "deps": [],
-          "estimate": "1 窗口"
+          "estimate": "1 窗口",
+          "actual_approach": "决策报告落 docs/design/10-user-session-decision.md（约束 D1~D7 / 三候选对比矩阵 / 推荐 / S6 收敛点 / 决策记录 / 一致性自检）。用户批准候选 C 双轨制（2026-09-27，AskUserQuestion）：capability 命名空间做内核隔离强制 + 会话 token 做用户态认证交互；唯一接缝=SessionManager 把 token 验证结果翻译为 cap 铸造/撤销，token 不进内核（Doc 01 D1 单一强制点不破）。关键复用：登出=撤销会话根 cap→派生子树级联失效（Doc 01 §3.4 既有 derivation tree 机制，无新内核原语）；agent_id 命名空间加会话维 (user_session, agent_id)，内核盖章不动；per-user CapTable=派生子树视图而非新内核结构（Doc 01 §1.2 扁平 CapTable 不变）。拒 A：无认证语义（锁屏/切换缺凭据载体）；拒 B：token 不进内核=UI 装饰、进内核=破模型二难无解。首期单用户默认不启用（现行为零破坏），启用条件=S6 进入多用户/锁屏实施。诚实边界：R6（无存储）/R9（无信任根）下首期 token=在场性断言+UI 锁，会话持久化待存储栈。需求目标 Phase 6 行标 DECIDED [x]；R13 处置列更新为决策已收敛（风险在 T2 落地前保留）。"
         },
         {
           "id": "P6.11-T2",
@@ -2307,6 +2315,84 @@
       "date": "2026-09-27",
       "scope": "P4-T7 Phase 2 收口 — GS 账本双路径归一化（#DF 根因）+ ring3 outb #GP 教训",
       "decision": "【#DF 根因定夺】handle_process_exit 有两类调用方且入口 GS 状态不同：syscall #21 路径（入口 swapgs 已执行，需配平）与 #PF/#GP 异常 → terminate_current 路径（异常入口不切 GS，已是 boot 约定）。P4-T5 的盲目 swapgs 配平只考虑了前者，后者被翻转账本（GS.base=&PER_CPU / KERNEL_GS_BASE=用户值），且 crash_continuation 纯 Rust 直接指针访问 PER_CPU 不触雷——直到下一个 iretq 进 ring3 的进程（ipc-pong）首条 syscall 才爆：入口 swapgs 装入垃圾 GS.base → mov rsp,gs:[8] 读物理 0x8（实模式 IVT 残留）→ push（LSTAR+0x15）#PF → 同特权级递送再压同一垃圾栈 → #DF。修复定夺：废弃\"每条路径手工配平\"纪律，改为幂等归一化原语 proc_ext::ensure_kernel_gs_base()（rdmsr IA32_KERNEL_GS_BASE != &PER_CPU 才 swapgs），在 handle_process_exit 与 enter_user_at（进 ring3 唯一入口）双点调用——前者收敛所有回内核路径，后者兜底任何绕过路径；该原语对中断安全（timer handler 不碰 GS）。【ring3 outb 教训】用户态 bin 沿用内核 UART 直写模板（outb 0x3F8）在 ring3 IOPL=0 且无 TSS I/O bitmap 下必 #GP：成功路径的 print 同样致命（非仅 panic handler）。定夺：MVP 用户态 bin 成功路径零 UART 输出，证据一律内核侧计数/日志承担；未来若需用户态打印，走 write syscall（Doc 02 待排期）或 TSS I/O bitmap 白名单 0x3F8。【验证方法】llvm-objdump -d --start-address 反汇编 user ELF 定位 #GP ip=0x400008d5 = outb 指令，为本项目首个用户态二进制级 fault 定位案例。真机 QEMU exit 363 全链绿（ipc-pong-smoke PASS：计数 3→4；init-smoke PASS；FR8 256 归零）。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4-T11 FR9 审计事件流：溢出策略 + 查询接口形态 + AUDIT 锁纪律",
+      "decision": "【溢出策略】drop-oldest（覆盖最旧）+ overflow 单调计数：环形队列满时新事件挤掉最旧槽位，每次挤出处 warn 日志 + overflow+=1；查询侧可辨'有丢失'。理由：审计流是观测性设施，最新事件（正在发生的攻击/故障链）比最旧事件诊断价值高；阻塞式背压会把审计变成 DoS 向量（恶意进程风暴事件卡死内核 push 路径）——FR9 泄密防线设计要求 push 永不阻塞、永不失败。【查询接口】内核侧 QUERY 能力（len/pushed_total/overflow/drain）为过渡形态：Doc 01 AuditLog 行的最终归宿是 P5 用户态审计服务经 cap-gated syscall 拉取；当前 drain 仅内核 smoke/调试消费，不暴露 ring3（暴露面留给 P5 连同 cap 校验一起设计）。【锁纪律】AUDIT 是叶子锁：push 临界区内只碰队列本体；actor 归因需要的 agent_of（PROCS 锁）严禁与 AUDIT 嵌套——调用方先顺序取 agent 再 push（proc_life 在步骤 1 的 PROCS 临界区内预抽 pcb.agent，因 terminate 后 PCB 进 Zombie 反查会失真）。事件不带 payload（~40B 定长）是刻意的泄密防线：审计流本身不得成为数据外带通道（Doc 01 FR9）。【init 位置契约】audit_init 必须在 clock::calibrate 之后（monotonic_ns 时间戳有意义）、一切 smoke/IPC 之前（后续所有内核事件点均被覆盖，init_continuation 末尾才能做全链有序断言）。",
+      "alternatives_rejected": "× 阻塞式队列满即等：审计成为 DoS 向量；× drop-newest（拒收新事件）：正在发生的事件链断尾，诊断价值损失最大；× 事件带 payload 摘要：泄密通道 + 队列容量骤减；× push 路径现查 agent_of：PROCS/AUDIT 锁嵌套反转风险（terminate 路径 PROCS 已持有）。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4-T11 真机挂死根因：AddressSpace 双重 drop → 堆 free-list 自环（T9 起潜伏）",
+      "decision": "【症状】init PASS 后 verify_audit_trail 首次堆分配 alloc::vec![DUMMY; 54] 永久挂死（无 panic 无输出）；并发窗口 heap.rs 加 dealloc 双释放检测 + free-list 转储后实锤：DOUBLE FREE block=0x100040 sz=0x30，该节点 next=自身 → 分配器 while !curr.is_null() 环路死走。【根因链】① terminate_current 用 Box::from_raw(as_ptr) + drop 清理子进程 AS——但 load_elf_into_as 按值返回，AS 活在 smoke 函数冻结栈帧里，不是堆对象；Box::from_raw 把栈地址丢给堆 dealloc（污染 1）。② AS 内部 owned_tables Vec 的堆缓冲被 terminate_current 的 drop 释放一次后，ipc_pong_continuation 又持 PONG_CHILD_AS_PTR 裸指针副本对同一 AS 二次 drop_in_place → Vec 缓冲二次 dealloc → 同块两次入 free-list → 自环（污染 2，真凶）。T9 起每个子进程终止都触发，但直到 T11 才有终止后的首次堆分配，故潜伏两个任务期。【修复=单所有者契约】AS 所有权以 proc_ext::take_user_as 为唯一转移点：terminate_current take 后槽位清 0，continuation 再 take 得 null 即跳过清理（ipc_pong_continuation 已改）；持有裸指针副本（PONG_CHILD_AS_PTR 式）再自行 drop 的模式全部作废。terminate_current 内 Box::from_raw 换为借用调 free_all_user_pages + core::ptr::drop_in_place（只跑 Drop 归还页表帧，不触碰堆分配器）。spawn_continuation 既有 Zombie 状态守卫等效满足契约（terminate 双路径都到 Zombie），保留。【教训】栈上按值构造 + 裸指针跨 continuation 传递的对象，必须有单一所有权判定点；'谁最后见到谁清理'在 iretq 续体链里必然双重清理。",
+      "alternatives_rejected": "× continuation 无条件兜底清理（T9 原设计）：与 terminate_current 职责重叠即双重 drop；× 把 AS 改 Box::new 上堆统一 from_raw：可行但改动面大（所有 smoke 装载点），且栈值 + take 所有权转移已足够；× 给 heap dealloc 加双释放检测常驻：检出不自愈，只作临时诊断（P6.0-T1 标记，事后移除）。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P6.0-T1 E820 真实探测收口：终止双判据 + 0x21000 碰撞 + exit 码截断口径",
+      "decision": "【定夺 1｜终止双判据】INT 15h·E820h 枚举循环同时认两种收尾信号：CF=1（规范式，当前槽无效丢弃）与 continuation EBX==0（SeaBIOS 式，最后一条已返回、计数后结束），任一命中即出；127 条硬上限防 runaway。依据=debugcon 逐轮取证：本机 SeaBIOS rel-1.17.0 全程不置 CF（flags 低字节 0x46/0x02/0x06/0x12/0x16），仅末条后 EBX 归零；只认 CF 则 1..last,0,1.. 环绕无限循环——这就是 P2-T1 遗留的 stage2 挂起真根因，决策日志旧文「寄存器污染」实为另一已修复问题。双判据对两种 BIOS 方言都正确，无需机型探测。\n【定夺 2｜initrd 记录迁移】INITRD_INFO_ADDR 0x20100→0x21000。原址在 E820 >10 条时与 entry[10] 重叠（16B 引导记录压垮 24B 记录中段），127 条上限下 E820 线性最远 0x20BE4，0x21000 起永久安全。同步更新 initrd.rs/elfload.rs/page_frame.rs/main.rs 四处注释与 expect 文案。\n【定夺 3｜验收口径修正】-m 8G「≥10 条含 ACPI」假设作废（SeaBIOS pc 机型仅 8 条无 type-3），改以「内核解析 == SeaBIOS 自身 e820 map 输出」为唯一硬标准（128M/1024M/8G 三档逐字节一致）；UEFI GetMemoryMap fallback 不属 stage2（legacy MBR 链路在 ovmf 下不执行），deliverable 原文按此理解关闭。\n【定夺 4｜退出码测量】363 经 Git Bash $? 截为 107（mod 256）——非新 bug；自动化/人工验证一律以 xtask 或 python subprocess 捕获原始退出码，历史 notes「exit=107」条目按 363 重新解读。",
+      "alternatives_rejected": "× 只认 CF 终止（规范文本优先）：本机 SeaBIOS 从不置 CF，挂死复现；× 只认 EBX==0：遇按规范以 CF=1+AX=总数收尾（不写槽）的 BIOS 会把垃圾槽计入；× fallback 也动态化（二次探测重试）：真实探测失败即 BIOS 异常，硬编码 128M 布局作为可预测兜底足够；× initrd 记录挤进 entry 区空闲（如 0x200C4）：与 E820 条目数耦合，迁 0x21000 一刀两断；× 为「≥10 条」换 q35 机型验收：本链路是 SeaBIOS BIOS 引导，换机型等于换被测对象。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4.5-T3 virtio-blk 驱动路线定夺：legacy 0.9.5 数据通路不可用（QEMU 11.1），改 modern virtio 1.x",
+      "decision": "【症状取证】按任务书原口径实做 legacy 路线：全部 legacy 寄存器读写回显正常（magic 0x74726976 / version=1 / queue_num=128 / 32-bit features 协商 OK / capacity 可读），但 T_IN 提交 + kick 后设备永不动——used_idx 恒 0，超时 IoError；QEMU 11.1 已连 force-legacy 属性一并删除（报 Property not found），disable-modern=on 仅骗过寄存器可见性，队列依旧不启动。【根因】QEMU ≥10 移除 virtio 0.9.5 数据通路，config space 只剩回显壳；virtio 1.x 设备核心要求协商到 VERSION_1（feature bit 32）才启动队列，legacy 32-bit feature 寄存器在物理上无法表达 bit32 → 写被静默忽略是设计行为，不是 bug。【定夺】驱动按 modern virtio 1.x 路线实做：transitional PCI vendor capability 发现 common/notify/isr/device cfg 区，64-bit feature 窗口（select 0/1 分页）协商 VERSION_1+DRIVER，queue 设置写 desc/avail/used PA（低/高 u32 各两次），notify 地址 = notify_base + queue_notify_off × multiplier。此路线同时是 QEMU 新版与真实 virtio 1.1 硬件的正确路径。BlockDevice trait / Doc 08 §3.1 接口口径不变；任务书与 exit_criteria 中「legacy MMIO」字样按本条重新解读。【连带决策】完成路径本期用同步轮询（boot smoke 语境，POLL_BUDGET=400M spins，超时 warn 转储 vring 状态）；IRQ_BIND→Notification 阻塞等 used 的完整路径留 T5 集成或 P5，避免与用户态 BAR mmap（T4）耦合。",
+      "alternatives_rejected": "× 降级旧版 QEMU 保 legacy：工程环境（工具链日期锁定）漂移成本大于驱动重写，且 legacy 已是 spec 死路；× disable-modern=on 继续走 legacy：实测 QEMU 11.1 下队列不启动，纯回显；× 驱动直接写死 QEMU 行为假设（如假定 queue 自动跑）：违反真机取证原则；× 本期即上中断驱动 IO：依赖 T4 用户态 BAR/cap 语义未定，先轮询收口数据通路正确性。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4.5-T3 transitional vendor capability 实测短布局（16B/条）vs spec u64 长布局（24B/条）",
+      "decision": "【症状】modern 路线首跑即 NotReady：解析出的 common cfg base=0x1000fe000000，远超 4GB 恒等映射上限。【取证】逐条 dump 全部 capability 的 +8/+12/+16/+20 原始 dword：QEMU transitional 设备的 virtio vendor cap（cap ID 0x09）是 16 字节短布局——vndr@0 / next@1 / cap_len@2 / cfg_type@3 / bar@4 / pad[3]@5..7 / offset u32@+8 / length u32@+12 / notify_off_multiplier u32@+16；cap 链间隔 16B 排布于 0x40(common)/0x50(isr)/0x60(device)/0x70(notify)/0x84(pci-cfg)。按 spec u64 长布局把 offset 读成 8 字节时，@+12 的「offset 高 32 位」实为 length(0x1000)，base 被平移 <<32。【定夺】find_cap 按实测短布局解析并把布局表+证据写进代码注释；防御校验 base/base+len ≥4GB 即 warn+NotReady 不硬访问。后续接真实 PCI 设备时同法逐条按 cap_len 字段判定布局长度，不硬编码偏移。【连带修复】transitional 设备 BAR0 是 I/O 型、modern cfg 在 MEM BAR4——探测不再检查 BAR0 类型（cap 自带 bar 字段定位），原「BAR0 I/O → 跳过」误判移除。",
+      "alternatives_rejected": "× 按 spec 长布局 + 运行时双探测：cap_len 字段本身即布局判据（16 vs 24），无须猜测试错；× 硬编码本机 QEMU 的 0x40..0x84 偏移序列：换 transitional 实现（旧 QEMU/真实硬件）即碎，仍按 cap 链遍历；× 恢复 legacy 寄存器读 capacity：与上一条决策冲突（legacy 数据通路已死）。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P6.8-T1 本地推理栈决策：候选 C（远程 AI API 代理 + InferenceProvider 埋点）用户批准",
+      "decision": "【背景】需求目标 Phase 6 + 避坑指南 §5 三选一决策点，阻塞 P6.8-T2 启动。【对比】A candle/burn no_std 裁剪=3~6+ 窗口独立子系统，且被内存三件套（P6.0-T2/T3，当前 MAX_FRAMES=128MB）+ 存储栈（R6）双重排期阻塞——模型装不进内存也无处落盘；B 极简 libc shim + llama.cpp=6+ 窗口起，POSIX 兼容层与 capability 安全模型结构性冲突（信号/fork/路径语义成绕校验暗道），失败模式难诊断；C 承认外交工具仅远程 AI API 代理=≤1 窗口，与 Doc 04 §5.4（远程 API 即首期 AI 原生主路径）、唯一网络出口不变量（Doc 04 §3）、原始构想外交工具'海关'定位（原始思路.md）全一致。【定夺】用户批准候选 C。P6.8-T2 交付三项：①外交工具推理后端切换配置项（remote 唯一实装）②脱机降级策略=fail fast + InferenceUnavailable 结构化错误 + 审计事件 ③InferenceProvider trait 埋点（local 占位），未来切 A 为增量非返工。【再决策】触发条件登记于 Doc 09 §4：前置= buddy + 高端映射 + 存储栈就位；触发=脱机硬需求/S4 embedding 成本不可接受/隐私推理不出机；默认路径回 A。【落盘】docs/design/09-local-inference-decision.md 状态 DECIDED；需求目标.md Phase 6 本地推理行标 DECIDED；docs/README.md 索引补 09 行。",
+      "alternatives_rejected": "× A（candle/burn 裁剪）：技术路线长期正确但时序被内存/存储排期硬阻塞，脱机刚需未成产品级阻塞前不付子系统代价；× B（libc shim + llama.cpp）：工作量与失败风险最高，且 POSIX 层破坏 cap 模型架构不变量；× C+立即排期 A 作为后备：埋点已保证可逆，预先排期无信息增益反挤占 S 阶段强制推进项。"
+    },
+    {
+      "task": "P4-T13",
+      "date": "2026-09-27",
+      "decision": "cap_invoke 校验通过后返回 E_NOT_IMPLEMENTED(-10)，不建对象 op 表",
+      "rationale": "MVP 无 service 对象（Doc 01 §4 op 语义属 P5 capability service 化阶段）；本期只钉死校验链（cptr→Rights→check_live）与稳定错误码，避免为 10 种 ObjKind 造空壳 dispatch 表。用户态可区分 -1（非法句柄）与 -10（句柄合法但操作未实现）。"
+    },
+    {
+      "task": "P4-T13",
+      "date": "2026-09-27",
+      "decision": "cap_revoke 权限 = 持 GRANT 位（MVP 近似 owner 语义）；级联走 k_revoke_cascade_global 跨全部 CapTable 不动点迭代",
+      "rationale": "Doc 01 的 owner/撤销权完整模型（revoke 权与 GRANT 分离）留 P5；当前 GRANT 持有者即委托链上游，可撤销自己派生的子树，语义自洽。全局级联保证他表副本一并失效（security_smoke 组 9 验证 swept≥1 + 他表 cptr→-1）。对象走 begin_revoke→cascade→retire 三步，Retired 后旧句柄稳定 -12（Phase 4 出口判据 #4）。"
+    },
+    {
+      "task": "P4-T13",
+      "date": "2026-09-27",
+      "decision": "R12 在途 IPC 唤醒用 per-thread SEND_CANCEL[AtomicI64; MAX_THREADS] 取消码通道，唤醒点在 terminate_current 资源回收之前（step 2.5）",
+      "rationale": "端点发现依赖垂死进程 CapTable，必须赶在 k_destroy_cap_table 之前。阻塞 send 被 kthread_unblock 后读 take_send_cancel≠0 即返回 E_PEER_DIED(-14)，与正常 reply 路径（返回 len）区分。只触碰垂死进程持 RECV 的 endpoint——阻塞 sender 的对端是 receiver，串行模型下 recv_waiter.pid==dying 不可能。MVP 限 16 端点，截断仅 warn（真机 smoke 远小于）。"
+    },
+    {
+      "task": "P4-T13",
+      "date": "2026-09-27",
+      "decision": "用户指针校验统一到 kernel/src/uaccess.rs；security_smoke 只用 MemoryRegion 对象",
+      "rationale": "mmap/IPC/cap 三路径此前各持本地 user_mem_ok 拷贝，漂移风险高；统一后单点维护 len/对齐/溢出/逐页权限/overlap 语义。security_smoke 在 boot 后期跑，Endpoint/Notification 实体槽（index 上限 64）可能已被各 smoke 耗尽，MemoryRegion 无此约束，保证故障注入（表满 252 槽）可复现。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P6.11-T1 用户会话体系决策：候选 C 双轨制（cap 命名空间隔离 + 会话 token 认证）用户批准",
+      "decision": "【背景】GAP-1/R13 登记的产品缺口：单用户 capability 模型无登录/账户/会话隔离/锁屏；S6 桌面（空间外壳）多用户形态需要决策收敛，阻塞 P6.11-T2。【约束】D1 内核唯一强制点=cap（Doc 01 §1.1）；D2 扁平 per-process CapTable 首期不做 CNode 树（§1.2/§7）；D3 derivation tree 级联撤销现成（§3.4）；D4 agent_id 内核盖章 init 统管（§2.3/§7，R5）；D5 锁屏属 shell 独占前台交互层（Doc 07 §1.3/§6）；D6 无存储/无信任根→token 定位在场性断言（R6/R9）；D7 本地会话≠跨 OS DID/VC（Doc 05）。【对比】A cap 命名空间=内核改动最小、隔离有强制力，但无认证 bearer，锁屏解锁语义悬空；B 会话 token=认证完整，但 token 无内核牙齿即 UI 装饰、进内核即破 D1 双权威源，二难无解；C 双轨=两轨各就各位，唯一接缝 SessionManager 翻译（认证通过→铸会话根 cap；登出→撤销级联失效），闭环无缺口。【定夺】用户批准候选 C。per-user CapTable 落地为派生子树视图（非新内核结构）；agent_id 加会话维 (user_session, agent_id) 盖章不变；首期单用户默认不启用，现行为零破坏；启用条件=S6 多用户/锁屏实施。【落盘】docs/design/10-user-session-decision.md 状态 DECIDED；需求目标 Phase 6 用户会话行标 DECIDED、R13 处置更新（T2 落地前风险保留）；docs/README.md 索引补 10 行。",
+      "alternatives_rejected": "× A（cap 命名空间单轨）：隔离有力但认证语义缺载体，锁屏/多用户切换无标准 bearer，等于把认证悄悄推给物理在场默认信任；× B（会话 token 单轨）：token 不进内核无强制力、进内核破坏 Doc 01 单一强制点不变量，半套方案；× 等 S6 实施时再决策：GAP-1 原文即要求 S6 设计时收敛，P6.11-T2 排期在即，决策点前移成本最低且不阻塞 S6 自身推进。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4.5-T4 device_map #52 语义定夺：MAP 权围栏 + 内核供给 DMA arena + E1 唯一铸口",
+      "decision": "DeviceMap(#52) 权限模型：Device cap 须持 Rights::MAP 且 ObjKind::Device 且 obj==注册 NIC（缺 MAP→-7，错 kind/空槽→-1，retired→-12）；映射带 USER|WRITABLE|NX（W^X）；info 出参逐页 user_mem_ok + 8B 对齐围栏（违例 -2 拒绝而非 fault）；幂等表按 pid 恒返同组 VA。DMA 地址口径：desc.addr 须设备可见 PA 而 ring-3 无平移能力→本期内核预分配 8 连续帧 arena（恒等映射）并把 dma_va/dma_pa 经 DeviceMapInfo 交给驱动；P6 IOMMU 落地后切换为用户自分配 + IOVA 映射（Doc 01 §2.1 Device-MAP 语义演进点）。E1（Doc 04 §3.2）：NIC Device cap 只铸给 diplomat（net_smoke 即铸即验），init/boot 不持 MAP 权设备 cap——负路径 fixture（缺 MAP/错 kind）验证围栏逻辑，不构成第二出口。ABI_MINOR 5→6。",
+      "rationale": "PCI 配置空间在 ring-3 不可达（out 0xCF8 → #GP），用户态驱动必须经内核转发映射；MAP 权与 IRQ_BIND 分立使'能收中断'与'能碰寄存器'两能力正交（Doc 01 §2.1）。内核供给 arena 是 IOMMU 缺位下唯一不破坏 ring-3 无特权约束的方案；提前把布局做成 dma_va/pa 出参，P6 切换实现不动 ABI 结构。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4.5-T4 真机暴露两合同：process_exit swapgs 二态条件化 + 设备帧所有权 unmap-only",
+      "decision": "① handle_process_exit 的 iretq 路径 swapgs 改为条件化——判别器 rdmsr(IA32_KERNEL_GS_BASE)==&PER_CPU 即 fault 源（异常递送不动 GS，合同已正确，跳过），否则 syscall 源（入口已交换，补被 sysretq 跳过的平衡 swapgs）。与 P4-T7 ensure_kernel_gs_base 是同一账本两半：T7 修 enter_user_at 防御归一化，本次修 exit 侧按源分账，此后六处调用点（ProcessExit dispatch/terminate_current/legacy idt 分支）无需感知入口态。② DMA arena 帧是内核持有的设备资源（随 NET ctx 跨进程存续），不归子进程——terminate_current 与 net 续体两条回收路径都先 unmap_device_pages（只解映射）再 free_all_user_pages；设备页混进进程叶页 free = 伙伴系统二次分配踩脏 + FR8 账本漂移（真机 used 258≠266 实证）。FR8 口径：net-smoke 基线含 arena，arena 恒持有→恒等式成立。③ virtio 时序：DRIVER_OK 必须先于任何 notify（spec §2.4；QEMU 未 OK 不启动队列处理，kick 静默丢→used 恒 0）。",
+      "rationale": "①的必要性只有 T4 才暴露：此前 crash-smoke 是链尾（terminate 后立即 exit 363），GS 合同翻转只毒化'下一个 ring-3 会话'——T4 首次让 crasher 之后再进 diplomat，首条 syscall push 即 #DF（gs:[8] 读实模式 IVT 垃圾）。无条件 swapgs 从 P4-T5 起就是半对半错，syscall 源掩盖了 fault 源的错误。②是'映射即拥有'直觉的反例：页表项归进程、帧所有权归设备，两层必须分开记账。"
     }
   ],
   "current_task": "P3-T8",

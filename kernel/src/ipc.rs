@@ -50,25 +50,40 @@
 //! PA 后直接 `copy_nonoverlapping` 写入接收方 PA），等价于 kmap 退化形态，
 //! 无需维护 kmap 窗口。后续 kernel 上半部迁移后切换为真正 kmap。
 
-use core::sync::atomic::{AtomicU32, AtomicU64};
+use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64};
 
 use synapse_abi::{
     SyscallFrame, E_INVALID_ADDR, E_INVALID_CAP, E_NOT_FOUND, E_PEER_DIED, E_PERMISSION,
     E_WOULD_BLOCK,
 };
-use synapse_cap::{CapError, CapRef, ObjKind, Rights, TransferItem, MAX_TRANSFER};
+use synapse_cap::{CapError, CapRef, ObjKind, ObjRef, Rights, TransferItem, MAX_TRANSFER};
 use synapse_ipc::{RecvOutcome, SendOutcome, SendRequest};
 
 use crate::paging::{AddressSpace, PT_USER, PT_WRITABLE};
 use crate::sync::SpinLock;
 use crate::kthread;
-use synapse_sched::ThreadId;
+use synapse_sched::{ThreadId, MAX_THREADS};
 
 use log::info;
 
 // ---------------------------------------------------------------------------
 // AUX 表（per-endpoint 阻塞/在途/接收等待）
 // ---------------------------------------------------------------------------
+
+/// P4-T13（R12）：per-thread send 取消结果通道。
+///
+/// 0 = 无取消；非零 = 唤醒后应返回给 sender 的负错误码（[`E_PEER_DIED`]）。
+/// [`cancel_inflight_for`] 写入 → 阻塞 send 唤醒后 `swap(0)` 消费。
+/// 索引 = `ThreadId % MAX_THREADS`（ThreadId 全局唯一，取模仅防御越界）。
+static SEND_CANCEL: [AtomicI64; MAX_THREADS] = [const { AtomicI64::new(0) }; MAX_THREADS];
+
+fn set_send_cancel(t: ThreadId, code: i64) {
+    SEND_CANCEL[t.0 as usize % MAX_THREADS].store(code, AOrd::SeqCst);
+}
+
+fn take_send_cancel(t: ThreadId) -> i64 {
+    SEND_CANCEL[t.0 as usize % MAX_THREADS].swap(0, AOrd::SeqCst)
+}
 
 /// 发送方登记项：注册于 `EpAux.senders` 队列（reply 唤醒源）。
 #[derive(Clone, Copy)]
@@ -188,6 +203,89 @@ impl EpAux {
 const MAX_AUX: usize = 64;
 static AUX: SpinLock<[EpAux; MAX_AUX]> = SpinLock::new([const { EpAux::empty() }; MAX_AUX]);
 
+/// P4-T13（R12 + Doc 03 §5.1）：进程退出时的在途 IPC 唤醒。
+///
+/// 调用契约（terminate_current 步骤 2.5）：**撤销能力之前、资源回收之前**
+/// ——端点发现依赖垂死进程 CapTable（发送需持 cap → 其排队 send 的目标
+/// ep 必在自己表里；作为 receiver 的 ep 同理），故必须在 CapTable 销毁前跑。
+///
+/// 三类在途：
+/// 1. **排队 send**（垂死 agent 发出、尚未被 recv 的消息）→ crate
+///    `cancel_sender` 摘除（FIFO 保持，其他等待者不受扰，Doc 03 §5.1）；
+/// 2. **阻塞等 reply 的 sender**（垂死进程是这些 ep 的 receiver，
+///    `has_recv` 判定）→ `SEND_CANCEL = E_PEER_DIED` + 唤醒；
+/// 3. **in_flight**（receiver 已拉出、垂死进程未及 reply 的请求）→ 同上。
+///
+/// MVP 已知限制：`recv_waiter.pid == dying_pid`（垂死进程自身阻塞在
+/// recv）在串行 spawn 模型下不可能发生（运行中的进程不阻塞）；若未来
+/// 并发模型出现，recv 唤醒路径需自己的结果通道（不复用 SEND_CANCEL）。
+///
+/// 锁纪律：CAP_TABLES（收集，随即释放）→ 逐对象顺序取 ENDPOINTS
+/// （经 k_ep_cancel_sender）与 AUX——全程无嵌套。返回唤醒线程数。
+pub fn cancel_inflight_for(dying_pid: u32, dying_agent: u32) -> usize {
+    // 1. 收集垂死进程相关对象（ObjRef 含 generation 直取 cap；≤16 个足够
+    //    MVP——超限截断并 warn，不 alloc）
+    const MAX_SCAN: usize = 16;
+    let mut objs: [Option<(ObjRef, bool)>; MAX_SCAN] = [None; MAX_SCAN];
+    let mut n_obj = 0usize;
+    let pid = synapse_proc::process::Pid(dying_pid);
+    if crate::kstate::cap_table_exists(pid) {
+        crate::kstate::with_cap_table(pid, |t| {
+            for (_, cap) in t.iter() {
+                let has_recv = cap.rights.contains(Rights::RECV);
+                if let Some(slot) = objs[..n_obj].iter_mut().find(|s| {
+                    s.map(|(o, _)| o == cap.obj).unwrap_or(false)
+                }) {
+                    // 已收录：RECV 位做 OR 聚合
+                    if let Some((_, r)) = slot {
+                        *r |= has_recv;
+                    }
+                } else if n_obj < MAX_SCAN {
+                    objs[n_obj] = Some((cap.obj, has_recv));
+                    n_obj += 1;
+                } else {
+                    log::warn!("[ipc] cancel_inflight_for: obj scan truncated at {MAX_SCAN}");
+                }
+            }
+        });
+    }
+
+    let mut woken = 0usize;
+    for i in 0..n_obj {
+        let Some((obj, has_recv)) = objs[i] else { continue };
+        // 2. 垂死 agent 的排队 send → 摘除（非 endpoint 对象返 NotFound，无害）
+        let _ = crate::kstate::k_ep_cancel_sender(obj, synapse_ipc::AgentId(dying_agent));
+        // 3. 等垂死 receiver reply 的阻塞线程 → E_PEER_DIED 唤醒（仅当垂死
+        //    进程持该 ep 的 RECV 位——只是发送方的 ep 不许动，receiver 还活着）
+        if has_recv && (obj.index as usize) < MAX_AUX {
+            let mut auxs = AUX.lock();
+            let aux = &mut auxs[obj.index as usize];
+            for slot in aux.senders.iter_mut() {
+                if let Some(w) = slot.take() {
+                    set_send_cancel(w.thread, E_PEER_DIED);
+                    let _ = kthread::kthread_unblock(w.thread);
+                    woken += 1;
+                }
+            }
+            aux.senders_head = 0;
+            aux.senders_tail = 0;
+            aux.senders_count = 0;
+            if let Some(inf) = aux.in_flight.take() {
+                set_send_cancel(inf.sender_thread, E_PEER_DIED);
+                let _ = kthread::kthread_unblock(inf.sender_thread);
+                woken += 1;
+            }
+        }
+    }
+    if n_obj > 0 {
+        info!(
+            "[ipc] cancel_inflight_for(pid={dying_pid}): {} objs scanned, {} threads woken (E_PEER_DIED)",
+            n_obj, woken
+        );
+    }
+    woken
+}
+
 // ---------------------------------------------------------------------------
 // 当前进程标识（per-thread；MVP：单进程 = init）
 // ---------------------------------------------------------------------------
@@ -236,10 +334,12 @@ pub fn ipc_try_send_count() -> u64 {
 fn resolve_endpoint(pid: u32, cptr: u8, need: Rights) -> Result<(synapse_cap::ObjRef, u32), i64> {
     // slot 0 是 NULL trap。
     if cptr == 0 {
+        // FR9 审计：NULL cap 校验失败（目标未知 → UNKNOWN_OBJ 哨兵）。
+        crate::audit::cap_verify(pid, crate::audit::UNKNOWN_OBJ, need, false);
         return Err(E_INVALID_CAP);
     }
     // 锁序: OBJECTS → CAP_TABLES（与 kstate 约定一致）
-    crate::kstate::with_objects(|objs| {
+    let r = crate::kstate::with_objects(|objs| {
         crate::kstate::with_cap_table(synapse_proc::process::Pid(pid), |t| {
             let cap = match t.get(cptr) {
                 Ok(c) => c,
@@ -255,43 +355,25 @@ fn resolve_endpoint(pid: u32, cptr: u8, need: Rights) -> Result<(synapse_cap::Ob
                 Err(_) => Err(E_INVALID_CAP),
             }
         })
-    })
+    });
+    // FR9 审计：cap 校验事件（成功/失败都记）。**锁外 push**——AUDIT 是
+    // 叶子锁，agent_of 需 PROCS 锁，绝不允许在 OBJECTS/CAP_TABLES 临界区内
+    // 嵌套获取（锁序契约见 audit.rs 模块头）。
+    match &r {
+        Ok((obj, _)) => crate::audit::cap_verify(pid, *obj, need, true),
+        Err(_) => crate::audit::cap_verify(pid, crate::audit::UNKNOWN_OBJ, need, false),
+    }
+    r
 }
 
 // ---------------------------------------------------------------------------
 // 单拷贝路径（PA-to-PA，identity mapping 下等价于 kmap）
 // ---------------------------------------------------------------------------
 
-/// `mem_ok`：用户缓冲合法性校验（基于 walk_flags）。
-///
-/// `as_ptr == 0` 表示内核缓冲（identity-mapped 直访，跳过校验，len 非零合法）。
-/// `need_write=true` 还要 PT_WRITABLE。
-fn user_mem_ok(as_ptr: u64, va: u64, len: u64, need_write: bool) -> bool {
-    if as_ptr == 0 {
-        return true; // 内核缓冲：identity mapping 下 VA = PA 恒可达
-    }
-    if len == 0 {
-        return true;
-    }
-    let Some(end) = va.checked_add(len) else { return false };
-    let as_ref = unsafe { &*(as_ptr as *const AddressSpace) };
-    let mut page = va & !0xFFF;
-    while page < end {
-        match as_ref.walk_flags(page) {
-            Some((_, flags)) => {
-                if flags & PT_USER == 0 {
-                    return false;
-                }
-                if need_write && flags & PT_WRITABLE == 0 {
-                    return false;
-                }
-            }
-            None => return false,
-        }
-        page += 0x1000;
-    }
-    true
-}
+// P4-T13：用户缓冲校验统一走 crate::uaccess（原 ipc.rs 本地实现语义并入
+// uaccess::user_mem_ok：as_ptr==0 内核缓冲恒真 / len==0 平凡合法 / 逐页
+// present+PT_USER(+PT_WRITABLE) / checked_add 防溢出）。
+use crate::uaccess::user_mem_ok;
 
 /// 按页走查 PA，memcpy 一段 payload。
 ///
@@ -510,6 +592,8 @@ pub fn k_ipc_send(frame: &SyscallFrame) -> i64 {
             return E_PERMISSION;
         }
         Ok(SendOutcome::Delivered) => {
+            // FR9 审计：send 已被内核接受（Delivered 路径；label=req.label=0 MVP）。
+            crate::audit::ipc(pid, synapse_audit::IpcDir::Send, obj, 0);
             // receiver waiting：AUX.recv_waiter 取出 → 单拷贝 + cap transfer + 唤醒
             let receiver = {
                 let mut auxs = AUX.lock();
@@ -570,10 +654,17 @@ pub fn k_ipc_send(frame: &SyscallFrame) -> i64 {
             // 自阻塞等 reply
             kthread::kthread_block_current();
             if if_on { x86_64::instructions::interrupts::enable(); }
+            // P4-T13 R12：等 reply 期间 receiver 进程死亡 → 取消码返回
+            let cancel = take_send_cancel(kthread::kthread_current_id());
+            if cancel != 0 {
+                return cancel;
+            }
             // 唤醒后由 reply 把数据写入 send buffer；send 返回 len
             len as i64
         }
         Ok(SendOutcome::Queued) => {
+            // FR9 审计：send 已入队（Queued 路径）。
+            crate::audit::ipc(pid, synapse_audit::IpcDir::Send, obj, 0);
             // receiver 未等：AUX.senders 入队 + 自阻塞等 reply
             {
                 let mut auxs = AUX.lock();
@@ -590,6 +681,11 @@ pub fn k_ipc_send(frame: &SyscallFrame) -> i64 {
             }
             kthread::kthread_block_current();
             if if_on { x86_64::instructions::interrupts::enable(); }
+            // P4-T13 R12：排队等 recv 期间 receiver 进程死亡 → 取消码返回
+            let cancel = take_send_cancel(kthread::kthread_current_id());
+            if cancel != 0 {
+                return cancel;
+            }
             len as i64
         }
     }
@@ -643,6 +739,8 @@ pub fn k_ipc_try_send(frame: &SyscallFrame) -> i64 {
             return E_INVALID_CAP;
         }
         Ok(SendOutcome::Delivered) => {
+            // FR9 审计：try_send Delivered。
+            crate::audit::ipc(pid, synapse_audit::IpcDir::Send, obj, 0);
             // receiver waiting：AUX 登记 + 单拷贝 + 唤醒
             let receiver = {
                 let mut auxs = AUX.lock();
@@ -682,6 +780,9 @@ pub fn k_ipc_try_send(frame: &SyscallFrame) -> i64 {
             0
         }
         Ok(SendOutcome::Queued) => {
+            // FR9 审计：try_send Queued（★ P4-T11 真机验证锚点——ipc-pong
+            // 子进程 ring3 try_send 走此路径，init_continuation 断言该事件）。
+            crate::audit::ipc(pid, synapse_audit::IpcDir::Send, obj, 0);
             // 队未满：成功入队；登记 sender_wait（expects_reply=false 让 reply 走 -14）
             {
                 let mut auxs = AUX.lock();
@@ -728,6 +829,8 @@ pub fn k_ipc_recv(frame: &SyscallFrame) -> i64 {
             return E_NOT_FOUND;
         }
         Ok(RecvOutcome::Message(req)) => {
+            // FR9 审计：recv 取出消息（label 记录，payload 不记录）。
+            crate::audit::ipc(pid, synapse_audit::IpcDir::Recv, obj, req.label);
             // 反查 senders（按 agent），取出 sender_wait 拿到 as/payload_addr
             let sender = {
                 let mut auxs = AUX.lock();
@@ -840,6 +943,8 @@ pub fn k_ipc_reply(frame: &SyscallFrame) -> i64 {
     };
     // 截断到 sender 原 payload_len
     let reply_len = core::cmp::min(len, in_flight.sender_len);
+    // FR9 审计：reply 事件（in_flight 已取出 = 内核接受回复）。
+    crate::audit::ipc(pid, synapse_audit::IpcDir::Reply, obj, 0);
     let copy_res = unsafe { ipc_copy(user_as, msg, in_flight.sender_as, in_flight.sender_buf, reply_len) };
     let wake_res = kthread::kthread_unblock(in_flight.sender_thread);
     if if_on { x86_64::instructions::interrupts::enable(); }

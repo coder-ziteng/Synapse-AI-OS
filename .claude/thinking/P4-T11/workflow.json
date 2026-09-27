@@ -1,0 +1,27 @@
+{
+  "featureName": "P4-T11",
+  "description": "FR9 审计事件流内核接线（capability / IPC / 进程生命周期事件 → append-only 环形缓冲 + QUERY）",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "in_progress",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T11a-audit-crate-auditlog": "pending",
+    "T11b-audit-events-cap-ipc-proc": "pending",
+    "T11c-kernel-ring-buffer-query": "pending",
+    "T11d-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "audit crate AuditLog（append-only 环形 + seq 单调递增 + 类型化 EventKind）；kernel/src/audit.rs 集成层 = SpinLock<AuditLog> + k_audit_record(EventKind) + k_audit_query(buf, n) 把字节拷到用户；cap_resolve / ipc_send_recv_reply / process_spawn_exit_fault_reap 共 ~12 个埋点；溢出策略 = 覆盖最旧 + dropped_count 计数器写入 decision_log",
+    "design-contract": "Doc 01 AuditLog 行（cap 调用 + IPC + 进程生命周期事件点）；Doc 02 §4 FR9 审计；T13 用户指针校验统一路径供 audit_query 共用 helper",
+    "ipc-event-granularity": "MVP 一条消息 = 1 个事件（sender_pid + receiver_pid + ep_obj_index + len + n_caps）；P5+ 按需加类型化 payload",
+    "defer": "QUERY sys-call 暂不挂（内核侧 helper 即可；用户态读审计走 debug shell P5 接入；本期 audit_query 仅内核单元测试覆盖）"
+  },
+  "createdAt": "2026-09-27T17:00:00",
+  "updatedAt": "2026-09-27T17:00:00"
+}

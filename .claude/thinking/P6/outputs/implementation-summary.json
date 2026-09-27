@@ -1,0 +1,68 @@
+{
+  "featureName": "P6",
+  "stage": "04-codegen",
+  "generatedAt": "2026-09-27T23:25:00",
+  "note": "2026-09-27 用户批准的 3 任务增量执行（P6.0-T1 实施型 + P6.8-T1/P6.11-T1 决策型），顺序=先 E820 后决策报告。本文件增量记录各任务 codegen 结果；P6.8-T1/P6.11-T1 完成后补各自 section。",
+  "tasks": [
+    {
+      "id": "P6.0-T1",
+      "title": "E820 真实探测恢复（build_disk.py stage2 INT 15h + fallback）",
+      "status": "completed",
+      "files_changed": [
+        "build_disk.py — stage2 实模式恢复 INT 15h AX=E820h 循环探测（66 前缀 32 位寄存器组、ES:DI=0x20004 步长 24B、终止双判据 CF=1 丢弃 / EBX=0 计数后结束、127 条上限）；fallback=硬编码 -m 128M 7 条 rep movsb + debugcon 'M'/'p'/'N'+count 标记；INITRD_INFO_ADDR 0x20100→0x21000",
+        "kernel/src/initrd.rs — INITRD_INFO_ADDR=0x21000 + 注释",
+        "kernel/src/elfload.rs / main.rs / page_frame.rs — 0x20100→0x21000 注释与 expect 文案",
+        "kernel/src/ipc_pong_smoke.rs — PONG_CHILD_AS_PTR 裸指针副本删除；continuation 改用 proc_ext::take_user_as 单所有者判定（修复 AddressSpace 双 drop → heap free-list 自环）",
+        "kernel/src/init.rs — INIT_AS_PTR 删除；init_continuation 改用 take_user_as(INIT_PID)；临时诊断（boot_marker {}~ + debug_free_list 调用）已移除",
+        "kernel/src/heap.rs — 临时诊断（free() 双释放检测 + debug_free_list）已移除，恢复原状",
+        "kernel/src/proc_life.rs — 删除遗留 unused import alloc::boxed::Box"
+      ],
+      "evidence": {
+        "qemu_128m": "parsed 7 entries == SeaBIOS e820 map；exit 363（python subprocess 捕获）",
+        "qemu_1024m": "xtask run exit=363 + xtask ci OK；9 项 smoke PASS（ipc-smoke/notif-smoke/ring3/elf/spawn/crash/ipc-pong/init/audit-verify）",
+        "qemu_8g": "parsed 8 entries == SeaBIOS「e820 map has 8 items」逐字节一致（3 段 RAM + 4 段 Reserved + 高端段）；exit 363；page_frame total=31589 帧（128MB 上限内，buddy 属 P6.0-T2）",
+        "host": "basic_boot 4/4（run_tests.py）；workspace exclude-kernel host tests 全绿（0 failed）",
+        "heap": "free-list 转储 10 节点自然终止（curr_is_null=true）、零 DOUBLE FREE 告警后，verify_audit_trail 首次堆分配通过（decision_log 相邻条目的单所有者契约收口）"
+      },
+      "verify_amendments": [
+        "「-m 8G ≥10 条含 ACPI/MMU」为规划期机型假设：本机 SeaBIOS(pc 机型) 终表仅 8 条且无 type-3；以「与 SeaBIOS 输出 1:1」为准，已达成",
+        "「保留 UEFI GetMemoryMap 路径为 fallback」超出 stage2 能力边界：ovmf 下 legacy MBR 链路根本不执行，fallback=硬编码 BIOS 布局",
+        "「memory_map.rs 解析器单测无回归」经 [[bin]] test=false 设计历史上不可达（P1-T8），以三档真机 1:1 比对替代",
+        "debugcon fallback 触发标记为 'p'（规划文案 'X'）；本机从未触发 fallback，标记字母按实现记录"
+      ],
+      "gotcha": "手动 QEMU 退出码经 Git Bash $? 会 mod 256（363→107），历史 notes「exit=107」同此因；自动化判定用 xtask 或 python subprocess"
+    },
+    {
+      "id": "P6.8-T1",
+      "title": "本地推理决策（候选 C 批准：远程 AI API 代理 + InferenceProvider 埋点）",
+      "status": "completed",
+      "files_changed": [
+        "docs/design/09-local-inference-decision.md — 新建，DECIDED：约束 C1~C6（no_std ABI / 128MB 帧上限 / 无存储栈 / 唯一网络出口 / 首期 AI 原生定义 / 外交工具海关定位）+ 三候选对比矩阵 + 推荐 C + 再决策触发条件（§4）+ 一致性自检（§6）",
+        "需求目标.md — Phase 6「本地推理运行时」行标 DECIDED [x] 并指向 Doc 09",
+        "docs/README.md — 设计文档索引补 09 行",
+        "task.json — P6.8-T1 completed + actual_approach；decision_log 追加候选 C 定夺（含拒 A/拒 B 理由）；session.notes 同步"
+      ],
+      "evidence": {
+        "user_decision": "AskUserQuestion 2026-09-27：用户选「候选 C：远程代理+埋点 (Recommended)」",
+        "consistency": "Doc 04 §5.4（远程 API=首期 AI 原生主路径）/ Doc 04 §3（唯一网络出口不变量）/ 原始思路.md 外交工具海关定位 / Doc 06 S2·S4（推理需求经远程 API 可满足）逐条自检通过"
+      },
+      "downstream": "P6.8-T2 解锁：交付收敛为①远端/脱机切换配置项 ②脱机 fail-fast（InferenceUnavailable + 审计）③InferenceProvider trait（remote 实装 / local 占位）；本地推理再决策按 Doc 09 §4 触发条件"
+    },
+    {
+      "id": "P6.11-T1",
+      "title": "用户会话决策（候选 C 双轨制批准：cap 命名空间隔离 + 会话 token 认证）",
+      "status": "completed",
+      "files_changed": [
+        "docs/design/10-user-session-decision.md — 新建，DECIDED：约束 D1~D7 + 三候选对比矩阵 + 推荐 C + S6 收敛点表（§4）+ 一致性自检（§6：Doc 01 §1.2/§2/§3.3-3.4/§7、Doc 02、Doc 05、Doc 07 §1.3/§5/§6、GAP-1/R13、R6/R9 边界）",
+        "需求目标.md — Phase 6「用户会话与登录体系」行标 DECIDED [x]；R13 处置列更新为决策已收敛（T2 落地前风险保留）",
+        "docs/README.md — 设计文档索引补 10 行",
+        "task.json — P6.11-T1 completed + actual_approach；decision_log 追加候选 C 定夺（含拒 A/拒 B 理由）；session.notes 同步"
+      ],
+      "evidence": {
+        "user_decision": "AskUserQuestion 2026-09-27：用户选「候选 C：双轨制 (Recommended)」",
+        "consistency": "内核唯一强制点=cap 不破（token 不进内核）；per-user CapTable=派生子树视图（扁平 CapTable 不变）；登出=derivation tree 级联撤销（无新内核原语）；agent_id 盖章仅加会话维；本地会话与跨 OS DID/VC 分界明确"
+      },
+      "downstream": "P6.11-T2 解锁：per-user 派生子树 + session token 三态（颁发/撤销/过期）+ 锁屏 shell 独占前台 + 会话切换/恢复（持久化受 R6 约束早期内存态）；首期单用户默认不启用，现行为零破坏"
+    }
+  ]
+}

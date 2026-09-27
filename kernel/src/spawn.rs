@@ -266,6 +266,8 @@ fn do_spawn(quota: Quota) -> Result<Pid, CapError> {
     };
 
     let child_pid = crate::kstate::with_procs(|t| t.spawn(INIT_PID, params))?;
+    // FR9 审计：Spawn 事件（actor = 父/init；code = child pid）。
+    crate::audit::process_spawn(INIT_PID.0, child_pid.0, agent);
     // T9c 续体要 recv 这个 death_ep，先静态存下 init 的 cap slot。
     SPAWN_DEATH_CAP.store(death_cap as u64, Ordering::SeqCst);
     Ok(child_pid)

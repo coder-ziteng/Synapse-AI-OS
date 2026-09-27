@@ -1,0 +1,27 @@
+{
+  "featureName": "P4-T10",
+  "description": "用户态 init 进程 + gettime 服务端到端（含 kernel_main 启动链收口）",
+  "mode": "create",
+  "currentStage": "01-analysis",
+  "stages": {
+    "01-analysis": "in_progress",
+    "02-architecture": "pending",
+    "03-planning": "pending",
+    "04-codegen": "pending",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T10a-user-init-bin": "pending",
+    "T10b-xtask-wire-user-bins": "pending",
+    "T10c-kernel-init-smoke": "pending",
+    "T10d-kernel-main-handoff": "pending",
+    "T10e-real-machine-validation": "pending"
+  },
+  "notes": {
+    "scope": "user/init 新 bin（abi_query 版本协商 + gettime 打印时间戳 + exit）；kernel 侧 init_smoke 用 process_spawn 路径装载 'init' ELF 作为 Root Agent；启动链：kernel_main → 现有 smoke 全套 → init_smoke → init runs → 续体 exit 363",
+    "design-contract": "Doc 02 §6.2 启动链；与 P4-T9 spawn-smoke 复用同一装载原语（load_elf_into_as(name='init') + k_create_cap_table(pid=1) + 切 CR3/kstack + iretq 到 e_entry）",
+    "mvp-simplification": "MVP 单进程无独立 service 进程；init 直接 syscall gettime (Service=kernel)，IPC 请求服务的语义在 P5 服务化阶段补；本期关注：(1) Root Agent 启动；(2) abi_query major 不匹配拒绝；(3) 端到端 gettime 打印。"
+  },
+  "createdAt": "2026-09-27T17:00:00",
+  "updatedAt": "2026-09-27T17:00:00"
+}

@@ -4,6 +4,9 @@
 //!
 //! 1. **`abi_query()`** — 版本协商：major 不匹配即拒绝运行（Doc 02 §4.5，
 //!    编译期常量保证 ABI_MAJOR 与内核一致；minor 漂移是兼容的）。
+//! 1.5 **cap syscall 证据链（P4-T13）** — ring3 走通 cap_delegate /
+//!    cap_invoke / cap_revoke 三个 syscall 的正/反路径（衰减委托、非法
+//!    cptr、无 GRANT 撤销拒绝、级联撤销后 handle 失效）。
 //! 2. **`gettime(MONOTONIC)`** — 读内核单调钟，验证 FR2；打印 sec/ns。
 //!    MVP 单进程无独立 service 进程，gettime 服务由内核直接提供（capability
 //!    service 化在 Phase 5 service 阶段补：init 经 IPC 向 time-server 请求，
@@ -38,8 +41,14 @@
 use core::arch::asm;
 use core::panic::PanicInfo;
 
-use synapse_user::{abi_query, exit, gettime, clock_id::MONOTONIC};
+use synapse_user::{abi_query, cap_delegate, cap_invoke, cap_revoke, exit, gettime,
+    clock_id::MONOTONIC, CapRef, SynapseError};
 use synapse_abi::Timespec;
+
+// Rights 原始位（与 synapse_cap::Rights 同值，Doc 01 §4）：
+// SEND=bit0, RECV=bit1, REPLY=bit2, GRANT=bit6。
+const R_SEND: u32 = 1 << 0;
+const R_GRANT: u32 = 1 << 6;
 
 /// 用户态入口（`user/init/linker.ld` 中 `ENTRY(_start)`）。
 #[no_mangle]
@@ -55,6 +64,58 @@ pub extern "C" fn _start() -> ! {
         synapse_abi::ABI_MAJOR,
     );
     // minor 仅作"消费过的版本"语义（无 UART，靠后续 FR8 + 续体 PASS 间接证明）
+
+    // ---- 1.5 cap syscall 证据链（P4-T13：invoke/delegate/revoke ring3 走通）----
+    // bootstrap 根 cap：slot 1 = endpoint（SEND|RECV|REPLY|GRANT）。
+    let root = CapRef::new(1).expect("[init] FAIL: bad root cptr");
+
+    // (a) 衰减委托：root(GRANT) → child(SEND-only)。child cptr 由内核写入栈变量。
+    let mut child: u8 = 0;
+    unsafe {
+        cap_delegate(root, R_SEND, &mut child)
+            .expect("[init] FAIL: cap_delegate(SEND) from root should succeed");
+    }
+    assert!(child != 0, "[init] FAIL: child cptr not written");
+
+    // (b) 非法 cptr → 稳定 E_INVALID_CAP(-1)，绝不 panic（Phase 4 出口判据）。
+    let bogus = CapRef::new(200).expect("[init] FAIL: bad bogus cptr");
+    let r = unsafe { cap_invoke(bogus, 0, core::ptr::null()) };
+    assert_eq!(
+        r,
+        Err(SynapseError(-1)),
+        "[init] FAIL: invoke illegal cptr should be E_INVALID_CAP"
+    );
+
+    // (c) child 无 GRANT → revoke 拒绝 E_PERMISSION(-7)（attenuation 生效证据）。
+    let child_ref = CapRef::new(child as u16).expect("[init] FAIL: bad child cptr");
+    assert_eq!(
+        cap_revoke(child_ref),
+        Err(SynapseError(-7)),
+        "[init] FAIL: revoke without GRANT should be E_PERMISSION"
+    );
+
+    // (d) 合法 cap 的 invoke：校验通过但 MVP 无对象 op 表 → E_NOT_IMPLEMENTED(-10)。
+    let r = unsafe { cap_invoke(root, 0, core::ptr::null()) };
+    assert_eq!(
+        r,
+        Err(SynapseError(-10)),
+        "[init] FAIL: invoke valid cap should pass validation then E_NOT_IMPLEMENTED"
+    );
+
+    // (e) 带 GRANT 的委托 → revoke 级联成功 → 旧 handle 稳定失效 E_INVALID_CAP(-1)。
+    let mut child2: u8 = 0;
+    unsafe {
+        cap_delegate(root, R_SEND | R_GRANT, &mut child2)
+            .expect("[init] FAIL: cap_delegate(SEND|GRANT) should succeed");
+    }
+    let child2_ref = CapRef::new(child2 as u16).expect("[init] FAIL: bad child2 cptr");
+    cap_revoke(child2_ref).expect("[init] FAIL: revoke with GRANT should succeed");
+    let r = unsafe { cap_invoke(child2_ref, 0, core::ptr::null()) };
+    assert_eq!(
+        r,
+        Err(SynapseError(-1)),
+        "[init] FAIL: revoked handle should be E_INVALID_CAP"
+    );
 
     // ---- 2. gettime(MONOTONIC) → 校验返回值 ----
     let mut ts = Timespec::default();

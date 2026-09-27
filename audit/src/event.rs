@@ -66,6 +66,8 @@ pub enum ProcOp {
     Freeze = 3,
     /// 解冻。
     Thaw = 4,
+    /// 回收僵尸（P4-T11：FR9 事件点表 spawn/exit/fault/reap 全生命周期）。
+    Reap = 5,
 }
 
 /// 审计服务系统事件子类型。

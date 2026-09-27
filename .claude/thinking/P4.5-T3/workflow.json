@@ -1,30 +1,33 @@
 {
   "featureName": "P4.5-T3",
-  "description": "virtio-blk legacy MMIO 驱动实做（替换 kernel/src/block.rs stub）",
+  "description": "virtio-blk 真实驱动实做（替换 kernel/src/block.rs stub）——实做为 modern virtio 1.x 路线",
   "mode": "create",
-  "currentStage": "01-analysis",
+  "currentStage": "done",
   "stages": {
-    "01-analysis": "pending",
-    "02-architecture": "pending",
-    "03-planning": "pending",
-    "04-codegen": "pending",
-    "05-integration": "pending"
+    "01-analysis": "done",
+    "02-architecture": "done",
+    "03-planning": "done",
+    "04-codegen": "done",
+    "05-integration": "done"
   },
   "subtaskCompletion": {
-    "T3a-bar5-mapping-supervisor-only": "pending",
-    "T3b-virtio-status-machine": "pending",
-    "T3c-virtqueue-0-negotiation": "pending",
-    "T3d-blk-t-in-out-submit": "pending",
-    "T3e-interrupt-kick-poll": "pending",
-    "T3f-real-disk-image-rw": "pending",
-    "T3g-real-machine-validation": "pending"
+    "T3a-bar5-mapping-supervisor-only": "done",
+    "T3b-virtio-status-machine": "done",
+    "T3c-virtqueue-0-negotiation": "done",
+    "T3d-blk-t-in-out-submit": "done",
+    "T3e-interrupt-kick-poll": "done",
+    "T3f-real-disk-image-rw": "done",
+    "T3g-real-machine-validation": "done"
   },
   "notes": {
-    "scope": "替换 block.rs stub；magic/version 校验（virtio spec §3.1：0x74726976/version=1）+ Device Status reset→ACK→DRIVER→DRIVER_OK；virtqueue 0 协商（queue_sel/queue_num=128/queue_desc|avail|used PA 三段 4KB 对齐）；VIRTIO_BLK_T_IN/T_OUT 三段描述符（req header 16B + data 512B + status 1B）+ avail push + kick；中断走 P4.5-T2 IRQ_BIND → kthread_block 等 Notification → poll used ring",
-    "design-contract": "Doc 08 §3.1 P0 后端；保留 BlockDevice trait 接口不变（Doc 08 §3.1）",
-    "failure-modes": "BAR5 映射失败 → NotReady；kick 后无中断 → 超时 IoError；status byte != OK → IoError；DMA 缓冲非 8B 对齐 → panic（绝不静默截断）",
-    "verifier": "QEMU -drive file=disk.img,format=raw,if=virtio 启动 → 探测到 → read sector 0 → 与镜像字节一致 → write sector 1 → read 1 → 一致"
+    "scope": "kernel/src/block.rs 重写：PCI 探测 0x1AF4:{0x1042,0x1001} → transitional capability 定位 common/notify/device cfg（BAR4 MMIO）→ modern 协商序列 reset→ACK|DRIVER→VERSION_1（feature 高窗口 bit0）→FEATURES_OK→queue0 三段地址（2 连续帧：desc+avail 页 / used 页）→enable→DRIVER_OK；VIRTIO_BLK_T_IN/T_OUT 三段描述符链 + avail push + notify kick + used ring 轮询；read_sector/write_sector/capacity_sectors 走 BlockDevice trait（impl for SpinLock<VirtioBlk>），注册进 REGISTRY",
+    "route-change": "任务书原口径为 legacy MMIO（magic 0x74726976 + 32-bit feature），实做中发现本机 QEMU 11.1 已移除 virtio 0.9.5 legacy 数据通路：legacy 寄存器读写回显正常但设备核心要求 VERSION_1（bit32），legacy 32-bit 通路无法表达 → kick 后队列永不动（used_idx 恒 0）。改走 modern 1.x capability 路线，同一 BlockDevice trait 口径不变。详见 task.json decision_log 2026-09-27 P4.5-T3 两条",
+    "cap-layout-finding": "QEMU transitional vendor capability 为短布局（16B/条）：vndr@0/next@1/cap_len@2/cfg_type@3/bar@4/pad[3]/offset u32@+8/length u32@+12/notify_off_multiplier u32@+16——与 virtio 1.2 spec 的 offset/length u64（24B）不同；曾按 spec u64 解析把 length 读成 offset 高 32 位 → base=0x1000fe000000 越界 NotReady，真机 dump 全部 cap 原始 dword 后修正",
+    "polling-model": "本期同步轮询完成（POLL_BUDGET=400M spins 超时 warn+IoError），未接 IRQ_BIND→Notification 阻塞路径（留给 T5 集成或 P5）；SpinLock 持锁关中断轮询在 boot smoke 语境可接受",
+    "design-contract": "BlockDevice trait 接口保持不变（Doc 08 §3.1）；4GB 恒等映射下 VA==PA，栈缓冲与 <4GB BAR 直接作 DMA/MMIO 地址",
+    "verifier": "xtask build 生成 data.img（16MiB，sector0 签名 SYNAPSE-P45-VBLK + sector1..16 LE u64 索引）→ xtask run 真机：探测注册 slot 0 → 签名/15 个索引校验/写回读字节级一致 → exit 363",
+    "real-machine-evidence": "2026-09-27 真机 exit=363；serial：[block] virtio-blk registered at slot 0 (feat=0x101:0x30006e54 qnum=16 notify=0xfe003000 cap=32768) + smoke OK: sig + 15 sector-index checks + write/readback pass；宿主 abi 18 + cap 22 全绿；分支 claude/p4.5-pci-extract commit 287771c"
   },
   "createdAt": "2026-09-27T20:50:00",
-  "updatedAt": "2026-09-27T20:50:00"
+  "updatedAt": "2026-09-27T23:05:00"
 }

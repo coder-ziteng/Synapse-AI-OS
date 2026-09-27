@@ -2,16 +2,16 @@
   "featureName": "P6",
   "description": "Phase 6 远期阶段 — 内存自适应 + SMP + 存储栈 + IOMMU + 本地推理 + 跨 OS 外交 + USB/蓝牙外设栈 + 音频栈 + 安全强化 + 用户会话决策（紧接 P5 外交工具 + Agent 雏形之后）",
   "mode": "create",
-  "currentStage": "03-planning",
+  "currentStage": "04-codegen",
   "stages": {
     "01-analysis": "completed",
     "02-architecture": "completed",
-    "03-planning": "in_progress",
-    "04-codegen": "pending",
+    "03-planning": "completed",
+    "04-codegen": "in_progress",
     "05-integration": "pending"
   },
   "subtaskCompletion": {
-    "P6.0-T1-e820-real-probe": "pending",
+    "P6.0-T1-e820-real-probe": "completed",
     "P6.0-T2-buddy-allocator": "pending",
     "P6.0-T3-highmem-32g-64g-validation": "pending",
     "P6.1-T1-ap-startup-percpu-stack": "pending",
@@ -32,7 +32,7 @@
     "P6.6-T2-l2cap-profiles": "pending",
     "P6.7-T1-audio-driver-virtio-snd-hda": "pending",
     "P6.7-T2-audio-service-voice-loop": "pending",
-    "P6.8-T1-inference-decision": "pending",
+    "P6.8-T1-inference-decision": "completed",
     "P6.8-T2-mvp-inference-integration": "pending",
     "P6.9-T1-did-vc-identity-protocol": "pending",
     "P6.9-T2-behavior-contract-reputation": "pending",
@@ -41,7 +41,7 @@
     "P6.10-T2-w-x-hardening-stack-canary": "pending",
     "P6.10-T3-ipc-priority-inheritance": "pending",
     "P6.10-T4-cryptoprovider-trust-root": "pending",
-    "P6.11-T1-session-decision-point": "pending",
+    "P6.11-T1-session-decision-point": "completed",
     "P6.11-T2-multi-user-lock-screen": "pending"
   },
   "notes": {
@@ -52,5 +52,5 @@
     "correction-vs-prior-thought": "原 01-analysis/02-architecture 笔记中关于'P5 衔接 7 任务'的描述是基于 P5 尚未分解的过时假设。task.json 中 P5 已存在 9 任务详细分解（T1 进程骨架、T2 cap 类型扩展、T3 virtio-net、T4 API Channel、T5 spawn 限制放开、T6 CryptoProvider、T7 Agent 雏形、T8 Security Gateway、T9 集成 smoke），P5 与 P6 衔接定位按此修正。"
   },
   "createdAt": "2026-09-27T20:50:00",
-  "updatedAt": "2026-09-27T20:50:00"
+  "updatedAt": "2026-09-27T23:55:00"
 }
