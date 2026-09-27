@@ -287,6 +287,12 @@ pub extern "C" fn _start64() -> ! {
     ipc::kthread_ipc_smoke();
     boot_marker(b'v');
 
+    // P4-T8 Notification signal/wait smoke：单 cap table 位图 OR 聚合 + 读清 + 多 mask
+    //（marker w/x）
+    boot_marker(b'w');
+    ipc::kthread_notif_smoke();
+    boot_marker(b'x');
+
     // P3-T8 集成收尾 smoke：FR8 TSC 核算 + 页账本 + FR10 冻结/频率计数全链路
     //（合并注：原用 marker i/j，与 P4-T4 init_syscall 撞号 → 迁 s/t）
     boot_marker(b's');

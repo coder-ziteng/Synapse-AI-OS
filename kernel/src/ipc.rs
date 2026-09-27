@@ -1152,3 +1152,88 @@ pub fn kthread_ipc_smoke() {
 
     info!("[ipc-smoke] PASS");
 }
+
+// ---------------------------------------------------------------------------
+// P4-T8：Notification 位图信号/等待 smoke（marker w/x）
+// ---------------------------------------------------------------------------
+
+/// Smoke pid（与 T7/T8 其他合成 pid 不撞号；不进入真进程表——只起 cap table
+/// 与 syscall 上下文作用）。
+const T8_PID: u32 = 92;
+
+/// 真机 Notification smoke（main.rs 在 kthread_ipc_smoke 之后调用）。
+///
+/// 拓扑：单 cap table（pid=92）；一个 notification 对象 + SEND|RECV cap。
+///
+/// 覆盖：
+/// * signal(bits) → wait(mask=bits) 读清 round-trip；
+/// * 多源聚合：signal 0xFF → wait(0x0F) 返 0x0F + word 余 0xF0；
+/// * mask=0 恒返 0（无意义查询）；
+/// * 无匹配 → wait 返回 None（MVP 围栏下 syscall 层映射为 0）；
+///
+/// 注：cap kind / 权限错误路径由 `user/hello §8` 走真实 syscall 覆盖
+/// （cptr=0、非 Notification kind、无 RECV 权）——kernel-side smoke 不重复
+/// 测 resolve_notification 内部（其表驱动路径由 cap crate 单元测试覆盖）。
+pub fn kthread_notif_smoke() {
+    info!("[notif-smoke] start");
+
+    // 1. cap table
+    t7_assert!(
+        crate::kstate::k_create_cap_table(synapse_proc::process::Pid(T8_PID)).is_ok(),
+        "create cap table T8"
+    );
+
+    // 2. alloc notification + mint root cap (SEND | RECV)
+    let no_obj = crate::kstate::k_alloc_object(ObjKind::Notification).expect("alloc notif");
+    let cap = crate::kstate::k_mint_root(
+        synapse_proc::process::Pid(T8_PID),
+        no_obj,
+        Rights::SEND | Rights::RECV,
+    )
+    .expect("mint notif cap");
+    info!("[notif-smoke] obj_idx={} cap={}", no_obj.index, cap);
+
+    // 上下文 = T8_PID（resolve 路径 pid 校验）
+    set_current_pid(T8_PID);
+
+    // 3. round-trip：signal(0xA5) → wait(0xA5) → 0xA5；再次 wait → None（已读清）
+    t7_assert_eq!(
+        crate::kstate::k_notify_signal(no_obj, 0xA5),
+        Ok(()),
+        "signal(0xA5)"
+    );
+    let got = crate::kstate::k_notify_wait(no_obj, 0xA5);
+    t7_assert_eq!(got, Ok(Some(0xA5)), "wait(0xA5) round-trip");
+    let got = crate::kstate::k_notify_wait(no_obj, 0xA5);
+    t7_assert_eq!(got, Ok(None), "wait(0xA5) re-read → empty");
+
+    // 4. 多源聚合 + 部分 wait：signal(0xFF) → wait(0x0F) 返 0x0F；peek 余 0xF0
+    t7_assert_eq!(
+        crate::kstate::k_notify_signal(no_obj, 0xFF),
+        Ok(()),
+        "signal(0xFF)"
+    );
+    let got = crate::kstate::k_notify_wait(no_obj, 0x0F);
+    t7_assert_eq!(got, Ok(Some(0x0F)), "wait(0x0F) subset clear");
+    // 残留 0xF0——用 wait(mask=0xF0) 验证读清后清零
+    let got = crate::kstate::k_notify_wait(no_obj, 0xF0);
+    t7_assert_eq!(got, Ok(Some(0xF0)), "wait(0xF0) clear residual");
+
+    // 5. mask=0 恒返 Some(0)（无意义查询）
+    t7_assert_eq!(
+        crate::kstate::k_notify_wait(no_obj, 0),
+        Ok(Some(0)),
+        "wait(mask=0) → 0"
+    );
+
+    // 6. signal bits=0 = no-op（保证 word 不变）
+    t7_assert_eq!(
+        crate::kstate::k_notify_signal(no_obj, 0),
+        Ok(()),
+        "signal(bits=0) no-op"
+    );
+
+    // 7. 资源回收
+    let _ = crate::kstate::k_free_object(no_obj);
+    info!("[notif-smoke] PASS");
+}

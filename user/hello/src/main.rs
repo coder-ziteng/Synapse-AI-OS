@@ -1,6 +1,6 @@
-//! P4-T6/T7 syscall 测试程序（initramfs `hello`）。
+//! P4-T6/T7/T8 syscall 测试程序（initramfs `hello`）。
 //!
-//! 从 P4-T1 三段式占位升级为**7 syscall 全路径验证**（task.json P4-T6/T7
+//! 从 P4-T1 三段式占位升级为**8 syscall 全路径验证**（task.json P4-T6/T7/T8
 //! verify：成功路径 + 每个错误路径负错误码断言）：
 //!
 //! | # | syscall | 覆盖 |
@@ -11,7 +11,8 @@
 //! | 4 | `mmap`(40) | 内核选址 RW/RX/GROWABLE + 显式地址；写读回环；len=0/未对齐/越窗/重叠 → -2；W+X/无 R/未知 prot 位 → -7；未知 flags 位 → -10 |
 //! | 5 | `munmap`(41) | 精确解除成功；重复/部分/未登记 → -5；未对齐/len=0 → -2 |
 //! | 6 | `ipc_try_send`(3) / `ipc_send`(0) / `ipc_recv`(1) | T7a：try_send 无 receiver → Queued 0；cptr=0/越界/n_caps 超限 → -1；blocking send/recv 在 boot 围栏下 → -4 |
-//! | 7 | `process_exit`(21) | code=0 终结（内核 KERNEL_FRAME iretq 接力 elf_continuation） |
+//! | 7 | `notification_signal`(4) / `notification_wait`(5) | T8：signal(0xA5)→wait(0xA5)=0xA5；多源聚合 signal(0xFF)→wait(0x0F)=0x0F；mask=0→0；cptr=0/非 Notification kind → -1 |
+//! | 8 | `process_exit`(21) | code=0 终结（内核 KERNEL_FRAME iretq 接力 elf_continuation） |
 //!
 //! 失败语义：任何 assert 失败 → panic（=abort）→ ring-3 停机循环触发
 //! #GP/#UD → 内核 panic → QEMU exit **355**（区别于全过 363）。
@@ -183,7 +184,36 @@ pub extern "C" fn _start() -> ! {
     );
     assert_eq!(r, 0, "try_send queued -> 0");
 
-    // ---- 7. process_exit(0)：内核 KERNEL_FRAME iretq 接力 elf_continuation
+    // ---- 8. Notification signal/wait 端到端（init 持有 notif cap slot 2 = bootstrap mint）
+    //     覆盖：signal → wait round-trip；多源聚合 + 部分 wait；mask=0；空位图无匹配
+    //     → 0；以及错误路径（cptr=0、非 Notification kind、缺 RECV 权）。
+    let no_cap: u64 = 2;
+    // 8.1 signal(0xA5) → wait(0xA5) → 0xA5
+    assert_eq!(sys!(SyscallId::NotificationSignal, [no_cap, 0xA5, 0, 0, 0, 0]), 0, "notif_signal 0xA5");
+    assert_eq!(sys!(SyscallId::NotificationWait, [no_cap, 0xA5, 0, 0, 0, 0]), 0xA5, "notif_wait 0xA5");
+    // 8.2 读清后再 wait 同 mask → 0（MVP 围栏下"无匹配"映射为 0）
+    assert_eq!(sys!(SyscallId::NotificationWait, [no_cap, 0xA5, 0, 0, 0, 0]), 0, "notif_wait reread → 0");
+    // 8.3 多源聚合：signal(0xFF) → wait(0x0F) 返 0x0F（剩余 0xF0 留待后续）
+    assert_eq!(sys!(SyscallId::NotificationSignal, [no_cap, 0xFF, 0, 0, 0, 0]), 0, "notif_signal 0xFF");
+    assert_eq!(sys!(SyscallId::NotificationWait, [no_cap, 0x0F, 0, 0, 0, 0]), 0x0F, "notif_wait 0x0F subset");
+    // 8.4 mask=0 恒返 0（无意义查询）
+    assert_eq!(sys!(SyscallId::NotificationWait, [no_cap, 0, 0, 0, 0, 0]), 0, "notif_wait mask=0 → 0");
+    // 8.5 signal bits=0 = no-op
+    assert_eq!(sys!(SyscallId::NotificationSignal, [no_cap, 0, 0, 0, 0, 0]), 0, "notif_signal 0 no-op");
+    // 8.6 错误路径：cptr=0 → -1
+    assert_eq!(
+        sys!(SyscallId::NotificationSignal, [0, 0xFF, 0, 0, 0, 0]),
+        E_INVALID_CAP,
+        "notif_signal cptr=0 → -1"
+    );
+    // 8.7 错误路径：非 Notification kind（用 ep_cap slot 1 当 notification 用）→ -1
+    assert_eq!(
+        sys!(SyscallId::NotificationSignal, [ep_cap, 0xFF, 0, 0, 0, 0]),
+        E_INVALID_CAP,
+        "notif_signal on ep cap → -1"
+    );
+
+    // ---- 9. process_exit(0)：内核 KERNEL_FRAME iretq 接力 elf_continuation
     unsafe { invoke(SyscallId::ProcessExit.num(), [0, 0, 0, 0, 0, 0]) };
 
     // 不应到这里（exit 不回用户态）

@@ -398,6 +398,28 @@ pub fn k_notify_poll(obj: ObjRef) -> Result<Option<u64>, CapError> {
     Ok(n.poll())
 }
 
+/// Notification 阻塞 wait（位图 AND 语义；P4-T8）：
+/// `word & mask` 非零 → 返回该子集并**读清**这些位；否则 `None`（无匹配，
+/// 集成层据此置 Blocked；MVP 围栏先返 WouldBlock）。`mask = 0` 恒返 0
+/// （无意义查询）。
+pub fn k_notify_wait(obj: ObjRef, mask: u64) -> Result<Option<u64>, CapError> {
+    let mut ns = NOTIFICATIONS.lock();
+    let n = ns
+        .get_mut(obj.index as usize)
+        .and_then(|s| s.as_mut())
+        .ok_or(CapError::InvalidCap)?;
+    if mask == 0 {
+        return Ok(Some(0));
+    }
+    let matched = n.peek() & mask;
+    if matched == 0 {
+        return Ok(None);
+    }
+    // 仅清除匹配的位（保留未匹配位：其他订阅者/不同 mask 不被误清）。
+    let cleared = n.clear_matched(matched);
+    Ok(Some(cleared))
+}
+
 /// init 进程 pid 常量转发（smoke/bootstrap 使用）。
 pub const INIT: Pid = INIT_PID;
 

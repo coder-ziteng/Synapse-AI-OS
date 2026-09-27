@@ -49,8 +49,9 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use synapse_abi::{
     abi_query_value, decode, Syscall, SyscallFrame, Timespec, CLOCK_MONOTONIC, CLOCK_WALL,
-    E_INVALID_ADDR, E_NOT_FOUND, E_NOT_IMPLEMENTED,
+    E_INVALID_ADDR, E_INVALID_CAP, E_NOT_FOUND, E_NOT_IMPLEMENTED, E_PERMISSION,
 };
+use synapse_cap::{ObjKind, Rights};
 use synapse_proc::process::{FaultKind, Pid};
 
 use crate::paging::{AddressSpace, PT_USER, PT_WRITABLE};
@@ -382,6 +383,12 @@ fn dispatch_inner(frame: &SyscallFrame) -> i64 {
                 Syscall::IpcRecv { .. } => crate::ipc::k_ipc_recv(frame),
                 Syscall::IpcReply { .. } => crate::ipc::k_ipc_reply(frame),
                 Syscall::IpcTrySend { .. } => crate::ipc::k_ipc_try_send(frame),
+                Syscall::NotificationSignal { notif, bits } => {
+                    sys_notify_signal(notif, bits)
+                }
+                Syscall::NotificationWait { notif, mask } => {
+                    sys_notify_wait(notif, mask)
+                }
                 Syscall::ProcessReap { pid } => {
                     // P4-T9d：reap 父进程持有的 zombie child。调用方 = caller
                     // （smoke 内是 init / spawn_continuation）；错误映射走
@@ -488,6 +495,73 @@ unsafe fn sys_gettime(as_ptr: *mut AddressSpace, clock_id: u32, ts_out: u64) -> 
         (pa_nsec as *mut u64).write_volatile(ts.nsec);
     }
     0
+}
+
+/// `notification_signal(notif, bits)` (#4) — 位图 OR 聚合（P4-T8）。
+///
+/// 把 `bits` 加到 notif 对象的位图（已有位保留）；无对象/无 cap/非 Notification
+/// kind/无 SEND 权限 → 错误码。**MVP 围栏**：boot 线程永不禁用 → 当前直接放行
+/// （signal 无须阻塞路径，无 boot fence 风险）。
+fn sys_notify_signal(cptr: u8, bits: u32) -> i64 {
+    let pid = crate::proc_ext::current_pid();
+    let (obj, _) = match resolve_notification(pid, cptr, Rights::SEND) {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+    match crate::kstate::k_notify_signal(obj, bits as u64) {
+        Ok(()) => 0,
+        Err(e) => crate::ipc::cap_err_to_code(e),
+    }
+}
+
+/// `notification_wait(notif, mask)` (#5) — 位图 AND + 读清（P4-T8）。
+///
+/// 非阻塞：当前 `word & mask` 非零 → 清除这些位并返回；否则返回 0
+/// （MVP 围栏下不阻塞——per-CPU 单内核栈 + boot 是系统最后防线，
+/// 真正阻塞 wait 由 T9 per-thread kstack 后接出，本期先返 0
+/// 而非 E_WOULD_BLOCK 以便同进程自 signal/wait round-trip 测试）。
+/// `mask = 0` 恒返 0（无意义查询）。
+fn sys_notify_wait(cptr: u8, mask: u32) -> i64 {
+    let pid = crate::proc_ext::current_pid();
+    let (obj, _) = match resolve_notification(pid, cptr, Rights::RECV) {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+    match crate::kstate::k_notify_wait(obj, mask as u64) {
+        Ok(Some(matched)) => matched as i64,
+        Ok(None) => 0, // 无匹配 = 阻塞语义；MVP 围栏下返 0
+        Err(e) => crate::ipc::cap_err_to_code(e),
+    }
+}
+
+/// 从当前 pid 的 cap 表中解析 notification 对象（与 `ipc::resolve_endpoint`
+/// 同形；分模块避免 ipc 模块头膨胀 notification 概念）。
+///
+/// 返回 `(ObjRef, badge)`。失败映射：cap 槽空 / 越界 / 非 Notification kind →
+/// `E_INVALID_CAP`（-1）；权限不足 → `E_PERMISSION`（-7）；对象已 retired →
+/// `E_OBJECT_RETIRED`（-12）。
+fn resolve_notification(pid: u32, cptr: u8, need: Rights) -> Result<(synapse_cap::ObjRef, u32), i64> {
+    if cptr == 0 {
+        return Err(E_INVALID_CAP);
+    }
+    // 锁序: OBJECTS → CAP_TABLES
+    crate::kstate::with_objects(|objs| {
+        crate::kstate::with_cap_table(Pid(pid), |t| {
+            let cap = match t.get(cptr) {
+                Ok(c) => c,
+                Err(_) => return Err(E_INVALID_CAP),
+            };
+            if !cap.rights.contains(need) {
+                return Err(E_PERMISSION);
+            }
+            match objs.check_live(cap.obj) {
+                Ok(ObjKind::Notification) => Ok((cap.obj, cap.badge)),
+                Ok(_) => Err(E_INVALID_CAP),
+                Err(synapse_cap::CapError::ObjectRetired) => Err(-12),
+                Err(_) => Err(E_INVALID_CAP),
+            }
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------

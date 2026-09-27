@@ -126,6 +126,32 @@ pub fn spawn_smoke() -> ! {
         child_ep_cap, child_ep_obj.index, child_ep_obj.generation
     );
 
+    // 3b-bis. P4-T8：给子进程铸造自有 notification 根 cap → slot 2。
+    //     hello §8 Notification signal/wait 用例硬编码 no_cap=2，与 init 的
+    //     bootstrap no_cap 同槽号；子进程 CapTable 是新建空表，必须铸则 §8
+    //     NotificationSignal(cptr=2) 走 resolve_notification 失败 → -1 → assert
+    //     panic → ring3 #GP → terminate_current → FAULT_GENERAL_PROTECTION(5)
+    //     与 spawn-smoke §3d FAULT_NONE 期望不符。用全新 no_obj（不复用 init 的
+    //     bootstrap no——init hello §8 signal 已写入位图，复用会让子首次 wait 即
+    //     拿到非零脏数据）。
+    let child_no_obj = crate::kstate::k_alloc_object(synapse_cap::ObjKind::Notification)
+        .expect("[spawn-smoke] alloc child notification failed");
+    let child_no_cap = crate::kstate::k_mint_root(
+        child_pid,
+        child_no_obj,
+        synapse_cap::Rights::SEND | synapse_cap::Rights::RECV,
+    )
+    .expect("[spawn-smoke] mint child no cap failed");
+    assert_eq!(
+        child_no_cap, 2,
+        "[spawn-smoke] child no cap must land in slot 2 (hello hardcodes no_cap=2), got {}",
+        child_no_cap
+    );
+    info!(
+        "[spawn-smoke]   ok: child notification minted → cap slot {} (obj {}:{})",
+        child_no_cap, child_no_obj.index, child_no_obj.generation
+    );
+
     // 4. load hello ELF into child AS
     let (mut child_as, entry, stack_top) = crate::elfload::load_hello_into_as();
     SPAWN_CHILD_AS_PTR.store(&mut child_as as *mut AddressSpace as u64, Ordering::SeqCst);

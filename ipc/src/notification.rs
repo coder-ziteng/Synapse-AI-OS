@@ -42,4 +42,12 @@ impl Notification {
     pub const fn peek(&self) -> u64 {
         self.word
     }
+
+    /// 清除 `bits` 中已置位的位（位图 AND NOT 语义；P4-T8 wait mask 路径）。
+    /// 返回清除前被清掉的位（即"曾经匹配"集合，给上层读清语义用）。
+    pub fn clear_matched(&mut self, bits: u64) -> u64 {
+        let prev = self.word & bits;
+        self.word &= !bits;
+        prev
+    }
 }

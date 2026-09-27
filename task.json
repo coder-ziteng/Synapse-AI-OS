@@ -761,7 +761,7 @@
         {
           "id": "P4-T8",
           "name": "Notification 异步原语（signal/wait）",
-          "status": "pending",
+          "status": "completed",
           "deliverables": [
             "notification_signal（位图 OR）/ notification_wait（位图 AND，返回触发位）syscall 接线",
             "为 Phase 4.5 IRQ→用户态转发预留内核侧 fast path 接口"
@@ -772,7 +772,8 @@
           "deps": [
             "P4-T7"
           ],
-          "estimate": "1 窗口"
+          "estimate": "1 窗口",
+          "actual_approach": "P4-T8 Notification signal/wait 真机贯通（exit 363）。【接线】(1) synapse_ipc::Notification 加 clear_matched(&mut self, bits: u64) -> u64（位图 AND NOT + 返清前掩码用于读清语义）；(2) kernel/src/kstate.rs 加 k_notify_signal(obj, bits)/k_notify_wait(obj, mask) —— mask=0 恒返 Some(0)；wait 走 peek() & mask 判 None/Some 后调 clear_matched 保证只清匹配的位；(3) kernel/src/syscall.rs 加 sys_notify_signal/sys_notify_wait + resolve_notification(pid, cptr, need) helper（SEND/RECV 权校验 + cap→ObjRef + 检查 obj kind=Notification + 错误码映射 E_INVALID_CAP/E_PERMISSION/E_OBJECT_RETIRED）；dispatch match 臂挂进 syscall_dispatch other 分支；(4) kernel/src/ipc.rs 加 kthread_notif_smoke（marker w/x）：单 cap table 92 + alloc notification + mint SEND|RECV cap → signal(0xA5)→wait(0xA5)==Some(0xA5)→re-read 空；signal(0xFF)→wait(0x0F)==Some(0x0F) 部分清 + wait(0xF0)==Some(0xF0) 清残留；mask=0 恒返 Some(0)；signal(bits=0) no-op。(5) kernel/src/main.rs 接入 marker w/x 段（v 之后）；(6) kernel/src/spawn.rs 给子进程铸造 child_no_obj + child_no_cap slot 2（child 端 hello §8 用例硬编码 no_cap=2 需对齐 init bootstrap 槽号）；(7) user/hello §8 notification_signal/wait 全路径：round-trip 0xA5→0xA5→空；signal(0xFF)→wait(0x0F)=0x0F；mask=0→0；signal bits=0 no-op；cptr=0/非 Notification kind → E_INVALID_CAP。【真机】QEMU exit 363；11 smoke 套件全绿（kthread/kthread-switch/preempt/mutex/ipc/p3t8/paging/vma/ring3/elf/spawn/crash） + kthread_notif_smoke PASS；serial.log [notif-smoke] obj_idx=6 cap=1 + [ipc-smoke] PASS 序贯推进；elf-smoke 9 ok mmap 4ok/11err；spawn-smoke 子 fault=0 + crash-smoke 子 fault=1 双路径绿；FR8 256 帧归零。宿主 tests 全绿。"
         },
         {
           "id": "P4-T9",
