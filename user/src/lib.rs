@@ -32,6 +32,12 @@ pub mod handle;
 pub mod syscall;
 pub mod wrappers;
 
+// 极简运行时符号（memset/memcpy/...）：仅裸机用户 target 编译。
+// compiler_builtins 在 os=none 自定义 target 上是 thin wrapper 不提供这些
+// 符号（与内核 main.rs 同款坑）；宿主构建走 libc，必须 cfg 掉防符号冲突。
+#[cfg(target_os = "none")]
+pub mod runtime;
+
 pub use handle::{CapError, CapRef};
 pub use synapse_abi::SyscallFrame;
 pub use synapse_cap::{ObjKind, ObjRef, Rights};

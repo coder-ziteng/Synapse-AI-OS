@@ -134,6 +134,96 @@ fn decode_rejects_out_of_range_narrow_args() {
     assert!(decode(&frame(1, [2, u64::MAX, u64::MAX, 0, 0, 0])).is_some());
 }
 
+// ---------- P4-T6：错误码 / Timespec / prot·flags 位 ----------
+// ---------- P4-T7：扩展错误码 -11..-15 ----------
+
+#[test]
+fn error_codes_are_distinct_negative_range() {
+    // Doc 02 §4.3 全集 = 15 个，值域 [-15, -1]，互不重复。
+    // 前 10 个由 P4-T6 引入；-11..-15 由 P4-T7 补齐（与 cap crate CapError
+    // / Doc 03 §5.1 对齐，详见 abi/src/lib.rs 错误码段注记）。
+    let codes = [
+        E_INVALID_CAP,
+        E_INVALID_ADDR,
+        E_NO_MEMORY,
+        E_WOULD_BLOCK,
+        E_NOT_FOUND,
+        E_AGENT_ID_CONFLICT,
+        E_PERMISSION,
+        E_FROZEN,
+        E_ZOMBIE,
+        E_NOT_IMPLEMENTED,
+        E_ABI_MISMATCH,
+        E_OBJECT_RETIRED,
+        E_QUOTA_EXCEEDED,
+        E_PEER_DIED,
+        E_TIMEOUT,
+    ];
+    assert_eq!(codes.len(), 15);
+    for (i, c) in codes.iter().enumerate() {
+        assert_eq!(*c, -(i as i64) - 1, "错误码应按文档顺序 -1..-15");
+    }
+}
+
+#[test]
+fn timespec_layout_is_repr_c_16_bytes() {
+    assert_eq!(core::mem::size_of::<Timespec>(), 16);
+    assert_eq!(core::mem::align_of::<Timespec>(), 8);
+    // 字段序（sec 在前）由 repr(C) + 声明序保证；用 Default/Copy 语义自检
+    let ts = Timespec { sec: 7, nsec: 123 };
+    let copy = ts;
+    assert_eq!(copy, ts);
+    assert_eq!(Timespec::default(), Timespec { sec: 0, nsec: 0 });
+}
+
+#[test]
+fn clock_ids_match_doc() {
+    assert_eq!(CLOCK_MONOTONIC, 0);
+    assert_eq!(CLOCK_WALL, 1);
+}
+
+#[test]
+fn prot_and_flags_bits() {
+    // 与 vma RegionFlags 低位约定对齐：R=bit0 W=bit1 X=bit2 GROWABLE=bit3
+    assert_eq!(PROT_READ, 0b0001);
+    assert_eq!(PROT_WRITE, 0b0010);
+    assert_eq!(PROT_EXEC, 0b0100);
+    assert_eq!(PROT_MASK, 0b0111);
+    assert_eq!(MAP_GROWABLE, 0b1000);
+    assert_eq!(MAP_MASK, MAP_GROWABLE);
+    assert_eq!(PROT_MASK & MAP_MASK, 0, "prot 与 flags 位段不得重叠");
+}
+
+#[test]
+fn decode_gettime_and_mmap_args() {
+    let f = frame(30, [CLOCK_MONOTONIC as u64, 0x4100_0000, 0, 0, 0, 0]);
+    assert_eq!(
+        decode(&f),
+        Some(Syscall::GetTime { clock_id: 0, ts_out: 0x4100_0000 })
+    );
+    let f = frame(
+        40,
+        [0, 0x2000, (PROT_READ | PROT_WRITE) as u64, MAP_GROWABLE as u64, 0, 0],
+    );
+    assert_eq!(
+        decode(&f),
+        Some(Syscall::Mmap { addr: 0, len: 0x2000, prot: 0b0011, flags: 0b1000 })
+    );
+    let f = frame(41, [0x4100_0000, 0x1000, 0, 0, 0, 0]);
+    assert_eq!(
+        decode(&f),
+        Some(Syscall::Munmap { addr: 0x4100_0000, len: 0x1000 })
+    );
+}
+
+#[test]
+fn abi_minor_bumped_to_3() {
+    // P4-T6：1→2（错误码/Timespec/prot 位入 crate）；P4-T7：2→3（补 -11..-15）。
+    // minor 增量 = 向后兼容新增；旧 -1..-10 编号不变，附带 5 个新码。
+    assert_eq!(ABI_MINOR, 3);
+    assert_eq!(abi_query_value(), 0x3);
+}
+
 #[test]
 fn syscall_id_roundtrip() {
     // decode(...).id() 与号一致（分发表自检；全零参数对全部 19 个号均合法）

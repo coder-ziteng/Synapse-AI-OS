@@ -98,8 +98,17 @@
 0xFFFF_FFFF_FFFF_FFFF  └───────────────────────────┘
 ```
 
+> **UPDATE（P4-T2, 2026-09-27，DECIDED）：ELF 加载基址改为 `0x4000_0000`（1GB）**。
+> 原 PROPOSED `0x400000` 与现状冲突：内核经 boot.S 以 2MB 大页**恒等映射** 0-4GB，
+> 镜像占 PA `[0x200000, 0x4cb000)`——用户 VA 0x400000 与内核自身代码/数据的 VA
+> 完全重叠（同一地址空间内同一 VA 不能两者兼是）。1GB 基址落在 PDPT[0] entry 1
+> 所辖 VA 区，其 PA 1-2GB 无物理内存（RAM ~128MB），每地址空间为该 entry 挂独立
+> 清零 PD 即可与共享的内核 0-1GB 恒等映射（entry 0）零重叠、零大页拆分。
+> 上方图中 `0x40_0000` 行以此更新为准；内核高半迁移（图中 0x8000_0000_0000 区）
+> 维持远期方向不变。
+
 **PROPOSED 决策**：
-- **ELF 加载基址 = `0x400000`**：Linux x86_64 传统默认值，工具链兼容性最佳；
+- ~~**ELF 加载基址 = `0x400000`**：Linux x86_64 传统默认值，工具链兼容性最佳；~~（已被上方 UPDATE 取代：基址 = `0x4000_0000`）
 - **首期不支持 PIE**（Position-Independent Executable）：固定加载地址，砍掉重定位解析开销；Phase 5+ 视 ASLR 需求再引入；
 - **heap 向上增长**（对齐 Linux brk 语义）；**stack 向下增长**（x86_64 标准）；
 - **stack 起始 = `0x7FFF_FFFF_E000`**，与内核映射区保留 8MB gap（防 stack-heap 碰撞缓冲）。
@@ -126,6 +135,23 @@ pub struct UserMemoryRegion {
 }
 ```
 - 缺页处理：命中合法 region → 分配页帧并映射；未命中 → SIGSEGV 等价物（杀进程）。
+
+> **UPDATE（P4-T3, 2026-09-27, DECIDED）**：实现落点 = `synapse-vma` 纯逻辑 crate（`vma/src/{lib,table}.rs`）。
+> - `RegionFlags` 手动位组合（`READ=1/WRITE=2/EXEC=4/GROWABLE=8`，`contains/union` const fn），零依赖；
+> - `RegionKind = Code|Data|Stack|Heap|Mapped`；
+> - `RegionTable` 固定 `[Option<UserMemoryRegion>; MAX_REGIONS=32]` + `len`，纯逻辑 `insert/lookup/remove/grow/clear/iter`；
+> - `grow(start, new_start, new_end)` 校验 GROWABLE + 单调延展（`new_start <= old.start && new_end >= old.end`，否则 `Shrink`）+ 不与其他区域重叠；
+> - 结构校验：`validate()` = 页对齐 + 非空 + `start >= NULL_GUARD_END (0x1000)`；
+> - 宿主端 20 个单元测试覆盖 insert/lookup/overlap (含端点相邻允许)/NULL guard/unaligned/empty/full/remove/grow(heap-up/stack-down/non-growable/overlap/notfound)/clear。
+>
+> 内核缺页路径 = `kernel/src/paging.rs::handle_user_fault`（P4-T3）：
+> - error_code 解析 → VMA lookup → 权限校验（write/fetch/read ↔ VMA flags）；
+> - 命中合法 region → `zeroed_frame()` + `AddressSpace::map_page`（按 VMA flags 设置 US / W / NX），返回原 ip = 重执 faulting 指令；
+> - 未命中 / 权限违例 / NULL 守卫 / demand 未武装 → **kill 骨架**（SIGSEGV 等价）：`kill_count` 累加 + 记录 CR2 + 消费 `KILL_SINK_RIP`（单次 sink，用于 smoke 探针接住）；无 sink 时返回 0 走调用方 panic（真实内核 fault）。
+>
+> #PF handler trampoline 同步强化（P4-T3 顺带）：原实现让 inner clobber caller-saved GPR（含 `rax`），faulting 指令以 rax 作地址操作数时（如 `mov rax, [rax]`）重执读到 rax 自身字节。修复 = 入口 push 9 个 caller-saved（rax/rcx/rdx/rsi/rdi/r8-r11），inner 返回后 pop 复原；resume RIP 借 callee-saved r12 跨调用传递。
+>
+> **x86 ring-0 限制**（实测发现）：supervisor 模式忽略叶级 R/W 位——从 ring-0 写"RX"页不会 fault。kill 骨架的"权限违例"分支因此在 ring-0 不可探针触发，vma-smoke 改用 `handle_user_fault` 直接调用（`error_code=P=1|W=1` + R-only VMA + armed sink）验证。`probe_expect_kill_write` 保留供 T5+ ring-3 smoke 使用。
 
 ---
 
@@ -191,6 +217,15 @@ pub struct UserMemoryRegion {
 | -8 | `E_FROZEN` | 目标进程已冻结（freeze / thaw / IPC 到冻结进程）|
 | -9 | `E_ZOMBIE` | 目标进程已退出（需先 reap）|
 | -10 | `E_NOT_IMPLEMENTED` | syscall 未实现（预留）|
+| -11 | `E_ABI_MISMATCH` | 用户态与内核 ABI 版本不兼容（消息头 version 校验，Doc 03 §3.1）|
+| -12 | `E_OBJECT_RETIRED` | 对象已撤销 / 退休（generation 不匹配，Doc 01 §4.2）|
+| -13 | `E_QUOTA_EXCEEDED` | 进程资源配额耗尽（§5.5）|
+| -14 | `E_PEER_DIED` | IPC 对端进程已退出（Doc 03 §5.1 对端死亡唤醒规则）|
+| -15 | `E_TIMEOUT` | 操作超时（带超时变体预留，Doc 03 §9：Phase 5+）|
+
+> **UPDATE（P4-T7，2026-09-27）**：-11..-15 为追加条目——cap crate `CapError`
+> 与 Doc 03 §5.1 自始使用这 5 个扩展码，本表原仅列 -1..-10（滞后）。按
+> "扩展追加表尾"原则补齐；`synapse_abi` 0.3 起提供全部 15 个常量。
 
 **设计原则**：
 - 错误码数量控制在 127 以内（7-bit，便于序列化）；
@@ -405,7 +440,7 @@ bootloader → kernel_main → mm/sched/ipc init
 
 ## 8. 待决策清单（Phase 4 前必须收敛）
 
-- [ ] 用户态 target json 完整字段（与内核 data-layout / features 对齐）—— 需内核 target 稳定后对齐
+- [x] ~~用户态 target json 完整字段~~ → **DECIDED（P4-T1, 2026-09-27）：`x86_64-synapse-user.json`，llvm-target / data-layout / features 与内核 `x86_64-bootloader.json` 逐字段一致（避免 ABI 漂移）；panic=abort · disable-redzone · relocation-model=static · ld.lld + `user/hello/linker.ld`（基址 0x4000_0000 = 1GB——原 0x400000 因与内核恒等映射同 VA 冲突废弃，见 §3.1 UPDATE；text RX / data RW 双 PT_LOAD，W^X）。构建入口 `xtask user`：`--manifest-path user/hello` + `-Zbuild-std=core,alloc`，产物过 ELF 头断言（ET_EXEC / entry∈基址区 / 无 PT_DYNAMIC）。实测坑：lld 的 `--script=` 相对包根解析；compiler_builtins 在 os=none 上不提供 memset（`user/src/runtime.rs` cfg 门控补齐，与内核 main.rs 同款）**
 - [ ] 是否提供 `std` / libc shim —— 需用户态应用需求明确后决策（首期建议 `no_std`）
 - [x] ~~静态 ELF 加载基址与是否支持 PIE~~ → **PROPOSED：基址 = 0x400000，首期不支持 PIE**，理由见 §3.1
 - [ ] syscall 号表最终版 + 错误码约定 —— 需实现阶段逐步固化

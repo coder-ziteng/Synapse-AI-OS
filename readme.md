@@ -40,7 +40,7 @@
 │  ipc/   Endpoint(同步) · Notification(异步) · 单拷贝路径    │
 │  proc/  进程表 · Agent 注册表 · spawn/exit/reap            │
 │  sched/ TCB 状态机 · runqueue · sleep 队列 · FR8 核算 · FR10 频率计数│
-│  kernel/ 引导链 · 页帧/堆 · GDT/TSS/IDT · PIC/PIT · TSC · kthread/switch_to/抢占调度│
+│  kernel/ 引导链 · 页帧/堆 · GDT/TSS/IDT · PIC/PIT · TSC · kthread/switch_to/抢占调度 · paging/AS/VMA│
 │  hal/   硬件抽象 Trait (Mmu/Interrupt/Timer/Serial)        │
 │  audit/ 审计事件流（骨架）                                 │
 └─────────────────────────────────────────────────────────┘
@@ -58,7 +58,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 | P1 | 裸机点亮与工程基建（三级 boot 链 · UART · log/panic 回溯 · CI · 测试框架） | ✅ 完成 (11/11) |
 | P2 | 内存 / 中断 / 异常（E820 · 页帧分配器 · 内核堆 · GDT/TSS/IST · IDT · PIC/PIT · TSC 校准） | ✅ 完成 (7/7) |
 | P3 | 多任务与调度（sched/ 纯逻辑 crate · switch_to 汇编 · 抢占模型 · Mutex · FR8/FR10 原语） | ✅ 完成 (8/8)：T1 sched crate ✅ · T2 FR8 核算 ✅ · T3 FR10 频率计数 ✅ · T4 kthread 基建 ✅ 真机 28/28 · T5 switch_to 汇编 ✅ 真机双线程往返 9/9 · T6 抢占模型接线 ✅ 真机 3-worker 交错 9/9（时间片抢占 + yield/sleep/exit/reap） · T7 Mutex 睡眠锁 ✅ 真机 2-worker 互斥 9/9（M_ITERS=2000 加压） · T8 集成收尾 ✅ 真机 23/23（FR8 TSC 记账守恒 + 页账本零泄漏 · FR10 进程冻结/频率围栏 · 阻塞点 IRQ 窗口竞态根因修复） |
-| P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 未开始 |
+| P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 🔄 进行中 (6/14)：已分解 14 任务（T1 target+ELF → T12 PCID+收尾 · T13 cap syscall 接线+安全回归 · T14 NFR2 基准+idle 根治，T13/T14 自 s6 分支缺口审查并入）· T1 ✅ 用户态 target json + 基址 1GB 链接脚本 + 第一个静态 ELF · T2 ✅ 内核 4KB 页表 + AddressSpace（CR3 切换/用户页读写/#PF 期望故障恢复，真机 15/15）· T3 ✅ VMA 表 + 按需分页缺页路径（synapse-vma 纯逻辑 crate 20/20 宿主测 + 内核 handle_user_fault 接 idt#PF 真机 14/14：VMA 注册/需求映射/权限违例 kill/未注册 kill/NULL guard/FR8 归零；顺带强化 #PF trampoline 保存 caller-saved GPR 让 faulting 指令正确重执）· T4 ✅ Ring3 切换 smoke（GDT ring-3 描述符启用 + TSS.RSP0 16KB 内核栈 + MSR STAR/LSTAR/FMASK/IA32_KERNEL_GS_BASE 配置 + syscall 入口汇编 swapgs→切内核栈→push GPR→dispatch→sysret + iretq 首次进入用户态 + CPL=3 往返；真机 exit 363：用户态 _start 跑起 → syscall abi_query 往返 → 用户态写共享页 → syscall process_exit → 内核 iretq 回 continuation → ABI 值回读校验 → FR8 归零；顺带修 PML4[0] 缺 U/S 位致 user walk 在 PML4 级被拒 + syscall frame push 顺序错位导致 dispatch 误读 user_RSP 为 num）· T5 ✅ 静态 ELF 加载器 + initramfs（synapse-elf 纯逻辑 crate：ELF64 ET_EXEC 完整校验 20 错误变体 + cpio newc 解析器，宿主 18/18；构建管线 xtask cpio 写器 → build_disk.py 把 initramfs 追加在 kernel.bin 后由 stage2 连续加载、0x20100 写 {base,size} 引导记录；内核 initrd.rs + page_frame 出账保留 + elfload.rs 装入用户 AS（逐页 alloc/清零/拷贝/映射 W^X + 用户栈 entry RSP=TOP-8）→ iretq 进 hello e_entry；真机 exit 363：hello ring-3 跑 abi_query 往返 → process_exit → continuation 断言计数=2 + CR3 还原 + 逐页 unmap/free + FR8 回基线；顺带修 T4 遗留两 bug：process_exit iretq 路径缺平衡 swapgs 致再进用户态首次 syscall #DF + sysretq 前未还原 user RSP 致真实 ELF pop 即 #PF）· T6 ✅ syscall 分发 + 基础调用（abi crate：Doc 02 §4.3 错误码 10 常量 + Timespec + clock_id + prot/flags 位（与 vma RegionFlags 低位对齐零转换）+ ABI_MINOR 1→2，宿主 16/16；内核 dispatch 重写：synapse_abi::decode 严格解码接入，未知号/窄参数越界 → IllegalSyscall 杀进程（ring3 stub #999 真机验证 count==1），外壳统一 frame.num 写回（修旧路径负错误码不写回 → 用户态读旧号的潜伏 bug）；gettime 接 clock.rs TSC 单调钟（WALL 延后 -10，user_mem_ok 前置逐页校验）；umem.rs mmap eager 映射（bump 0x4100_0000/显式 hint + prot/flags/len 全错误路径 -2/-3/-5/-7/-10）+ munmap 精确匹配 ACTIVE；yield/exit 接 sched；hello 重写为 6-syscall 全序列真机测试程序（成功路径 + 每条错误路径负码断言 + mmap 写读回环 + 单调钟两次不减）；真机 exit 363：elf-smoke PASS umem stats mmap 4ok/11err + munmap 4ok/5err + FR8 回基线；前置 merge s6@b5b2e8d 引入 P3-T8 竞态修复解除 mutex smoke 阻塞，P3-T8 marker i/j 撞 P4-T4 → 迁 s/t）（独立 worktree d:/ai-os-p4，分支 claude/p4-userspace）· T7 🔄 IPC 内核接线 Phase 1（kernel/src/ipc.rs ~1100 行：5 表 static + k_ipc_send/recv/reply/try_send + AUX sleepq + synapse_ipc Endpoint 状态机 + synapse_cap transfer_caps + walk_flags PA-to-PA 单拷贝；syscall dispatch 接 4 IPC 号 + ABI_MINOR 2→3 + 5 新错误码 -11..-15；真机 kthread_ipc_smoke marker u/v：A.send→B.recv→B.reply→A.recv + cap transfer + try_send Queued + 4 条错误路径全 PASS exit 363；hello 加 6 条 IPC 用例含 boot fence -4 围栏 + try_send 错误/Queued 路径；Phase 2 待 P4-T9 per-thread kstack 解除 boot fence 后启用真双向时序断言） |
 | P4.5 | PCI 枚举与中断用户态化 | 未开始 |
 | P5 | 外交工具与 Agent 雏形 | 未开始 |
 | P6 | SMP / 存储栈 / IOMMU / 本地推理 / 跨 OS 外交 | 远期 |
@@ -90,6 +90,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 ```bash
 cargo run -p synapse-xtask -- build   # 构建磁盘镜像
 cargo run -p synapse-xtask -- run     # QEMU 运行（退出码 0=成功；363 判为正常收尾）
+cargo run -p synapse-xtask -- user    # 构建用户态 ELF（user/hello）+ ELF 头断言（P4-T1）
 cargo test --workspace --exclude synapse-kernel   # 宿主单元测试
 python kernel/tests/run_tests.py      # QEMU 测试套件
 ```
@@ -98,14 +99,15 @@ python kernel/tests/run_tests.py      # QEMU 测试套件
 
 | 路径 | 说明 |
 | --- | --- |
-| `kernel/` | 内核本体（引导链 boot.S、内存、中断、异常、集成层、kthread 栈/CpuContext/switch_to/抢占调度、Mutex 睡眠锁、FR8 TSC 记账 + 页账本、FR10 冻结/频率接线、smoke） |
+| `kernel/` | 内核本体（引导链 boot.S、内存、中断、异常、集成层、kthread 栈/CpuContext/switch_to/抢占调度、Mutex 睡眠锁、FR8 TSC 记账 + 页账本、FR10 冻结/频率接线、paging 4KB 页表/AddressSpace、demand paging + kill 骨架、smoke） |
 | `cap/` `ipc/` `proc/` `sched/` | 纯逻辑 crate：Capability / IPC / 进程 / 调度（零 unsafe，宿主可测） |
+| `elf/` | `synapse-elf` 纯逻辑 crate（P4-T5）：ELF64 ET_EXEC 静态加载校验 + cpio newc initramfs 解析（零依赖，`#![deny(unsafe_code)]`） |
 | `hal/` | 硬件抽象 Trait + `cfg(test)` fake 实现 |
 | `abi/` | 用户态 ABI（syscall 号表，18 个，设计文档 02 §4.2） |
 | `audit/` | 审计事件流（骨架） |
-| `user/` | 用户态程序（Phase 4 启用） |
+| `user/` | 用户态程序（P4-T1 起启用：`synapse-user` 运行时 + `user/hello` 第一个静态 ELF，构建入口 `xtask user`） |
 | `display/` | S6 显示栈预研（synapse-display：tiny-skia 渲染管线 + 混合模式场景图 + 2D 虚拟人；examples/logo 导出玄武徽章 4 版 PNG，`renderer` feature 门控） |
-| `xtask/` | 构建 / 运行 / CI 任务封装 |
+| `xtask/` | 构建 / 运行 / CI 任务封装（P4-T5 起含 initramfs cpio 打包，build 三段：kernel → hello → cpio+磁盘镜像；`gui` 子命令 GTK 窗口看 VBE 动画） |
 | `docs/design/` | 设计文档 00~07 + rule.md 开发规则 |
 | `scripts/` `build_disk.py` `verify-all.ps1` | 辅助脚本 |
 

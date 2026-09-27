@@ -302,19 +302,24 @@ pub fn proc_yield() -> Result<(), SynapseError> {
 ///
 /// # Safety
 ///
-/// `ts_out_ptr` 写入内核时间戳结构（`{tv_sec: u64, tv_nsec: u32}` = 12 字节）。
+/// `ts_out_ptr` 指向 16 字节 [`synapse_abi::Timespec`]（`{sec: u64, nsec: u64}`，
+/// repr(C)，P4-T6 定稿布局），必须 8B 对齐且位于可写用户页——否则内核
+/// 返回 `E_INVALID_ADDR`。
 #[inline]
-pub unsafe fn gettime(clock_id: u32, ts_out_ptr: *mut u8) -> Result<(), SynapseError> {
+pub unsafe fn gettime(
+    clock_id: u32,
+    ts_out_ptr: *mut synapse_abi::Timespec,
+) -> Result<(), SynapseError> {
     let f = frame(synapse_abi::SyscallId::GetTime, build_args_gettime(clock_id, ts_out_ptr as u64));
     map(invoke(f.num, f.args)).map(|_| ())
 }
 
-/// `clock_id` 常量（[`gettime`] 的合法值）。
+/// `clock_id` 常量（[`gettime`] 的合法值；与 `synapse_abi::CLOCK_*` 同值）。
 pub mod clock_id {
     /// 单调时钟（TSC 校准，Doc 02 §6）。
-    pub const MONOTONIC: u32 = 0;
-    /// 墙钟（RTC，可选）。
-    pub const WALL: u32 = 1;
+    pub const MONOTONIC: u32 = synapse_abi::CLOCK_MONOTONIC;
+    /// 墙钟（RTC，可选；未接硬件前内核返回 `E_NOT_IMPLEMENTED`）。
+    pub const WALL: u32 = synapse_abi::CLOCK_WALL;
 }
 
 // ============================================================================

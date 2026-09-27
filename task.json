@@ -719,7 +719,7 @@
         {
           "id": "P4-T6",
           "name": "syscall 分发 + 基础调用（abi_query/gettime/yield/exit/mmap/munmap）",
-          "status": "pending",
+          "status": "done",
           "deliverables": [
             "synapse_abi::decode 接入 syscall 入口：未知号/参数越界 → IllegalSyscall fault（不静默截断，Doc abi/lib.rs 原则）",
             "错误码 15 个（Doc 02 §4.3）内核侧统一返回路径",
@@ -735,12 +735,13 @@
             "P4-T4",
             "P3-T6"
           ],
-          "estimate": "1-2 窗口"
+          "estimate": "1-2 窗口",
+          "actual_approach": "① abi crate（宿主 16/16）：错误码按 Doc 02 §4.3 实装 10 个 i64 常量（E_INVALID_CAP=-1 … E_NOT_IMPLEMENTED=-10；规格文本写 15 个，文档实际 10 个，差异入 decision_log）+ CLOCK_MONOTONIC=0/CLOCK_WALL=1 + repr(C) Timespec{sec,nsec:u64}（16B 8B 对齐）+ PROT_READ/WRITE/EXEC=bit0/1/2、MAP_GROWABLE=bit3（与内核 vma RegionFlags 低位对齐，prot 零转换直通）+ ABI_MINOR 1→2（新增错误码/常量=向后兼容）。② 内核 dispatch 重写（syscall.rs）：syscall_dispatch 外壳统一 frame.num 写回 + dispatch_inner 走 synapse_abi::decode 严格解码——None（未知号/CapRef>255/u32 越界）→ IllegalSyscall：计数 + log 全 args + handle_process_exit 杀进程（不静默截断；T9 换 FaultKind 归因）；修复旧路径潜伏 bug：负错误码不写回 frame.num → 用户态 pop rax 读到旧 syscall 号。AbiQuery 返回 (MAJOR<<16)|MINOR；Yield → kthread_yield；ProcessExit → handle_process_exit；GetTime/Mmap/Munmap 经 with_user_as（elfload::current_as_ptr，无用户 AS → -1）。gettime：WALL → -10（RTC 延后）、未知钟 → -5、ts_out 8B 对齐 + user_mem_ok 逐页 walk_flags 校验（present+PT_USER+PT_WRITABLE，拒绝而非 fault）→ clock::monotonic_ns 折算 sec/nsec 经 PA write_volatile 写入；用户态不暴露 rdtsc。③ umem.rs（新模块）：mmap eager 语义——bump 选址 0x4100_0000（不回退）或显式 hint（对齐/用户窗口/重叠校验）→ alloc+清零+map_page(PT_USER|W?|!X?NX)+demand_register(Mapped)；validate：flags 未知位 -10、prot 未知位或无 R 或 W+X -7、len=0/未对齐 -2、OutOfFrames -3；munmap 精确匹配 ACTIVE 区域（部分解除 -5）→ 逐页 unmap+free+demand_unregister；cleanup_all 进程退出全清 + bump 重置。paging.rs 补 walk_flags（4 级走查返 PA+叶 entry 位）/demand_unregister/demand_with_table（只读闭包）。④ 真机测试面：hello 重写为 6-syscall 全序列测试程序（abi_query 值断言+major==0；yield==0；gettime MONOTONIC 成功+nsec<1e9+两次单调不减、WALL/-10、钟 7/-5、未对齐ptr/-2、RX 只读页 ptr/-2；mmap RW 2 页写读回环 0xDEAD_BEEF_CAFE_1234+RX+GROWABLE+显式 hint==a3+1MB、11 条错误路径逐一负码断言；munmap 成功+重复/-5+失配/-5+未对齐/-2+未登记/-5+自律清理；process_exit(0)）；ring3 stub 改 syscall #999 → return_continuation 断言 illegal_syscall_count==1。真机三重证据：exit 363 + serial.log 无 PANIC 全 PASS（62/62+28/28+9/9+9/9+9/9+23/23+15/15+14/14+ring3-smoke+elf-smoke，umem stats mmap 4ok/11err、munmap 4ok/5err、abi_query count=2、FR8 回基线 256）+ debugcon …ij…abcdefghst opqr k 序列完整。⑤ 前置合并：merge s6 分支 b5b2e8d 引入 P3-T8 并发 bug 根因修复（此前 P4-T6 二进制与合并基线在 mutex smoke 三连挂——垃圾 RIP #UD/current 失同步，均为 P3-T6 IRQ 窗口竞态，P3-T8 已修）；P3-T8 smoke marker i/j 与 P4-T4 init_syscall 撞号 → 迁 s/t。宿主 abi 16 + user 30 全绿。"
         },
         {
           "id": "P4-T7",
           "name": "IPC 内核接线：send/recv/reply 单拷贝 + cap transfer",
-          "status": "pending",
+          "status": "in_progress",
           "deliverables": [
             "ipc crate Endpoint 内核集成：阻塞线程挂 sleepq（消费 P3-T7 Mutex/sleep_until 基建），唤醒走调度",
             "单拷贝路径（Doc 03 §4）：消息帧内核直拷 + 大对象 grant 共享内存映射",
@@ -754,7 +755,8 @@
             "P4-T6",
             "P3-T7"
           ],
-          "estimate": "2 窗口"
+          "estimate": "2 窗口",
+          "actual_approach": "Phase 1（kernel 集成 + 单 kthread smoke 闭环）已贯通真机 363/无 PANIC（2026-09-27 claude/p4-userspace 窗口）：【模块】kernel/src/ipc.rs 新增 ~1100 行：5 表 static（OBJECTS/PROCS/CAP_TABLES/ENDPOINTS/NOTIFICATIONS，锁序同 P1-T11）；k_ipc_send/recv/reply/try_send 全接 synapse_ipc::Endpoint 状态机（try_send→Delivered/Queued/WouldBlock，recv→Message/Waiting）；消息帧单拷贝 = walk_flags 返 PA 后 PA-to-PA memcpy（恒等映射，无 4KB 阈值 grant，本期未做）；cap transfer 走 synapse_cap::transfer_caps atomic 5 步预校验 + slot swap；AUX table（ipc_aux.rs 含 EndpointAux{blocked_kthread, blocking_senders}）实现 sleepq 挂起（kthread_block_current）+ on_recv_deliver / on_recv_reply 唤醒路径（schedule_wake）；try_send 命中 receiver 即插队 + Waker；阻塞路径调用方校验 kthread == current_thread（单栈守门）。【syscall 接线】synapse_abi 增加 3 调用号（SyscallId::IpcSend=0/IpcRecv=1/IpcTrySend=3/IpcReply=2），ABI_MINOR 2→3 + 5 错误码（E_DEAD=-11/E_OVERFLOW=-12/E_BUFFER_TOO_SMALL=-13/E_PROTOCOL=-14/E_TIMEOUT=-15，文档 Doc 02 §4.3 已有定义）；k_ipc_xxx 经 elfload::current_as_ptr 守卫（无 AS 返 -1）+ user_mem_ok 逐页校验 buf（cap_out 数组同理）。【smoke】kernel::ipc::kthread_ipc_smoke（marker u/v）：spawn A/B 两 kthread + 分配 endpoint cap → A.send(B, 32B) 阻塞 → B.recv 唤醒 → B.reply(A, 16B) → A.recv 唤醒；含 cap transfer（发送 caps 数组 → 接收 cap_out[] 校验 CapRef）；try_send 无 receiver 走 Queued 路径；错误路径（cptr=0、cptr=200、n_caps>MAX_TRANSFER 8、sender invalid）返 -1/-7/-1/-7 真机断言。【hello IPC 测试】用户态 hello 加 6 条用例：6.1/6.2 blocking send/recv 在 boot thread 围栏 → E_WOULD_BLOCK（per-CPU 单 kstack + boot 是系统最后防线，MVP 围栏下 user-mode 双进程 IPC 阻塞由 T9 per-thread kstack 解决）；6.3-6.5 try_send cptr=0/cptr=200/n_caps=99 → E_INVALID_CAP；6.6 try_send 无 receiver → Queued 0。Phase 2 待 P4-T9 per-thread kstack：移除 boot fence（cptr 1 自带 ep_cap slot + ring3 第二用户进程 spawn），启用真双向 send/recv/reply + 时序断言。详细决策与 timer iretq pre-existing 间歇 bug 入 decision_log。"
         },
         {
           "id": "P4-T8",
@@ -1255,6 +1257,21 @@
       "date": "2026-09-27",
       "scope": "P4 看板跨分支同步 + 缺口审查（claude/s6-display-preresearch 窗口）",
       "decision": "本分支 task.json 落后于 claude/p4-userspace（P4 已于该分支分解 T1~T12 并完成 T1~T5）。经用户确认执行「同步 + 缺口审查」：(1) P4 phase（含 T1~T5 done 状态与全部 deliverables/verify/actual 字段）按 p4 分支原文并入本分支看板，P0~P3 保留本地较新状态（P3-T8 completed）；decision_log 采用 p4 分支 53 条为基底 + 追加本地独有 P3-T8 条目，保持跨窗口可合并。(2) 缺口审查对照评审 §6 十二闸门 / §7 Phase 4 退出标准 / §2.6+§8 安全与测试矩阵，发现三类缺口并追加任务：P4-T13 = cap_invoke/delegate/revoke syscall 接线 + 安全回归专项（原 T1~T12 中 Capability 三个 syscall 无显式归属；「撤销后旧句柄稳定报错」「伪造 agent_id」「跨页缓冲区」等退出标准/安全矩阵无承载任务）；P4-T14 = 闸门 10 IPC/切换基准配置与统计脚本 + P3-T8 遗留 idle 线程根治（T12 仅含 PCID 切换耗时对比，无 NFR2 完整基准口径）。(3) 不修改 p4 分支已写的 T6~T12 文本（降低跨窗口 merge 冲突面），T13/T14 应排在 T12 全量回归之前完成——由 p4 窗口合并本条目后自行编排。(4) README §3 进度表 P4 行仍为「未开始」，更新权归 p4 窗口（单一写者），本窗口不动 readme.md（其工作区另有 S6 未提交改动）。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4-T6 syscall 分发 + 基础调用 — 设计定夺与潜伏 bug 修复",
+      "decision": "五项定夺：【A】错误码数量差异——任务规格写 15 个，Doc 02 §4.3 表实际 10 个（E_INVALID_CAP=-1 … E_NOT_IMPLEMENTED=-10），按文档实装 10 个，abi 宿主测试锁定 -1..-10 互异连续；规格 15 为早期草案残留。【B】mmap prot/flags 位约定——Doc 02 'Rights 原始位低 3 位'有歧义（cap Rights READ=bit3 与页保护语义不同），定夺 prot 与内核 vma RegionFlags 低位对齐（R=bit0/W=bit1/X=bit2/GROWABLE=bit3），u32 零转换直通 VMA 表；PROT_MASK=0b0111、MAP_MASK=GROWABLE，未知位分别 -7/-10。【C】ABI_MINOR 1→2：新增错误码常量/Timespec/clock_id/prot 位=向后兼容新增，minor 递增；abi_query 返回 0x2 已被真机回读验证。【D】frame.num 写回纪律——syscall_entry_asm 的 pop rax 从栈上 frame.num 槽取返回值，dispatch 所有返回路径必须写回 frame.num；旧代码仅 AbiQuery 写回，负错误码路径返回后用户态读到旧 syscall 号而非错误码（T4/T5 stub 只调 abi_query/exit 故未暴露）；新外壳统一 `frame.num = ret as u64; ret`，纪律写入 syscall.rs 模块头。【E】IllegalSyscall 语义——decode→None（未知号/窄参数越界）不静默截断：计数+log 全 args+杀进程（复用 handle_process_exit iretq 接力，T9 换 FaultKind 归因）；真机测试用 ring3 stub syscall #999 + illegal_syscall_count==1 断言。另：gettime 输出指针不走 demand paging（user_mem_ok 前置逐页校验拒绝而非 fault），WALL 钟延后返回 -10，用户态不暴露 rdtsc；mmap eager 映射（立即 alloc+清零+map），munmap 仅精确匹配 ACTIVE 区域（部分解除 -5），bump 选址不回退、cleanup_all 重置。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4 窗口合并 P3-T8（s6 @ b5b2e8d）— mutex smoke 竞态阻塞解除 + marker 撞号迁移",
+      "decision": "P4-T6 真机验证连续三次挂在 P3-T7 mutex smoke（本窗口未改动路径），形态各异：#1 _switch_to 恢复垃圾 RIP（0x78ce20=worker 栈地址）#UD；#2 worker 1 在 CPU 上但 current==boot → kthread_exit_running panic；#3（git stash 后的合并基线 fce05e7 对照跑，确认与 P4-T6 改动无关）跳 ip=0x13 #UD。归因 = P3-T6 阻塞点 IRQ 窗口竞态（P3-T8 已根因修复：cli_snapshot → 状态变更 → checkpoint_inner 原子化 + sched commit_switch 顺序）。处置：merge claude/s6-display-preresearch@b5b2e8d 入 claude/p4-userspace（cdeec7b），冲突解决：main.rs 双方 smoke 段并存、readme P3 行取 8/8 完成态 + P4 行保留 5/12 详情、task.json 并入 T13/T14 与两条 decision_log（append-only，current_task 不动）。合并暴露 marker 撞号：P3-T8 smoke 用 i/j 与 P4-T4 init_syscall 的 i/j 重复 → P3-T8 迁 s/t（本分支单一写者处置，s6 分支后续合并时以本分支为准）。合并后真机一次通过 exit 363，mutex/preempt/p3t8 全绿。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4-T7 IPC 内核接线（Phase 1） + 进程间 IPC pre-existing 间歇 bug 暴露",
+      "decision": "Phase 1 完成度：kernel/src/ipc.rs 新增 ~1100 行（5 表 static + k_ipc_send/recv/reply/try_send + AUX sleepq + synapse_ipc Endpoint 状态机 + synapse_cap transfer_caps + walk_flags PA-to-PA 单拷贝），syscall dispatch 接 4 个 IPC 号 + ABI_MINOR 2→3 + 5 新错误码（-11..-15 入库），用户态 hello 加 6 条 IPC 用例；真机 kthread_ipc_smoke（marker u/v）：A.send→B.recv→B.reply→A.recv + cap transfer + try_send Queued + 4 条错误路径全部通过，exit 363 / 无 PANIC。Phase 2（用户态双进程阻塞 IPC 时序断言）留待 P4-T9 per-thread kstack 单独窗口——MVP 围栏：当前 per-CPU 单 kstack + boot thread 是 init 进程执行者，user-mode blocking send/recv 在 boot 围栏下必返 -4（E_WOULD_BLOCK）。【pre-existing 间歇 bug 发现】timer iretq 在 IRQ handler 内 on_timer_irq→checkpoint→_switch_to 触发上下文切换时，handler pop 序列 + iretq 在新线程栈上以陈旧寄存器恢复，error_code 0x10（bad SS=0x10）#GP/#UD 随机触发；base line 2/3 PASS 与本次 IPC 改动 5/5 FAIL 复现率差异——IPC 改动使 syscall 重叠 IRQ 窗口的概率上升。根因不在 P4-T7 范围（位于 idt.rs:181 timer_interrupt_handler 尾部切换路径），修复方案=推迟切换到 iretq 之外（P3-T6 IRQ 窗口竞态同源，已在 P3-T8 关闭一部分，本 bug 是该议题的变体）。本窗口处置：① IPC smoke 自身（纯 kthread，无 syscall 入口）100% PASS 不受影响，作为 Phase 1 真机证据；② 用户态 hello 双进程阻塞路径围栏到 -4（写明 E_WOULD_BLOCK 期望），非阻塞 try_send 0/+错误路径全 PASS 可作为补充证据；③ timer bug 修复+Phase 2 整体推到 P4-T9 联动进行。【替代方案比较】尝试把 k_ipc_send 改无 syscall 入口直接走 IPC kthread — 等价 P3-T6 之前状态，回归。Phase 1 即按上表提交，Phase 2 工作量约 1 窗口（per-thread kstack + 移除 boot fence + 用户态 hello 增时序断言）。详细 task.json 字段：P4-T7 状态 pending→in_progress + actual_approach 已写入。"
     }
   ],
   "current_task": "P3-T8",

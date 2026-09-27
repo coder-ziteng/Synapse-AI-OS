@@ -9,10 +9,10 @@
 //! 超出 128MB 的内存不会被本分配器管理（留给后续 buddy 或更复杂分配器）。
 //!
 //! **保留帧**：
-//! - 0..1MB：BIOS/EBDA/IVT 区（E820 已标 Reserved，不进入 bitmap）
+//! - 0..1MB：BIOS/EBDA/IVT/stage2/boot 页表/E820 buffer 区——**初始化时显式
+//!   保留**（P4-T2 修复：本机 QEMU E820 把 0..0x9fc00 报为 Usable，原"E820
+//!   已标 Reserved"假设不成立，低 1MB 曾可被 alloc 出去）
 //! - 0x200000..`_kernel_end`：内核自身（ELF PT_LOAD + BSS）
-//! - Stage2 (0x8000..0x9000)、页表 (0x10000..0x16000)、E820 buffer (0x20000..0x21000)
-//!   都在 Reserved 区间，不会进入 bitmap
 //!
 //! **与 [`crate::memory_map`] 的契约**：初始化时消费 `MEMORY_MAP` 全部 Usable
 //! 区间；调用 [`init_page_frame_allocator`] 前必须先 [`memory_map_init`]。
@@ -243,6 +243,16 @@ pub fn init_page_frame_allocator() {
         }
     });
 
+    // 步骤 1.5（P4-T2 修复）: 显式保留低 1MB。
+    // 原假设"E820 已标 Reserved"不成立——本机 QEMU E820 entry[0] 把
+    // 0..0x9fc00 报为 Usable，导致下列**活跃**区域可被 alloc 出去清零复用：
+    //   stage2 (0x8000) / boot 页表 = 当前 CR3 (0x10000..0x16000) /
+    //   E820 raw buffer (0x20000) / IVT·BDA (0..0x500)。
+    // kthread smoke 已实际拿到 stack=[0x0..0x5000)（PA 0），继续分配将踩中
+    // boot 页表立即致命；且 PA 0 触发 debug 构建 ptr::write_bytes 非空断言
+    // （paging smoke 实测 panic）。与文件头"保留帧"契约对齐：整段 0..1MB 出账。
+    alloc.mark_range_used(0, 0x10_0000);
+
     // 步骤 2: 保留内核自身（0x200000.._kernel_end）
     // SAFETY: `_kernel_end` 由 linker.ld 提供，必在 0x200000+ 且 > _start64。
     let kernel_end = unsafe { &_kernel_end as *const u8 as u64 };
@@ -251,14 +261,21 @@ pub fn init_page_frame_allocator() {
         alloc.mark_range_used(kernel_base, kernel_end - kernel_base);
     }
 
-    // 步骤 3: 保留实模式低内存 [0..LOW_MEM_RESERVED)——
-    // IVT (0..0x400) / BDA (0x400..0x500) / stage2 trampoline 残留 (0x8000..0x9000)
-    // / E820 缓冲 (0x20000) 等 boot 期结构仍映射到低 640K，但已不再使用；
-    // 不预留会让分配器把 kthread 栈砸到这些区域（stack=[0..0x5000) → #DF/#UD
-    // 因为栈与相邻 IVT 数据紧邻时栈写入会污染导致后续 IR/IRQ 帧错位）。
-    // 实模式内存统一从 bitmap 中扣掉，保留 = 0..0xA0000。
-    const LOW_MEM_RESERVED: u64 = 0xA0000; // 640K
-    alloc.mark_range_used(0, LOW_MEM_RESERVED);
+    // 步骤 2.5（P4-T5）: 保留 initramfs 驻留区（stage2 连续加载在内核镜像
+    // 之后，基址/长度来自 0x20100 引导记录，见 initrd.rs）。不出账则分配器
+    // 会把 initrd 页清零复用 → cpio 归档被破坏。
+    //
+    // 合并注（P3-T7 侧的"步骤 3: 保留低 640K [0..0xA0000)"修复与本侧步骤 1.5
+    // 的 0..1MB 整段保留重叠——1.5 是其超集，独立修复同一问题（kthread 栈
+    // 拿到 PA 0 踩 IVT/boot 页表），此处不再重复出账）。
+    if let Some((ird_base, ird_size)) = crate::initrd::region() {
+        alloc.mark_range_used(ird_base, ird_size);
+        info!(
+            "[page_frame] initrd reserved [{:#x}..{:#x}]",
+            ird_base,
+            ird_base + ird_size
+        );
+    }
 
     info!(
         "[page_frame] initialized: total={} free={} ({} KB); kernel reserved [{:#x}..{:#x}]",

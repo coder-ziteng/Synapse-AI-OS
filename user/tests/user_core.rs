@@ -219,15 +219,16 @@ fn exit_alias_matches_proc_exit() {
 fn abi_query_value_matches_constants() {
     assert_eq!(abi_query_value(), ((ABI_MAJOR as u64) << 16) | (ABI_MINOR as u64));
     assert_eq!(ABI_MAJOR, 0);
-    assert_eq!(ABI_MINOR, 1);
+    // P4-T6：1→2（错误码/Timespec/prot 位入 crate）；P4-T7：2→3（-11..-15）。
+    assert_eq!(ABI_MINOR, 3);
 }
 
 #[test]
 fn decode_abi_query_result_handles_kernel_value() {
-    // 内核返回的 (major << 16) | minor → 解码为 AbiVersion
+    // 内核返回的 (major << 16) | minor → 解码为 AbiVersion（从常量推导，不硬编码）
     assert_eq!(
         decode_abi_query_result(abi_query_value() as i64),
-        Ok(AbiVersion { major: 0, minor: 1 })
+        Ok(AbiVersion { major: ABI_MAJOR, minor: ABI_MINOR })
     );
 }
 

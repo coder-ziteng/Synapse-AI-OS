@@ -2,12 +2,19 @@
 //!
 //! 1. `cargo build -p synapse-kernel --target <workspace_root>/x86_64-bootloader.json`
 //!    → `target/x86_64-bootloader/{debug|release}/synapse-kernel`
-//! 2. `python build_disk.py <elf> <workspace_root>/kernel_hd.img`
-//!    → 16MB BIOS/MBR bootable 磁盘镜像（stage1 + stage2 + kernel.bin）
+//! 2. （P4-T5）用户态 ELF：复用 `xtask user` 管线构建 `user/hello`，
+//!    打成 cpio newc initramfs → `target/initramfs.cpio`
+//! 3. `python build_disk.py <elf> <workspace_root>/kernel_hd.img <initramfs>`
+//!    → 16MB BIOS/MBR bootable 磁盘镜像（stage1 + stage2 + kernel.bin + initramfs）；
+//!    stage2 把内核+initramfs 连续加载到 0x200000+，并在物理 0x20100 写
+//!    {base u64, size u64} 记录（内核 `initrd.rs` 消费）。
 
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::initramfs::{build_cpio, InitrdFile};
 
 /// workspace 根目录（xtask crate 在 `<root>/xtask/`，祖父即 root）。
 fn workspace_root() -> PathBuf {
@@ -53,7 +60,36 @@ pub fn run_with_features(release: bool, features: &[&str]) -> Result<(), String>
         return Err(format!("cargo build failed: {status}"));
     }
 
-    // Step 2: python build_disk.py <elf> <img>
+    // Step 2 (P4-T5): 构建用户态 ELF（复用 user 管线：build + ELF 头断言），
+    // 打成 cpio newc initramfs，写 target/initramfs.cpio。
+    crate::user::run(release)?;
+    let hello = root
+        .join("user")
+        .join("hello")
+        .join("target")
+        .join("x86_64-synapse-user")
+        .join(profile)
+        .join("hello");
+    let hello_bytes = fs::read(&hello)
+        .map_err(|e| format!("read user ELF {} failed: {e}", hello.display()))?;
+    let archive = build_cpio(&[InitrdFile {
+        name: "hello",
+        data: &hello_bytes,
+    }]);
+    let initramfs = root.join("target").join("initramfs.cpio");
+    if let Some(parent) = initramfs.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir target failed: {e}"))?;
+    }
+    fs::write(&initramfs, &archive)
+        .map_err(|e| format!("write {} failed: {e}", initramfs.display()))?;
+    println!(
+        "[xtask] initramfs OK -> {} ({} bytes, 1 file: hello={})",
+        initramfs.display(),
+        archive.len(),
+        hello_bytes.len()
+    );
+
+    // Step 3: python build_disk.py <elf> <img> <initramfs>
     let elf = root
         .join("target")
         .join("x86_64-bootloader")
@@ -69,6 +105,7 @@ pub fn run_with_features(release: bool, features: &[&str]) -> Result<(), String>
         .arg("build_disk.py")
         .arg(&elf)
         .arg(&img)
+        .arg(&initramfs)
         .status()
         .map_err(|e| format!("{py} spawn failed: {e}"))?;
     if !status.success() {

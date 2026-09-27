@@ -34,8 +34,8 @@
 //!
 //! 两个 4KB 栈（静态分配）：
 //!
-//! - `KERNEL_STACK`：TSS.RSP0（未来 syscall/sysret 切栈用；MVP 暂作备用）
-//! - `DF_STACK`：TSS.IST1（double fault 异常专用栈；P2-T5 IDT 用）
+//! - `KERNEL_STACK`：TSS.RSP0（Phase 4 P4-T4 syscall/sysret 切栈用；16KB）
+//! - `DF_STACK`：TSS.IST1（double fault 异常专用栈；P2-T5 IDT 用；4KB）
 //!
 //! 栈顶 = 基址 + 4096（栈向低地址增长，RSP 初始指向栈顶）。
 
@@ -49,8 +49,12 @@ use x86_64::structures::tss::TaskStateSegment;
 use x86_64::PrivilegeLevel;
 use x86_64::VirtAddr;
 
-/// 栈大小（4KB；double fault 与内核栈 MVP 足够）。
-const STACK_SIZE: usize = 4096;
+/// 栈大小。
+/// - DF_STACK：4KB 足够（仅 #DF handler 临时使用）。
+/// - KERNEL_STACK：16KB 容纳 syscall 入口保存 9 个 caller-saved + C 调用栈；
+///   单核 MVP 下与 idle/boot 共用，Phase 5+ 接多线程后改为 per-thread。
+const DF_STACK_SIZE: usize = 4096;
+const KERNEL_STACK_SIZE: usize = 16384;
 
 /// TSS — 用 `UnsafeCell` 包装 `static`，避免 `static mut` 的 2024 弃用警告。
 ///
@@ -137,14 +141,15 @@ static GDT: GdtCell = GdtCell::new();
 #[repr(align(4096))]
 struct Aligned4K<T>(T);
 
-/// 内核栈（TSS.RSP0；MVP 暂作备用，Phase 4 启用 syscall/sysret 时使用）。
+/// 内核栈（TSS.RSP0；Phase 4 P4-T4 启用 syscall/sysret 时使用）。
 ///
 /// Rust 侧只读（CPU 通过 TSS 中存的地址读写该区域）。
-/// 4KB 对齐利于后续 IDT handler 用 guard page 检测 #DF 栈溢出。
-static KERNEL_STACK: Aligned4K<[u8; STACK_SIZE]> = Aligned4K([0; STACK_SIZE]);
+/// 16KB 对齐利于后续 IDT handler 用 guard page 检测栈溢出；
+/// 也保证 `rsp % 16 == 8` 入口约定（push 任意奇数个寄存器后栈对齐）。
+static KERNEL_STACK: Aligned4K<[u8; KERNEL_STACK_SIZE]> = Aligned4K([0; KERNEL_STACK_SIZE]);
 
 /// Double fault 专用栈（TSS.IST1；P2-T5 IDT #DF handler 使用）。
-static DF_STACK: Aligned4K<[u8; STACK_SIZE]> = Aligned4K([0; STACK_SIZE]);
+static DF_STACK: Aligned4K<[u8; DF_STACK_SIZE]> = Aligned4K([0; DF_STACK_SIZE]);
 
 /// 重入保护（防御性；`init_gdt_tss` 应该只调用一次）。
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
@@ -181,8 +186,8 @@ pub unsafe fn init_gdt_tss() -> GdtSelectors {
     }
 
     // ---- 1. 配置 TSS ----
-    let kstack_top = addr_of!(KERNEL_STACK.0) as u64 + STACK_SIZE as u64;
-    let dfstack_top = addr_of!(DF_STACK.0) as u64 + STACK_SIZE as u64;
+    let kstack_top = addr_of!(KERNEL_STACK.0) as u64 + KERNEL_STACK_SIZE as u64;
+    let dfstack_top = addr_of!(DF_STACK.0) as u64 + DF_STACK_SIZE as u64;
     TSS.init(kstack_top, dfstack_top);
 
     // ---- 2. 重建 GDT + lgdt ----
@@ -224,6 +229,20 @@ pub fn ist1_df_stack_top() -> u64 {
 /// 读回 TSS 当前 RSP0 值（smoke 验证用）。
 pub fn rsp0_stack_top() -> u64 {
     TSS.rsp0()
+}
+
+/// 设置 TSS.RSP0（per-thread 内核栈切换，P4-T4 进入用户态前 / 调度切换线程时调用）。
+///
+/// 写入值须为栈顶（最高地址），CPU 在 `syscall` / `int` 入口自动把用户 RSP 压入 [RSP0]。
+///
+/// # Safety
+///
+/// 调用方必须保证 `top` 指向一块足够大的（≥ 16KB）有效可写内核栈内存，
+/// 且调用方独占该栈（单核 MVP 满足；Phase 5+ 接多线程后由调度器串行化）。
+pub unsafe fn set_rsp0(top: u64) {
+    // SAFETY: 单线程 boot/smoke 路径；TSS 字段被 CPU 与 Rust 共享访问，
+    // 此处为唯一写入点（除 init_gdt_tss 之外）。
+    unsafe { (*TSS.0.get()).privilege_stack_table[0] = VirtAddr::new(top) };
 }
 
 /// 读回 DF_STACK 基址（smoke 验证用）。

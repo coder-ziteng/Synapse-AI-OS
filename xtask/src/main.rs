@@ -10,10 +10,15 @@
 //!   强制 release：TCG 下 debug 构建帧耗时过长，动画会退化成幻灯片。
 //! * `xtask ci    [--timeout N]` — `build` + 启动 QEMU + 轮询 `serial.log`，
 //!   在超时内断言出现 `EXPECTED_SERIAL`（默认 10 秒）。
+//! * `xtask user  [--release]` — 构建用户态 bin（user/hello，
+//!   `x86_64-synapse-user.json` + `user/hello/linker.ld` 基址 1GB）
+//!   + 宿主侧 ELF 头断言（ET_EXEC / entry 基址区 / PT_LOAD RX·RW / 无 PT_DYNAMIC）。
 
 mod build;
 mod ci;
+mod initramfs;
 mod qemu;
+mod user;
 
 use std::env;
 use std::process;
@@ -43,6 +48,7 @@ fn main() {
         // 窗口保留到用户手动关闭（debug 构建在 TCG 下帧太慢，动画会成幻灯片）。
         "gui"   => build::run_with_features(true, &["gui_demo"]).and_then(|()| qemu::run_gui()),
         "ci"    => ci::run(timeout),
+        "user"  => user::run(release),
         other   => {
             usage();
             eprintln!("unknown command: {other}");
@@ -57,9 +63,10 @@ fn main() {
 }
 
 fn usage() {
-    eprintln!("Usage: xtask <build|run|gui|ci> [options]");
+    eprintln!("Usage: xtask <build|run|gui|ci|user> [options]");
     eprintln!("  build [--release]");
     eprintln!("  run   [--release]              headless, 等待 QEMU 退出");
     eprintln!("  gui                          gtk 窗口播放一遍开机动画后定格（固定 release+gui_demo，手动关窗退出）");
     eprintln!("  ci    [--timeout SECONDS]      (default 10)");
+    eprintln!("  user  [--release]              构建 user/hello + ELF 头断言 (P4-T1)");
 }

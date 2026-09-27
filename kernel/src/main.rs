@@ -32,9 +32,16 @@ pub mod pic;
 pub mod pit;
 pub mod clock;
 pub mod kthread;
+pub mod paging;
 pub mod mutex;
 pub mod bootstrap;
 pub mod smoke;
+pub mod syscall;
+pub mod ring3;
+pub mod initrd;
+pub mod elfload;
+pub mod umem;
+pub mod ipc;
 
 // 把 trampoline 汇编链入二进制；`boot.S` 中 `.global _start` 提供链接器 entry。
 global_asm!(include_str!("boot.S"));
@@ -191,6 +198,12 @@ pub extern "C" fn _start64() -> ! {
     memory_map::memory_map_init();
     boot_marker(b'K');
 
+    // P4-T5 initramfs：读 stage2 写的 0x20100 {base,size} 记录 + cpio magic 校验。
+    // 必须在 page_frame init 之前——分配器步骤 2.5 消费 initrd::region() 出账保留。
+    boot_marker(b'm');
+    initrd::initrd_init();
+    boot_marker(b'n');
+
     // P2-T2 物理页帧分配器：消费 MEMORY_MAP，bitmap 管理 4KB 帧
     boot_marker(b'L');
     page_frame::init_page_frame_allocator();
@@ -210,6 +223,11 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'R');
     unsafe { idt::init_idt() };
     boot_marker(b'S');
+
+    // P4-T4 syscall 接线：MSR_STAR/LSTAR/FMASK + IA32_KERNEL_GS_BASE（须在 IDT 之后）
+    boot_marker(b'i');
+    unsafe { syscall::init_syscall() };
+    boot_marker(b'j');
 
     // P2-T6 PIC + PIT：中断控制器 + 定时器
     boot_marker(b'T');
@@ -241,6 +259,7 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'd');
 
     // P3-T6 抢占模型 smoke：3 worker 并发计数/打印 + 时间片抢占 + yield/sleep/exit
+    //（s6 分支上暂时注释——保留原状；marker e/f 归 P3-T6）
     boot_marker(b'e');
     kthread::kthread_preempt_smoke();
     boot_marker(b'f');
@@ -250,10 +269,35 @@ pub extern "C" fn _start64() -> ! {
     kthread::kthread_mutex_smoke();
     boot_marker(b'h');
 
+    // P4-T7 IPC 内核接线 smoke：A/B 双 kthread 阻塞 send/recv/reply 端到端
+    // + cap transfer + try_send + 错误路径（marker u/v，与现有 a..t / o..r 错开）
+    boot_marker(b'u');
+    ipc::kthread_ipc_smoke();
+    boot_marker(b'v');
+
     // P3-T8 集成收尾 smoke：FR8 TSC 核算 + 页账本 + FR10 冻结/频率计数全链路
-    boot_marker(b'i');
+    //（合并注：原用 marker i/j，与 P4-T4 init_syscall 撞号 → 迁 s/t）
+    boot_marker(b's');
     kthread::kthread_p3t8_smoke();
-    boot_marker(b'j');
+    boot_marker(b't');
+
+    // P4-T2 分页 smoke：AddressSpace 新建 → CR3 切换 → 用户页读写 → #PF 期望故障 → FR8 归零
+    //（合并注：原用 marker e/f，与 P3-T6 撞号 → 迁 o/p）
+    boot_marker(b'o');
+    paging::paging_smoke();
+    boot_marker(b'p');
+
+    // P4-T3 VMA / demand paging smoke：VMA 注册 → 按需分页 → 权限违例/未注册 → kill 骨架 → NULL 守卫 → FR8 归零
+    //（合并注：原用 marker g/h，与 P3-T7 撞号 → 迁 q/r）
+    boot_marker(b'q');
+    paging::vma_smoke();
+    boot_marker(b'r');
+
+    // P4-T4 Ring3 切换 smoke：用户态 _start → syscall abi_query 往返 → CPL==3 断言
+    // → continuation 链式接力 P4-T5 elf_load_smoke（exit 363 在 elf_continuation 发出）
+    boot_marker(b'k');
+    ring3::ring3_smoke();
+    boot_marker(b'l');
 
     // 通过 isa-debug-exit (iobase=0x502) 退出 QEMU。
     // QEMU isa-debug-exit 实现为 exit((val << 1) | 1)（无掩码），
