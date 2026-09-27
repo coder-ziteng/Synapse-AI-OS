@@ -1137,6 +1137,11 @@
       "date": "2026-09-27",
       "scope": "P4-T3 内核 bug 修复：#PF trampoline 让 inner clobber caller-saved GPR，faulting 指令以 rax 作地址操作数时重执读到指令自身字节",
       "decision": "vma_smoke 首次真机跑：需求读 code_base 时 #PF → handler 正确分配帧+零页+映射 → v0 应为 0 实际为 0xf9f8858948008b48（解码 mov rax,[rax]; mov [rbp-0x608],rax 字节，正是 read_volatile 自身指令+下一指令）。根因：x86-64 #PF CPU 帧不含 GPR（仅 SS/RSP/RFLAGS/CS/RIP/err），inner (extern \"C\") 按 ABI 自由破坏 caller-saved（rax/rcx/rdx/rsi/rdi/r8-r11）。原 trampoline：mov rdi/rsi ← ip/err → call inner → pop rdi/rsi 漏了 rax 等 → inner 返回值（rax=resume_rip）留在 rax → iretq 重执 `mov rax, [rax]` 时 rax 已非原值。修复：trampoline 入口 push r11/r10/r9/r8/rdi/rsi/rdx/rcx/rax（9 个 caller-saved），对齐全栈后 call inner，inner 返回后 mov r12,rax（借 callee-saved 跨 pop 传递 resume），pop 9 GPR 复原 faulting 上下文，mov [rsp+8],r12 改写 RIP，add rsp,8 弃 err，iretq。panic 路径亦同步清理 GPR 再 ud2。影响：所有 #PF resume 路径（expected-fault / demand paging / kill sink）现在能正确重执任何含 rax 等作基址的 faulting 指令。P4-T2 的 probe_expect_pf 不受影响（其 resume=lea 目标不依赖 rax）。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4-T4 Ring3 切换 smoke — 两 bug 修复 + syscall 基础设施贯通",
+      "decision": "1) PML4[0] 缺 PT_USER 位：AMD64 页表走查中 U/S 位按层 AND 生效，PML4[0] 为 supervisor-only 导致 CPL=3 在 PML4 级即被拒（err=0x15 I/D=1 P=1 误报 NX violation 实为 U/S 违例）。修复：AddressSpace::new 中 PML4[0] 写 entry 加 PT_USER，下层 PDPT[0]（内核）保留 supervisor-only 仍保内核区不可被用户态访问。2) syscall 入口汇编 push 顺序错位：原序 push r9,r8,r10,rdx,rsi,rdi,rax,r14,r13,r12 导致 SyscallFrame.num（offset 0）读到 user_RSP 而非 rax。修复：改 push 序为 r14(user_RFLAGS), r13(user_RIP), r12(user_RSP), r9, r8, r10, rdx, rsi, rdi, rax —— 栈向低地址增长，LAST push 落在最低地址 = offset 0，故 rax 必须最后 push 才对应 SyscallFrame.num；pop 序同步改为 pop rax, rdi, rsi, rdx, r10, r8, r9, add rsp, 24。真机验收：QEMU exit 363，用户态 _start 跑起 → syscall abi_query(#18) 往返 → 用户态写共享页 → syscall process_exit(#21) → 内核 iretq 回 continuation → ABI 值 0x1 回读校验 → FR8 归零。"
     }
   ],
   "current_task": "P3-T6",

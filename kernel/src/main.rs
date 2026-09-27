@@ -35,6 +35,8 @@ pub mod kthread;
 pub mod paging;
 pub mod bootstrap;
 pub mod smoke;
+pub mod syscall;
+pub mod ring3;
 
 // 把 trampoline 汇编链入二进制；`boot.S` 中 `.global _start` 提供链接器 entry。
 global_asm!(include_str!("boot.S"));
@@ -211,6 +213,11 @@ pub extern "C" fn _start64() -> ! {
     unsafe { idt::init_idt() };
     boot_marker(b'S');
 
+    // P4-T4 syscall 接线：MSR_STAR/LSTAR/FMASK + IA32_KERNEL_GS_BASE（须在 IDT 之后）
+    boot_marker(b'i');
+    unsafe { syscall::init_syscall() };
+    boot_marker(b'j');
+
     // P2-T6 PIC + PIT：中断控制器 + 定时器
     boot_marker(b'T');
     unsafe { pic::init() };
@@ -249,6 +256,11 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'g');
     paging::vma_smoke();
     boot_marker(b'h');
+
+    // P4-T4 Ring3 切换 smoke：用户态 _start → syscall abi_query 往返 → CPL==3 断言
+    boot_marker(b'k');
+    ring3::ring3_smoke();
+    boot_marker(b'l');
 
     // 通过 isa-debug-exit (iobase=0x502) 退出 QEMU。
     // QEMU isa-debug-exit 实现为 exit((val << 1) | 1)（无掩码），

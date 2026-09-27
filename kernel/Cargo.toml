@@ -51,3 +51,7 @@ path = "../sched"
 # ===== P4-T3 (2026-09-27): 用户内存区域表（VMA）纯逻辑 crate 接入 =====
 [dependencies.synapse-vma]
 path = "../vma"
+
+# ===== P4-T4 (2026-09-27): syscall ABI 常量（SyscallId / ABI 版本号）=====
+[dependencies.synapse-abi]
+path = "../abi"

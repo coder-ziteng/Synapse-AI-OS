@@ -240,8 +240,11 @@ impl AddressSpace {
         let boot_pd0 = unsafe { entry_read(boot_pdpt, 0) } & PT_ADDR_MASK;
 
         unsafe {
-            // PML4[0] → 私有 PDPT（supervisor：本 AS 全部低半映射经此）
-            entry_write(pml4, 0, pdpt | PT_PRESENT | PT_WRITABLE);
+            // PML4[0] → 私有 PDPT（必须带 PT_USER：AMD64 走查过程中每个层级
+            // 的 U/S 位都与 CPL=3 的访问做 AND 校验，任一为 0 → 整条 user 路径
+            // 在 PML4 级被拒。下层 PDPT[0]（内核）/ PDPT[1]（用户）的 U/S 仍各自
+            // 保留：内核区无 PT_USER → 用户态越界访问在 PDPT 级 #PF，Doc 02 §3.2）。
+            entry_write(pml4, 0, pdpt | PT_PRESENT | PT_WRITABLE | PT_USER);
             // PDPT[0] → boot PD0 共享：0-1GB 内核恒等映射，supervisor-only
             // （无 PT_USER → 用户态访问内核区必 #PF，Doc 02 §3.2 要求）
             entry_write(pdpt, 0, boot_pd0 | PT_PRESENT | PT_WRITABLE);

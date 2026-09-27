@@ -431,7 +431,7 @@ pub fn run_integration_smoke(refs: &BootstrapRefs) {
     let rsp0 = crate::gdt::rsp0_stack_top();
     assert_ne!(rsp0, 0, "RSP0 must be non-zero after init_gdt_tss");
     let k_base = crate::gdt::kernel_stack_base() as u64;
-    assert!(rsp0 >= k_base && rsp0 <= k_base + 4096, "RSP0 should be within KERNEL_STACK");
+    assert!(rsp0 >= k_base && rsp0 <= k_base + 16384, "RSP0 should be within KERNEL_STACK (16KB)");
     total += 1;
 
     // IST1 与 RSP0 应指向不同栈（避免 DF handler 踩内核栈）。
