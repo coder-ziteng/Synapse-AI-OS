@@ -76,7 +76,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 
 ```powershell
 .\startAIOS.ps1              # 构建 → QEMU 无头运行 → 三重自动判定
-.\startAIOS-GUI.ps1          # 构建 → QEMU GTK 窗口（查看开机动画）
+.\startAIOS-GUI.ps1          # 构建(release+gui_demo) → QEMU GTK 窗口循环播放开机动画，手动关窗退出
 .\startAIOS.ps1 -Test        # 运行 QEMU 内测试套件（P1-T8）
 .\startAIOS.ps1 -BuildOnly   # 只构建 kernel_hd.img
 ```
@@ -89,7 +89,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 
 ```bash
 cargo run -p synapse-xtask -- build   # 构建磁盘镜像
-cargo run -p synapse-xtask -- run     # QEMU 运行（exit 1 属正常，看 logs\ 判定）
+cargo run -p synapse-xtask -- run     # QEMU 运行（退出码 0=成功；363 判为正常收尾）
 cargo test --workspace --exclude synapse-kernel   # 宿主单元测试
 python kernel/tests/run_tests.py      # QEMU 测试套件
 ```

@@ -19,6 +19,12 @@ fn workspace_root() -> PathBuf {
 
 /// 执行构建 pipeline。`release` 控制是否 `--release`。
 pub fn run(release: bool) -> Result<(), String> {
+    run_with_features(release, &[])
+}
+
+/// 带 cargo feature 的构建（`gui` 子命令用 `gui_demo`：内核循环播放开机动画、
+/// 永不关机）。features 为空时与 [`run`] 完全一致。
+pub fn run_with_features(release: bool, features: &[&str]) -> Result<(), String> {
     let root = workspace_root();
     let target_json = root.join("x86_64-bootloader.json");
     let profile = if release { "release" } else { "debug" };
@@ -29,6 +35,9 @@ pub fn run(release: bool) -> Result<(), String> {
     cmd.arg("build");
     cmd.arg("-p").arg("synapse-kernel");
     cmd.arg("--target").arg(&target_json);
+    if !features.is_empty() {
+        cmd.arg("--features").arg(features.join(","));
+    }
     // 近期 nightly cargo 要求 JSON target spec 必须显式开启
     cmd.arg("-Zjson-target-spec");
     // 自定义 bare-metal target 没有预编译 core；用 rust-src 现场构建

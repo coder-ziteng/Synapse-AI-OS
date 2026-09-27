@@ -139,3 +139,52 @@ pub fn run() {
     fb::clear_black();
     log::info!("[bootanim] sequence complete ({} frames), handing over to kernel boot", frames);
 }
+
+/// GUI 演示模式（`gui_demo` feature / `xtask gui`）：无限循环播放开机序列。
+///
+/// 与 [`run`] 的区别：
+/// * 时间轴走到 [`scene::END_MS`]（画面已淡出至全黑）后重置 `T0` 重播，永不返回；
+/// * 调用点在 `kernel_bootstrap` 最前 —— 不进入 smoke、不触发 isa-debug-exit 关机，
+///   QEMU 窗口保留到用户手动关闭。
+///
+/// 无 VBE 显示设备时退化为空闲自旋（同样不返回、不关机）。
+pub fn run_forever() -> ! {
+    let info = match vbe::init() {
+        Some(i) => i,
+        None => {
+            log::info!("[bootanim] no VBE display found — gui-demo idle loop");
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+    };
+    log::info!(
+        "[bootanim] framebuffer {}x{}x32, gui-demo loop starting",
+        info.w,
+        info.h
+    );
+
+    calibrate();
+    fb::setup(info);
+    fb::bake_background();
+
+    unsafe { T0 = _rdtsc() };
+    log::info!("[bootanim] TSC_PER_MS={}", unsafe { TSC_PER_MS });
+    let mut last = -64i64;
+    let mut loops = 0u32;
+    loop {
+        let t = now_ms();
+        if t >= scene::END_MS {
+            // 时间轴尽头（已淡出全黑）——重置起点，开始下一轮
+            unsafe { T0 = _rdtsc() };
+            last = -64;
+            loops += 1;
+            log::info!("[bootanim] loop {} restart", loops);
+            continue;
+        }
+        if t - last >= 33 {
+            scene::frame(t);
+            last = t;
+        }
+    }
+}

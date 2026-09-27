@@ -37,10 +37,19 @@ pub struct BootstrapRefs {
 /// 内核对象引导：初始化表 + 铸造 init 的根 caps。
 ///
 /// 重复调用 panic（[`kstate::kstate_init`] 自身有 double-init guard）。
+// gui_demo 构建下 `run_forever()` 发散（动画无限循环），其后代码不可达属预期。
+#[allow(unreachable_code)]
 pub fn kernel_bootstrap() -> BootstrapRefs {
-    // 开机动画：P3 线程基建期间临时禁用——bootanim 模块把内核膨胀到 ~12MB，
-    // 4MB E820 usable 区间只剩 ~2MB 给栈/堆，kthread 栈被分配到低 640K 触发
-    // #DF/#UD（P3-T7 mutex smoke 调试发现）。S6 显示 preresearch 完成后再开。
+    // GUI 演示模式（cargo feature `gui_demo`，由 `xtask gui` 启用）：
+    // 无限循环播放开机动画，永不返回——不进 smoke、不触发 isa-debug-exit 关机，
+    // QEMU 窗口保留到用户手动关闭。无头构建（run/ci）不带此 feature，行为不变。
+    #[cfg(feature = "gui_demo")]
+    bootanim::run_forever();
+
+    // 开机动画（正常启动路径）：P3 线程基建期间临时禁用——bootanim 模块把内核
+    // 膨胀到 ~12MB，4MB E820 usable 区间只剩 ~2MB 给栈/堆，kthread 栈被分配到
+    // 低 640K 触发 #DF/#UD（P3-T7 mutex smoke 调试发现）。S6 显示 preresearch
+    // 完成后再开。
     // bootanim::run();
 
     info!("[bootstrap] step 1/3: kstate_init");

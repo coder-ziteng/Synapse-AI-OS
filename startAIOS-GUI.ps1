@@ -1,18 +1,17 @@
 # ============================================================
-#  startAIOS-GUI.ps1 - Synapse AI-OS build + QEMU with display
+#  startAIOS-GUI.ps1 - Boot Synapse AI-OS in a QEMU window
 #
 #  Usage:
-#    .\startAIOS-GUI.ps1              # Build + QEMU GTK window
-#    .\startAIOS-GUI.ps1 -BuildOnly   # Build only, don't run
+#    .\startAIOS-GUI.ps1     # Build (release + gui_demo) + QEMU GTK window
 #
-#  Differences from startAIOS.ps1:
-#    - Uses xtask gui subcommand (-display gtk), shows VBE framebuffer / boot animation
-#    - No automatic assertion (headless assertion is done by startAIOS.ps1)
-#    - Script exits naturally when QEMU window closes
+#  Behavior:
+#    - `xtask gui` builds the kernel with the `gui_demo` cargo feature:
+#      the kernel loops the boot animation forever and never powers off.
+#    - The QEMU window stays open until you close it manually.
+#    - Serial log is still captured to logs\serial.log (bootanim traces).
+#
+#  For headless CI-style boot verification, use startAIOS.ps1 instead.
 # ============================================================
-param(
-    [switch]$BuildOnly
-)
 
 $ErrorActionPreference = 'Continue'
 try {
@@ -30,7 +29,7 @@ function Write-Ok($msg)    { Write-Host "[ OK ] $msg" -ForegroundColor Green }
 function Write-Bad($msg)   { Write-Host "[FAIL] $msg" -ForegroundColor Red }
 
 # ---------- Prerequisites ----------
-Write-Step '[0/2] Environment check'
+Write-Step '[0/1] Environment check'
 foreach ($tool in @('cargo', 'qemu-system-x86_64', 'python')) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         Write-Bad "$tool not found, please install and add to PATH"; exit 1
@@ -39,28 +38,19 @@ foreach ($tool in @('cargo', 'qemu-system-x86_64', 'python')) {
 New-Item -ItemType Directory -Force -Path (Join-Path $root 'logs') | Out-Null
 Write-Ok 'cargo / qemu / python ready'
 
-# ---------- Build ----------
-Write-Step '[1/2] Build kernel image (xtask build)'
-cargo run -p synapse-xtask -- build
-if ($LASTEXITCODE -ne 0) {
-    Write-Bad 'Build failed - check compilation errors above'; exit 1
-}
-$img = Join-Path $root 'kernel_hd.img'
-Write-Ok ("kernel_hd.img generated ({0:N0} bytes)" -f (Get-Item $img).Length)
-if ($BuildOnly) { Write-Ok '-BuildOnly complete'; exit 0 }
-
-# ---------- QEMU with display ----------
-Write-Step '[2/2] QEMU with display (GTK)'
+# ---------- Build + QEMU with display ----------
+Write-Step '[1/1] Build (release + gui_demo) and launch QEMU window (GTK)'
 Remove-Item $serialLog -ErrorAction SilentlyContinue
 
-Write-Host "`n[INFO] QEMU window launched, close window or press ESC/Q to exit`n" -ForegroundColor Yellow
+Write-Host "`n[INFO] First release build may take a few minutes (-Zbuild-std)." -ForegroundColor Yellow
+Write-Host "[INFO] QEMU window will loop the boot animation and stay open; close it manually to exit.`n" -ForegroundColor Yellow
 
 cargo run -p synapse-xtask -- gui
 if ($LASTEXITCODE -ne 0) {
     Write-Bad "QEMU exited abnormally (exit $LASTEXITCODE)"; exit 1
 }
 
-Write-Ok 'QEMU exited normally'
+Write-Ok 'QEMU exited normally (window closed)'
 
 # ---------- Serial log summary ----------
 if (Test-Path $serialLog) {

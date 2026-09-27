@@ -29,6 +29,12 @@ uart_16550 = "0.3"
 # log facade（P1-T5）：info!/warn!/error! 等宏
 log = { version = "0.4", default-features = false }
 
+[features]
+# GUI 演示模式（xtask gui 专用）：内核无限循环播放开机动画、不走 smoke、
+# 不向 isa-debug-exit 关机 —— QEMU 窗口保留到用户手动关闭。
+# 无头 CI（xtask run/ci）不带此 feature，行为与之前完全一致。
+gui_demo = []
+
 [lints.rust]
 # 内核 entry / 内联汇编 / 中断处理需 unsafe；HAL 化后 unsafe 集中在 hal::arch 子模块
 unsafe_code = "allow"
