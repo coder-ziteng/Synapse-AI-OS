@@ -41,8 +41,8 @@ pub struct BootstrapRefs {
 #[allow(unreachable_code)]
 pub fn kernel_bootstrap() -> BootstrapRefs {
     // GUI 演示模式（cargo feature `gui_demo`，由 `xtask gui` 启用）：
-    // 无限循环播放开机动画，永不返回——不进 smoke、不触发 isa-debug-exit 关机，
-    // QEMU 窗口保留到用户手动关闭。无头构建（run/ci）不带此 feature，行为不变。
+    // 完整播放一遍开机动画后定格，永不返回——不进 smoke、不触发 isa-debug-exit
+    // 关机，QEMU 窗口保留到用户手动关闭。无头构建（run/ci）不带此 feature，行为不变。
     #[cfg(feature = "gui_demo")]
     bootanim::run_forever();
 

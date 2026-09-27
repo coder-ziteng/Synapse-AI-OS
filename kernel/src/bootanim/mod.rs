@@ -140,21 +140,20 @@ pub fn run() {
     log::info!("[bootanim] sequence complete ({} frames), handing over to kernel boot", frames);
 }
 
-/// GUI 演示模式（`gui_demo` feature / `xtask gui`）：无限循环播放开机序列。
+/// GUI 演示模式（`gui_demo` feature / `xtask gui`）：完整播放一遍开机序列后定格。
 ///
-/// 与 [`run`] 的区别：
-/// * 时间轴走到 [`scene::END_MS`]（画面已淡出至全黑）后重置 `T0` 重播，永不返回；
-/// * 调用点在 `kernel_bootstrap` 最前 —— 不进入 smoke、不触发 isa-debug-exit 关机，
-///   QEMU 窗口保留到用户手动关闭。
+/// 与 [`run`] 的区别：播放到 [`scene::END_MS`]（画面已淡出至全黑）后不再交还
+/// 启动流程 —— 不进 smoke、不触发 isa-debug-exit 关机，空闲 hlt 等待用户手动
+/// 关闭 QEMU 窗口。
 ///
-/// 无 VBE 显示设备时退化为空闲自旋（同样不返回、不关机）。
+/// 无 VBE 显示设备时退化为空闲 hlt（同样不返回、不关机）。
 pub fn run_forever() -> ! {
     let info = match vbe::init() {
         Some(i) => i,
         None => {
-            log::info!("[bootanim] no VBE display found — gui-demo idle loop");
+            log::info!("[bootanim] no VBE display found — gui-demo idle");
             loop {
-                core::hint::spin_loop();
+                x86_64::instructions::hlt();
             }
         }
     };
@@ -171,20 +170,24 @@ pub fn run_forever() -> ! {
     unsafe { T0 = _rdtsc() };
     log::info!("[bootanim] TSC_PER_MS={}", unsafe { TSC_PER_MS });
     let mut last = -64i64;
-    let mut loops = 0u32;
+    let mut frames = 0u32;
     loop {
         let t = now_ms();
         if t >= scene::END_MS {
-            // 时间轴尽头（已淡出全黑）——重置起点，开始下一轮
-            unsafe { T0 = _rdtsc() };
-            last = -64;
-            loops += 1;
-            log::info!("[bootanim] loop {} restart", loops);
-            continue;
+            log::info!(
+                "[bootanim] sequence played once ({} frames); holding, close window to exit",
+                frames
+            );
+            break;
         }
         if t - last >= 33 {
             scene::frame(t);
             last = t;
+            frames += 1;
         }
+    }
+    // 定格：中断尚未启用，hlt 后无唤醒源 —— 最低功耗等待用户关窗
+    loop {
+        x86_64::instructions::hlt();
     }
 }

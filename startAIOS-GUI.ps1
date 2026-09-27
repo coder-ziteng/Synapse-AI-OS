@@ -6,7 +6,8 @@
 #
 #  Behavior:
 #    - `xtask gui` builds the kernel with the `gui_demo` cargo feature:
-#      the kernel loops the boot animation forever and never powers off.
+#      the kernel plays the boot animation once, holds the final frame,
+#      and never powers off.
 #    - The QEMU window stays open until you close it manually.
 #    - Serial log is still captured to logs\serial.log (bootanim traces).
 #
@@ -43,7 +44,7 @@ Write-Step '[1/1] Build (release + gui_demo) and launch QEMU window (GTK)'
 Remove-Item $serialLog -ErrorAction SilentlyContinue
 
 Write-Host "`n[INFO] First release build may take a few minutes (-Zbuild-std)." -ForegroundColor Yellow
-Write-Host "[INFO] QEMU window will loop the boot animation and stay open; close it manually to exit.`n" -ForegroundColor Yellow
+Write-Host "[INFO] QEMU window plays the boot animation once (~12s), then holds; close it manually to exit.`n" -ForegroundColor Yellow
 
 cargo run -p synapse-xtask -- gui
 if ($LASTEXITCODE -ne 0) {

@@ -6,7 +6,7 @@
 //!   然后 `python build_disk.py <elf> kernel_hd.img`。
 //! * `xtask run   [--release]` — `build` + 启动 QEMU（headless，等待 QEMU 自然退出）。
 //! * `xtask gui` — 以 `gui_demo` feature + release 构建 + 启动 QEMU（gtk 窗口）。
-//!   内核无限循环播放开机动画、不关机 —— 窗口保留到用户手动关闭。
+//!   内核完整播放一遍开机动画后定格、不关机 —— 窗口保留到用户手动关闭。
 //!   强制 release：TCG 下 debug 构建帧耗时过长，动画会退化成幻灯片。
 //! * `xtask ci    [--timeout N]` — `build` + 启动 QEMU + 轮询 `serial.log`，
 //!   在超时内断言出现 `EXPECTED_SERIAL`（默认 10 秒）。
@@ -39,7 +39,7 @@ fn main() {
     let result: Result<(), String> = match cmd.as_str() {
         "build" => build::run(release),
         "run"   => build::run(release).and_then(|()| qemu::run_headless()),
-        // gui 固定 release + gui_demo：内核循环播放开机动画、永不关机，
+        // gui 固定 release + gui_demo：内核播放一遍开机动画后定格、不关机，
         // 窗口保留到用户手动关闭（debug 构建在 TCG 下帧太慢，动画会成幻灯片）。
         "gui"   => build::run_with_features(true, &["gui_demo"]).and_then(|()| qemu::run_gui()),
         "ci"    => ci::run(timeout),
@@ -60,6 +60,6 @@ fn usage() {
     eprintln!("Usage: xtask <build|run|gui|ci> [options]");
     eprintln!("  build [--release]");
     eprintln!("  run   [--release]              headless, 等待 QEMU 退出");
-    eprintln!("  gui                          gtk 窗口循环播放开机动画（固定 release+gui_demo，手动关闭窗口退出）");
+    eprintln!("  gui                          gtk 窗口播放一遍开机动画后定格（固定 release+gui_demo，手动关窗退出）");
     eprintln!("  ci    [--timeout SECONDS]      (default 10)");
 }
