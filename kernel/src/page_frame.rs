@@ -251,6 +251,15 @@ pub fn init_page_frame_allocator() {
         alloc.mark_range_used(kernel_base, kernel_end - kernel_base);
     }
 
+    // 步骤 3: 保留实模式低内存 [0..LOW_MEM_RESERVED)——
+    // IVT (0..0x400) / BDA (0x400..0x500) / stage2 trampoline 残留 (0x8000..0x9000)
+    // / E820 缓冲 (0x20000) 等 boot 期结构仍映射到低 640K，但已不再使用；
+    // 不预留会让分配器把 kthread 栈砸到这些区域（stack=[0..0x5000) → #DF/#UD
+    // 因为栈与相邻 IVT 数据紧邻时栈写入会污染导致后续 IR/IRQ 帧错位）。
+    // 实模式内存统一从 bitmap 中扣掉，保留 = 0..0xA0000。
+    const LOW_MEM_RESERVED: u64 = 0xA0000; // 640K
+    alloc.mark_range_used(0, LOW_MEM_RESERVED);
+
     info!(
         "[page_frame] initialized: total={} free={} ({} KB); kernel reserved [{:#x}..{:#x}]",
         alloc.total_frames(),

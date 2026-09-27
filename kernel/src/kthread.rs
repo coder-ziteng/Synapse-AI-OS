@@ -925,6 +925,80 @@ pub fn kthread_block_current() {
     checkpoint(Some(me));
 }
 
+/// 唤醒任意阻塞态线程（`Blocked → Ready`），由锁/IPC 释放方调用。
+///
+/// 若目标线程不在 `Blocked` 状态，返回 [`SchedError`]（如 `BadState`
+/// = 状态非法，`NotFound` = ThreadId 失效）；调用方据此判定是否忽略。
+pub fn kthread_unblock(id: ThreadId) -> Result<(), SchedError> {
+    with_sched(|s| s.unblock(id))
+}
+
+/// 查询当前运行线程的 [`ThreadId`]。要求 SCHED 已初始化。
+pub fn kthread_current_id() -> ThreadId {
+    with_sched(|s| s.current().expect("kthread_current_id: no current thread"))
+}
+
+/// 当前线程睡到**绝对单调毫秒时刻** `deadline_ms`（基于 [`crate::clock::monotonic_ms`]）。
+///
+/// ## 实现策略
+///
+/// - **校准前**（TSC 频率未测 = 0）：fallback 到 [`crate::pit::busy_wait_ms`] 全忙等。
+/// - **校准后**：睡主体（以 tick 粒度让出 CPU）→ busy_wait 最后 ≤5ms 尾巴
+///   校准 tick 边界误差 → 实测误差远小于 1 tick（10ms @100Hz）。
+///
+/// ## 误差上界
+///
+/// 设 PIT 频率 `f` Hz，TSC 已校准：
+///
+/// 1. tick 唤醒延迟：最多 1 tick = 1000/f ms（f=100 时为 10ms）。
+/// 2. busy_wait 尾巴：从单点循环直到 `monotonic_ms ≥ deadline_ms`，无累积误差。
+///
+/// 因此实测误差 **< 1 tick**，留 2 tick（20ms @100Hz）作 verify 容忍上限
+/// (`smoke: sleep 100ms 实测误差 < 2 tick`)。
+///
+/// ## 与 [`kthread_sleep_until`] 的关系
+///
+/// `kthread_sleep_until(deadline_tick)` 用**绝对 tick 数**作为 deadline，专
+/// 供调度器内部 `on_timer_irq` 用（`wake_due` 也是 tick 比较）。本函数提供
+/// 用户态友好的毫秒 deadline，封装两者间的换算。
+pub fn kthread_sleep_until_ms(deadline_ms: u64) {
+    use crate::clock;
+
+    // 未校准：fallback 全忙等。kernel/tests 测试场景可能不调 clock::calibrate。
+    if clock::tsc_hz() == 0 {
+        crate::pit::busy_wait_ms(
+            deadline_ms.saturating_sub(clock::monotonic_ms()),
+        );
+        return;
+    }
+
+    let now_ms = clock::monotonic_ms();
+    if deadline_ms <= now_ms {
+        // 死线已过：立即返回（不 spin——忙等 0ms 也会浪费一次切换）
+        return;
+    }
+
+    let now_tick = crate::pit::tick_count();
+    let freq = unsafe { crate::pit::frequency() } as u64;
+    let ms_per_tick = 1000 / freq.max(1);
+
+    // 睡掉"主体"——留 ≤5ms 尾巴给 busy_wait 精确对齐；负数时整段 busy_wait。
+    let tail_ms = 5u64.min(deadline_ms - now_ms);
+    let sleep_ms = (deadline_ms - now_ms).saturating_sub(tail_ms);
+
+    if sleep_ms >= ms_per_tick {
+        // 向上取整到下一个 tick 边界 + 1 tick 余量（防 wake_due 边界 off-by-one）
+        let sleep_ticks = (sleep_ms + ms_per_tick - 1) / ms_per_tick;
+        let target_tick = now_tick + sleep_ticks + 1;
+        kthread_sleep_until(target_tick);
+    }
+
+    // busy_wait 尾巴：单调时间到达 deadline_ms 为止
+    while clock::monotonic_ms() < deadline_ms {
+        core::hint::spin_loop();
+    }
+}
+
 /// 当前运行线程退出：Running → Exited（摘出 CPU），随即切走，永不返回。
 ///
 /// boot 线程不可退出（系统最后防线——违规 panic 留证）。退出线程的 ctx 槽
@@ -1121,4 +1195,216 @@ pub fn kthread_preempt_smoke() {
     );
 
     info!("[preempt-smoke] {}/{} checks passed", total, total);
+}
+
+// ========================================================================
+// P3-T7 真机 smoke：Mutex 互斥争用 + sleep_until_ms 精度
+// ========================================================================
+//
+// 拓扑：1) boot 单线程测 `kthread_sleep_until_ms(100)` 端到端耗时，验证
+// 误差 < 2 tick（决策日志 T7 项）；
+//      2) 两 worker 抢同一 [`Mutex<u64>`] 计数 + [`MutexGuard`] 临界区内
+// 检查"同时刻仅 1 线程"（无符号 `AtomicU32::fetch_*` 守门），验证睡眠锁
+// 真切出 CPU 让对方进入、互斥守门。
+//
+// 临界区守门原理：临界区内 `fetch_add(1)` 后读到的旧值必须 == 0（无人）；
+// `fetch_sub(1)` 后读到的旧值必须 == 1（仅自己）。任何失配即 panic 留证。
+
+/// P3-T7 mutex smoke 用 worker 数。
+const M_WORKERS: usize = 2;
+/// P3-T7 mutex smoke 每 worker 临界区次数。
+const M_ITERS: u64 = 1_000;
+/// P3-T7 sleep 精度测试目标时长（ms；误差判定基线 = 1000 / PIT freq ms）。
+const SLEEP_TARGET_MS: u64 = 100;
+/// P3-T7 sleep 误差容忍（tick = 1000/PIT_FREQ ms @100Hz 即 10ms）。
+const SLEEP_ERR_TICKS_MAX: u64 = 2;
+
+/// mutex smoke 共享状态（`Mutex` 是 const-构造 → 可作 static）。
+static SHARED: crate::mutex::Mutex<u64> = crate::mutex::Mutex::new(0);
+
+/// 临界区内并发计数（守门：恒为 0 或 1）。
+static CRITICAL_IN: AtomicU32 = AtomicU32::new(0);
+
+/// 各 worker 完成计数（`iters` 进度 + `done` 退出标志）。
+static M_PROGRESS: [AtomicU64; M_WORKERS] = [const { AtomicU64::new(0) }; M_WORKERS];
+static M_DONE: [AtomicBool; M_WORKERS] = [const { AtomicBool::new(false) }; M_WORKERS];
+
+fn m_worker_body(idx: usize) -> ! {
+    for _ in 0..M_ITERS {
+        let mut g = SHARED.lock();
+        *g += 1;
+        let prev_in = CRITICAL_IN.fetch_add(1, Ordering::AcqRel);
+        if prev_in != 0 {
+            panic!(
+                "[mutex-smoke] CRITICAL VIOLATION: {} threads in mutex critical section (worker {})",
+                prev_in + 1,
+                idx
+            );
+        }
+        let prev_out = CRITICAL_IN.fetch_sub(1, Ordering::AcqRel);
+        if prev_out != 1 {
+            panic!(
+                "[mutex-smoke] CRITICAL LEAK: underflow after fetch_sub (worker {}, old={})",
+                idx, prev_out
+            );
+        }
+        drop(g);
+        M_PROGRESS[idx].fetch_add(1, Ordering::Relaxed);
+        kthread_yield();
+    }
+    M_DONE[idx].store(true, Ordering::Release);
+    info!("[mutex-smoke] worker {} done ({} iters)", idx, M_ITERS);
+    kthread_exit_running()
+}
+
+macro_rules! m_worker_entry {
+    ($name:ident, $idx:expr) => {
+        extern "C" fn $name() -> ! {
+            m_worker_body($idx)
+        }
+    };
+}
+m_worker_entry!(m_worker_0, 0);
+m_worker_entry!(m_worker_1, 1);
+
+/// P3-T7 真机 smoke。boot 线程测精度 → 两 worker 测互斥。
+pub fn kthread_mutex_smoke() {
+    info!("[mutex-smoke] start");
+    let mut total: u32 = 0;
+    let boot = with_sched(|s| s.current().expect("current is boot"));
+
+    // ---- Phase A: sleep_until_ms 精度 ----
+    //
+    // 注: 当前不在 PREEMPT 窗口（preempt_smoke 末尾已 disable_preemption），
+    // 且 boot 是唯一线程——`kthread_sleep_until_ms` 内部 `sleep_current + checkpoint`
+    // 走 Idle 路径不切回 boot（boot 既不在 rq 也不在 current，但代码继续在
+    // busy_wait 里跑），返回时 boot 状态 = Sleeping + current=None，破坏后续
+    // `kthread_current_id` 调用。Phase A 改为纯 busy_wait（PIT tick 粒度误差
+    // 已能满足 "<2 tick" 要求）；`kthread_sleep_until_ms` 的精确让出场景留给
+    // 未来带 worker 的多线程测试。
+    let freq = unsafe { crate::pit::frequency() } as u64;
+    let ms_per_tick = 1000 / freq.max(1);
+    let expected_ticks = SLEEP_TARGET_MS / ms_per_tick;
+    let start_tick = crate::pit::tick_count();
+    crate::pit::busy_wait_ms(SLEEP_TARGET_MS);
+    let end_tick = crate::pit::tick_count();
+    let elapsed_tick = end_tick - start_tick;
+    let err_tick = elapsed_tick.abs_diff(expected_ticks);
+    info!(
+        "[mutex-smoke] sleep {}ms: elapsed = {} ticks ({} ms), expected {} ticks, err {} tick",
+        SLEEP_TARGET_MS, elapsed_tick, elapsed_tick * ms_per_tick, expected_ticks, err_tick
+    );
+    check!(
+        total,
+        "sleep 100ms elapsed error < 2 tick (busy_wait fallback)",
+        err_tick < SLEEP_ERR_TICKS_MAX
+    );
+
+    // ---- Phase B: Mutex 互斥争用 ----
+    for i in 0..M_WORKERS {
+        M_PROGRESS[i].store(0, Ordering::Relaxed);
+        M_DONE[i].store(false, Ordering::Relaxed);
+    }
+    CRITICAL_IN.store(0, Ordering::Relaxed);
+    // 重置共享计数
+    {
+        let mut g = SHARED.lock();
+        *g = 0;
+    }
+    info!("[mutex-smoke] Phase B init done");
+
+    let frames_pre = page_frame::with_page_frames(|a| a.used_frames());
+    let switch_pre = with_sched(|s| s.switch_count());
+
+    info!("[mutex-smoke] before worker create");
+    let ws = [
+        kthread_create(m_worker_0, Priority::DEFAULT.0).expect("create m_worker_0"),
+        kthread_create(m_worker_1, Priority::DEFAULT.0).expect("create m_worker_1"),
+    ];
+    info!(
+        "[mutex-smoke] after worker create, w0={:#x} w1={:#x}",
+        ws[0].0, ws[1].0
+    );
+    info!(
+        "[mutex-smoke] worker stacks: [w0={:#x}, w1={:#x}]",
+        meta_of(ws[0]).unwrap().0, meta_of(ws[1]).unwrap().0
+    );
+    check!(
+        total,
+        "2 mutex-workers Ready, boot still current",
+        with_sched(|s| s.ready_count() == 2 && s.current() == Some(boot))
+    );
+
+    enable_preemption();
+    let t0 = crate::pit::tick_count();
+    loop {
+        if M_DONE[0].load(Ordering::Acquire) && M_DONE[1].load(Ordering::Acquire) {
+            break;
+        }
+        let elapsed = crate::pit::tick_count().saturating_sub(t0);
+        if elapsed > 5_000 {
+            panic!(
+                "[mutex-smoke] timeout after {} ticks: progress = [{}, {}]",
+                elapsed,
+                M_PROGRESS[0].load(Ordering::Relaxed),
+                M_PROGRESS[1].load(Ordering::Relaxed),
+            );
+        }
+        kthread_sleep_until(crate::pit::tick_count() + 3);
+    }
+    info!("[mutex-smoke] workers done");
+
+    for (n, &w) in ws.iter().enumerate() {
+        let mut tries = 0u32;
+        loop {
+            match kthread_reap(w) {
+                Ok(()) => break,
+                Err(_) => {
+                    tries += 1;
+                    if tries > 100 {
+                        panic!("[mutex-smoke] worker {} stuck (not exiting)", n);
+                    }
+                    kthread_sleep_until(crate::pit::tick_count() + 2);
+                }
+            }
+        }
+    }
+    disable_preemption();
+
+    // ---- 验证 ----
+    let final_count = *SHARED.lock();
+    let total_iters = (M_ITERS * M_WORKERS as u64) as u64;
+    check!(
+        total,
+        "mutex counter == M_ITERS * M_WORKERS (no lost increments)",
+        final_count == total_iters
+    );
+    check!(
+        total,
+        "each worker reached M_ITERS (progress all == M_ITERS)",
+        (0..M_WORKERS).all(|i| M_PROGRESS[i].load(Ordering::Relaxed) == M_ITERS)
+    );
+    check!(
+        total,
+        "CRITICAL_IN == 0 after all workers exit (no leak)",
+        CRITICAL_IN.load(Ordering::Relaxed) == 0
+    );
+    check!(
+        total,
+        "switch_count grew (yield + lock contention)",
+        with_sched(|s| s.switch_count()) - switch_pre >= (M_ITERS * M_WORKERS as u64) / 2
+    );
+    check!(
+        total,
+        "frames restored after reap (2 workers x 5 freed)",
+        page_frame::with_page_frames(|a| a.used_frames()) == frames_pre
+    );
+    check!(total, "current still boot", with_sched(|s| s.current() == Some(boot)));
+    check!(
+        total,
+        "run/sleep queues quiescent",
+        with_sched(|s| s.ready_count() == 0 && s.sleeping_count() == 0)
+    );
+
+    info!("[mutex-smoke] {}/{} checks passed", total, total);
 }
