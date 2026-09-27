@@ -242,6 +242,10 @@ impl Scheduler {
         // 当前线程仍是最优 → 不换：就绪队列中无严格更高优先级（best >= cur）、
         // 无抢占请求（need_resched）、时间片未到期。
         // 注：Running 线程不在就绪队列中，peek 即"换出它之后的下一个"。
+        // 时间片到期时即使 current 优先级高于队头也轮转出（RR 语义；被轮出的
+        // HIGH 线程会在下一个检查点按 preempted 立即切回）——该决策形态要求
+        // `commit_switch` 必须**先摘 next 再回队 prev**，否则 prev 入队后成为
+        // 新队头，peek 校验误报 BadState（P3-T8 真机 panic 根因）。
         if let Some(c) = cur {
             if let Ok(t) = self.threads.get(c) {
                 let preempted = self.rq.best_priority().is_some_and(|p| p < t.priority.0);
@@ -261,6 +265,15 @@ impl Scheduler {
     /// next → Running）并更新 current。返回 Err 表示状态已非法（不应发生，
     /// 内核侧应 panic 留证）。
     pub fn commit_switch(&mut self, prev: Option<ThreadId>, next: ThreadId) -> Result<(), SchedError> {
+        // next 必须此刻仍在队首（schedule 与 commit 之间无并发修改——
+        // 单核 + 内核集成层临界区保证；此断言防御集成层 bug）。
+        // **先摘 next 再回队 prev**：若 prev 优先级严格高于 next，先 push
+        // prev 会使队头变成 prev，peek 校验误报 BadState（P3-T8 真机根因；
+        // schedule 已按严格优先级不再发出该形态决策，此处为防御性顺序）。
+        if self.rq.peek() != Some(next) {
+            return Err(SchedError::BadState);
+        }
+        self.rq.pop();
         if let Some(p) = prev {
             if p != next {
                 // 仅当 prev 仍是 Running（正常抢占/RR 换出）才回队；
@@ -272,12 +285,6 @@ impl Scheduler {
                 }
             }
         }
-        // next 必须此刻仍在队首（schedule 与 commit 之间无并发修改——
-        // 单核 + 内核集成层临界区保证；此断言防御集成层 bug）
-        if self.rq.peek() != Some(next) {
-            return Err(SchedError::BadState);
-        }
-        self.rq.pop();
         self.threads.transition(next, ThreadState::Running)?;
         self.current = Some(next);
         Ok(())
@@ -453,6 +460,28 @@ mod tests {
         s.tick(6, &mut []);
         assert_eq!(run_schedule(&mut s, 6), SwitchDecision::Switch { prev: Some(c), next: a }); // 轮回
         assert_eq!(s.switch_count(), 4);
+    }
+
+    #[test]
+    fn commit_switch_pops_next_before_pushing_prev() {
+        // P3-T8 真机 BadState 根因回归：时间片到期轮转时 prev(HIGH) 优先级
+        // 高于 next(LOW) 的决策形态合法（RR 语义），commit 必须先摘 next
+        // 再回队 prev——旧顺序下 prev 入队即成新队头，peek 校验误报 BadState。
+        let mut s = Scheduler::with_time_slice(2);
+        let hi = s.spawn(0, 0).unwrap();
+        let lo = s.spawn(5, 0).unwrap();
+        run_schedule(&mut s, 0); // → hi（slice_deadline=2）
+        assert_eq!(s.current(), Some(hi));
+        s.tick(2, &mut []); // hi 时间片到期
+        assert!(s.need_resched());
+        // 决策：轮转给 lo（尽管 hi 优先级更高——RR 到期即轮换）
+        assert_eq!(run_schedule(&mut s, 2), SwitchDecision::Switch { prev: Some(hi), next: lo });
+        assert_eq!(s.current(), Some(lo));
+        assert_eq!(s.state_of(hi), Ok(ThreadState::Ready)); // hi 回队
+        assert_eq!(s.state_of(lo), Ok(ThreadState::Running));
+        // 下一个检查点：hi 严格更优 → 立即抢占切回
+        assert_eq!(run_schedule(&mut s, 2), SwitchDecision::Switch { prev: Some(lo), next: hi });
+        assert_eq!(s.current(), Some(hi));
     }
 
     #[test]

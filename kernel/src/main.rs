@@ -242,13 +242,18 @@ pub extern "C" fn _start64() -> ! {
 
     // P3-T6 抢占模型 smoke：3 worker 并发计数/打印 + 时间片抢占 + yield/sleep/exit
     boot_marker(b'e');
-    // kthread::kthread_preempt_smoke();
+    kthread::kthread_preempt_smoke();
     boot_marker(b'f');
 
     // P3-T7 Mutex 睡眠锁 + sleep_until_ms 真机 smoke
     boot_marker(b'g');
     kthread::kthread_mutex_smoke();
     boot_marker(b'h');
+
+    // P3-T8 集成收尾 smoke：FR8 TSC 核算 + 页账本 + FR10 冻结/频率计数全链路
+    boot_marker(b'i');
+    kthread::kthread_p3t8_smoke();
+    boot_marker(b'j');
 
     // 通过 isa-debug-exit (iobase=0x502) 退出 QEMU。
     // QEMU isa-debug-exit 实现为 exit((val << 1) | 1)（无掩码），
