@@ -1,0 +1,19 @@
+[package]
+name        = "synapse-ipc"
+version     = "0.1.0"
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace      = true
+description = "Synapse IPC 核心：消息头 ABI / 传输路径分类 / Notification 位图 / Endpoint 队列状态机（架构无关，宿主可测）"
+publish     = false
+
+[lib]
+path = "src/lib.rs"
+
+# 仅依赖同 workspace 的 synapse-cap（错误码 / TransferItem），保持零外部依赖
+[dependencies]
+synapse-cap = { path = "../cap" }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

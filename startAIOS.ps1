@@ -1,0 +1,132 @@
+﻿# ============================================================
+#  startAIOS.ps1 — Synapse AI-OS 一键构建 + QEMU 运行 + 结果判定
+#
+#  用法:
+#    .\startAIOS.ps1              # 构建 + QEMU 运行 + 自动判定成功/失败
+#    .\startAIOS.ps1 -BuildOnly   # 只构建镜像，不运行
+#    .\startAIOS.ps1 -Test        # 运行 P1-T8 QEMU 测试套件 (4 用例)
+#    .\startAIOS.ps1 -Tail 30     # 判定后多打印几行串口日志 (默认 15)
+#
+#  判定标准 (解析 xtask 输出的退出码行，不依赖 xtask 自身 $LASTEXITCODE):
+#    1. QEMU 退出码 = 363  ((0xB5<<1)|1, isa-debug-exit 正常收尾)
+#       QEMU 退出码 = 355  ((0xB1<<1)|1, kernel panic 确定性出口 — 直接判失败)
+#    2. 本次 serial 日志出现 "N/N checks passed" 且无 [PANIC]
+#       (日志路径从 xtask stdout 的 "[xtask] Logs: serial=..." 行解析，
+#        xtask run 写带时间戳的 serial-<ts>.log，非固定名 serial.log)
+#    3. 本次 debugcon-kernel 日志 boot marker 序列完整 (打印供人工核对)
+# ============================================================
+param(
+    [switch]$BuildOnly,
+    [switch]$Test,
+    [int]$Tail = 15
+)
+
+# 注意: 用 Continue 而非 Stop —— PS 5.1 下 cargo/python 写 stderr（编译警告等）
+# 一旦被重定向就会变成 NativeCommandError 误中断脚本；成败判定全部走 $LASTEXITCODE。
+$ErrorActionPreference = 'Continue'
+
+# serial.log 是 UTF-8，PS 5.1 控制台默认按 ANSI/GBK 解码 → 中文乱码（鈫?/鏃堕挓）。
+# 控制台输出编码 + 管道编码统一切 UTF-8；读文件处再加 -Encoding UTF8。
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch { }
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $root
+
+$serialLog = Join-Path $root 'logs\serial.log'
+$dbg501Log = Join-Path $root 'logs\debugcon-kernel.log'
+
+function Write-Step($msg)  { Write-Host "`n==> $msg" -ForegroundColor Cyan }
+function Write-Ok($msg)    { Write-Host "[ OK ] $msg" -ForegroundColor Green }
+function Write-Bad($msg)   { Write-Host "[FAIL] $msg" -ForegroundColor Red }
+function Write-Note($msg)  { Write-Host "       $msg" -ForegroundColor DarkGray }
+
+# ---------- 前置检查 ----------
+Write-Step '[0/3] 环境检查'
+foreach ($tool in @('cargo', 'qemu-system-x86_64', 'python')) {
+    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+        Write-Bad "找不到 $tool，请确认已安装并在 PATH 中"; exit 1
+    }
+}
+New-Item -ItemType Directory -Force -Path (Join-Path $root 'logs') | Out-Null
+Write-Ok 'cargo / qemu / python 就绪'
+
+# ---------- 构建 ----------
+Write-Step '[1/3] 构建内核镜像 (xtask build)'
+cargo run -p synapse-xtask -- build
+if ($LASTEXITCODE -ne 0) {
+    Write-Bad '构建失败 — 请检查上方编译错误'; exit 1
+}
+$img = Join-Path $root 'kernel_hd.img'
+Write-Ok ("kernel_hd.img 已生成 ({0:N0} 字节)" -f (Get-Item $img).Length)
+if ($BuildOnly) { Write-Ok '-BuildOnly 完成'; exit 0 }
+
+# ---------- 测试套件模式 ----------
+if ($Test) {
+    Write-Step '[2/3] 运行 P1-T8 QEMU 测试套件'
+    python (Join-Path $root 'kernel\tests\run_tests.py')
+    if ($LASTEXITCODE -eq 0) { Write-Ok '测试套件 PASS'; exit 0 }
+    else { Write-Bad '测试套件 FAIL'; exit 1 }
+}
+
+# ---------- QEMU 运行 ----------
+Write-Step '[2/3] QEMU 无头运行'
+# 清理旧日志，避免读到上一次运行的内容
+Remove-Item $serialLog, $dbg501Log -ErrorAction SilentlyContinue
+
+# PS 5.1: 原生命令 stderr 经 2>&1 进管道会被当作 ErrorRecord，
+# 配合 EAP=Stop 会误抛 NativeCommandError — 临时降级再恢复。
+$ErrorActionPreference = 'Continue'
+$runOut = (cargo run -p synapse-xtask -- run 2>&1 | Out-String)
+$ErrorActionPreference = 'Stop'
+$runOut -split "`n" | Where-Object { $_ -match '\[xtask\]' } | ForEach-Object { Write-Note $_.Trim() }
+
+$qemuExit = -1
+if ($runOut -match 'QEMU exited with exit code: (\d+)') { $qemuExit = [int]$Matches[1] }
+
+# xtask run 写的是**带时间戳**的 serial-<ts>.log（避免文件锁），不是固定名 serial.log。
+# 从 xtask stdout 的 "[xtask] Logs: serial=<path>, dc402=<path>, dc501=<path>" 行解析
+# 真实路径，判定才能读到本次运行的日志（否则会误读上一次 CI/GUI 留下的过期 serial.log）。
+if ($runOut -match 'serial=([^,\r\n]+)') { $serialLog = $Matches[1].Trim() }
+if ($runOut -match 'dc501=([^\r\n]+)')   { $dbg501Log = $Matches[1].Trim() }
+
+# ---------- 结果判定 ----------
+Write-Step '[3/3] 结果判定'
+$fail = @()
+
+# 1) QEMU 退出码 (363=正常收尾, 355=kernel panic 确定性出口)
+if ($qemuExit -eq 363) { Write-Ok 'QEMU 退出码 = 363 (正常收尾)' }
+elseif ($qemuExit -eq 355) { Write-Bad 'QEMU 退出码 = 355 (kernel panic 出口 — 回溯见 serial.log)'; $fail += 'panic-exit' }
+else { Write-Bad "QEMU 退出码 = $qemuExit (期望 363=成功 / 355=panic)"; $fail += 'exit-code' }
+
+# 2) 串口日志: smoke 全通过 + 无 panic
+if (Test-Path $serialLog) {
+    $serial = Get-Content $serialLog -Raw -Encoding UTF8
+    if ($serial -match '(\d+)/\1 checks passed') { Write-Ok "smoke 测试: $($Matches[0])" }
+    else { Write-Bad 'serial.log 未出现 "N/N checks passed"'; $fail += 'smoke' }
+    if ($serial -match '\[PANIC\]') { Write-Bad '检测到 [PANIC]，回溯见 serial.log'; $fail += 'panic' }
+    else { Write-Ok '无 [PANIC]' }
+} else { Write-Bad 'serial.log 不存在 (QEMU 未正常启动?)'; $fail += 'no-serial' }
+
+# 3) boot marker (打印供核对, 序列会随新任务增长)
+if (Test-Path $dbg501Log) {
+    $markers = (Get-Content $dbg501Log -Raw).Trim()
+    Write-Ok "boot markers: $markers"
+    if ($markers.Length -lt 5) { Write-Bad 'boot marker 过短，早期引导即崩溃'; $fail += 'markers' }
+} else { Write-Bad 'debugcon-kernel.log 不存在'; $fail += 'no-dbg501' }
+
+# ---------- 串口日志摘要 ----------
+if (Test-Path $serialLog) {
+    Write-Host "`n----- serial.log (末尾 $Tail 行) -----" -ForegroundColor Yellow
+    Get-Content $serialLog -Tail $Tail -Encoding UTF8 | ForEach-Object { Write-Host "  $_" }
+    Write-Host '--------------------------------------' -ForegroundColor Yellow
+}
+
+if ($fail.Count -eq 0) {
+    Write-Host "`n=== Synapse AI-OS 运行成功 ===" -ForegroundColor Green
+    exit 0
+} else {
+    Write-Host "`n=== 运行失败: $($fail -join ', ') — 详见 logs\ 目录 ===" -ForegroundColor Red
+    exit 1
+}

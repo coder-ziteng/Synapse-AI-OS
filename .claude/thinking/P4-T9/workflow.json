@@ -1,0 +1,32 @@
+{
+  "featureName": "P4-T9",
+  "description": "process_spawn + 崩溃处理 + per-thread kstack + Quota 强制（解锁 T7 Phase 2 + T10/T11/T13 的硬前置）",
+  "mode": "create",
+  "currentStage": "05-integration",
+  "stages": {
+    "01-analysis": "completed",
+    "02-architecture": "completed",
+    "03-planning": "completed",
+    "04-codegen": "completed",
+    "05-integration": "completed"
+  },
+  "subtaskCompletion": {
+    "T9a-kstack-proc_ext": "completed",
+    "T9b-process_spawn": "completed",
+    "T9c-crash-death-notification": "completed",
+    "T9d-process_reap": "completed",
+    "T9e-quota-enforce": "completed"
+  },
+  "notes": {
+    "T9a": "2026-09-27 commit a65c62c — per-process kstack + PerCpu { current_pid, kstack_top } 解耦。IPC smoke PASS。",
+    "T9b": "2026-09-27 commit ff48359 — spawn-smoke 真机 exit 363：child_pid=4 跑完 hello 7 节全路径 → 子 process_exit(code=0)。期间暴露 3 集成 bug 全修：① AS_PTR 陈旧（spawn 切 AS 后未更新 current_as_ptr）→ 子 §3 gettime 即 #GP → 加 elfload::set_current_as_ptr；② 子 CapTable 是新建空表 vs hello §6 硬编码 ep_cap=1 → spawn_smoke step 3b 全新 ep 铸造到子 slot 1（不能用 init 的 bootstrap ep：init §6.6 try_send 已留 queued 消息）；③ 帧预算爆（hello 2.8 MB initrd 预留 688 帧，子一加即帧出）→ user/hello/Cargo.toml 加 strip=\"symbols\"，hello→90 KB / 帧预算 +667。另加 kernel/src/proc_life stub 让并行窗口已在 paging.rs 写好的 T9c call sites 可编译。",
+    "T9c": "2026-09-27 commits e6f74ab + e6a29c9 + 7c4216f — spawn 侧接线（set_kernel_cr3 / set_user_as / 专用 death_endpoint）+ 真机验证 child exit code=0 → death QUEUED → 父 recv DeathMsg{fault=FAULT_NONE}+ FR8 归零 256 / 256 平衡。spawn_continuation dual-path 防止 zombie 状态双重清理。",
+    "T9d": "2026-09-27 commit e6a29c9 + 7c4216f — sys_reap (#22) 接 proc_life::sys_reap（ProcessTable::reap + uninstall_kstack + k_rate_unregister）+ crash_continuation reap 串联。spawn-smoke PASS FR8 256/256。",
+    "T9e": "2026-09-27 commit 7c4216f — umem sys_mmap 接 k_quota_charge(RESOURCE_PAGES) / sys_munmap 接 k_quota_release；hello §4f mmap 4093 页超 DEFAULT_QUOTA.max_pages=4096 → E_QUOTA_EXCEEDED 真机证据；crasher 子进程 64 页超 32 页小配额触发 quota_denied_count = 1；umem + k_quota_release 在 eager_map 失败 / VMA register 失败时回滚路径完整。",
+    "parallel-window-status": "并行窗口先推进 T9c+d+e 部分内容（abi DeathMsg/DeathLabel/FAULT_* + proc_ext.rs user_as_ptr 字段 + kstate.rs k_quota_charge/release + paging.rs free_all_user_pages + kill_path terminate_current 接线 + syscall.rs ProcessExit/IllegalSyscall/ProcessReap 接 proc_life + idt.rs ring3 #GP handler terminate_current + umem.rs sys_mmap/munmap quota charge/release + xtask 日志时间戳）。本窗口接手 proc_life.rs Box + Sync wrapper 修复 + spawn 侧接线（set_kernel_cr3 / set_user_as / 专用 death_endpoint）+ spawn_continuation dual-path 防护 + crash_continuation 串联 + 真机端到端 smoke 验证（T9c → T9d → T9e）。",
+    "known-preexisting-bug": "commit 8483f82 已披露的间歇 #GP（error_code=0x10）在 timer_interrupt_handler iretq。IPC 改动提高复现率。根因：on_timer_irq → checkpoint→_switch_to 触发上下文切换时 handler pop+iretq 在新线程栈以陈旧寄存器恢复。待独立 bug fix 跟进（不在 T9 范围）。",
+    "final-fixup": "2026-09-27 commit eed67b6 — 本会话收尾三修：① hello §4d a4 显式 hint 0x41103000 → 0x4210_0000（原 hint 落在 §4e 末段 4093 页 bump 候选区 [0x41004000,0x42001000) 内，overlaps_vma 抢在 quota 拒绝前返 -2 打破断言）；② 撤销 hello §4f quota 拒绝断言——init 持有 INIT_QUOTA.max_pages=1<<20（4GB），在 init 上永远触发不了 quota 超限（物理帧仅 937，4093 页 eager_map 必先 -3 E_NO_MEMORY），quota 拒绝路径的完整真机覆盖归 crasher（max_pages=16 → mmap 64 页 → -13 + quota_denied_count>=1）；③ readme P4 行补 T9c/T9d/T9e ✅ + task.json P4-T9 pending→completed 带完整 actual_approach。真机 exit 363 复验：11 smoke 套件全绿（spawn-smoke child fault=0 正常退出 + crash-smoke child fault=1 FAULT_SEGFAULT，双双 FR8 回基线 256）；宿主 187 tests 全绿。"
+  },
+  "createdAt": "2026-09-27T11:25:00",
+  "updatedAt": "2026-09-27T16:30:00"
+}

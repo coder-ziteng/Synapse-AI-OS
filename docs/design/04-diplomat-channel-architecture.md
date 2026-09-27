@@ -1,6 +1,6 @@
 # 设计文档 04：外交工具通道架构 (Diplomat Channel Architecture)
 
-> 状态：DRAFT / 设计细化
+> 状态：**PROPOSED 完成**（待确认升级为 DECIDED）
 > 关联需求：原始构想 [`../../原始思路.md`](../../原始思路.md) "外交工具"系列讨论
 > 关联里程碑：Phase 5（外交工具与 Agent 雏形）
 > 前置：[设计文档 01 Capability 模型](01-capability-agent-permission-model.md)、[设计文档 03 IPC](03-ipc-message-and-single-copy-path.md)
@@ -11,6 +11,25 @@
 ## 0. 文档目的
 
 定义外交工具（Diplomat）的**内部架构**：从原始构想的"网络栈最底层的海关"出发，落实为结构化业务通道（Channel）、编解码器（Codec）注册表、入出站安全扫描管道、性能分层处理。本文档回答：
+
+### PROPOSED 决策汇总
+
+| 决策项 | PROPOSED 方案 | 章节 |
+|--------|--------------|------|
+| ChannelRegistry 注册 | 首期仅编译期注册 | §11 |
+| File Channel 扫描失败 | 异步 IPC Notification | §11 |
+| Stream Channel 违规 | 熔断（强安全）| §11 |
+| Security Gateway 失败 | 熔断整个外交工具（强安全）| §11 |
+| 出站脱敏规则集 | 内置 + 用户可配 | §11 |
+| 硬件加速 | 不纳入 Phase 5（软件先行）| §11 |
+| 审计事件流 | 不经过内核（外交工具内部产生）| §11 |
+| AuditEvent.signature | Signature 类型（含算法标识）| §8.1 |
+| **Phase 5 范围** | **仅 API Channel 最小子集**（其余 4 类仅接口草案）| §5 |
+
+> ⚠️ **Phase 5 MVP 范围约束**（对齐 [需求评审 §2.11](../requirements-review-and-supplement.md)）：
+> Phase 5 **只实现 API Channel** 的最小子集（HTTPS 出站、固定域名白名单、请求/响应 schema、超时、限流、审计摘要）。
+> File / Web / Stream / Realtime 四类通道**仅保留接口草案和威胁模型**，不进入 Phase 5 退出标准。
+> 这是为了防止"远程 API 代理"膨胀为通用网络平台（见需求评审 R14）。
 
 1. 为什么外交工具不能是普通 socket 代理？
 2. 哪些通道必须存在、各自的固定行为是什么？
@@ -175,6 +194,7 @@ pub struct ChannelRegistry {
 ### 5.5 Realtime Channel — 实时通信
 - **业务对象**：低延迟消息（语音通话帧 / IM 消息）。
 - **编码器**：实时加密 + 低延迟压缩 + QoS 标记。
+  - **TBD 加密协议选型**：候选 (a) DTLS 1.3 over UDP（标准、可移植）；(b) 自研 SRTP 风格轻量 AEAD（AES-GCM 128 + 4-byte 序列号，去握手开销）；(c) WireGuard 风格（Noise 框架 + Curve25519，首字节零）。首期倾向 (a) 标准路径，若性能不达标再切 (b)。
 - **解码器**：解密 + 解压 + 抖动缓冲。
 - **安全策略**：**极低延迟路径**——仅做关键风险点拦截（如关键词过滤、异常流量检测）；不做深度审计。
 
@@ -249,9 +269,12 @@ pub struct AuditEvent {
     pub action: AuditAction,          // Send / Recv / Scan / Persist / Reject
     pub decision: Decision,           // Allow | Deny(reason) | Quarantine
     pub content_hash: Option<[u8;32]>,// 内容指纹（不存原文）
-    pub signature: [u8;64],           // 外交工具密钥签名（仅业务层事件）
+    pub signature: Signature,         // ★ 不透明签名（含算法标识，对齐 [Doc 06 §13.2.2](06-system-services-roadmap.md)）
+                                      // 业务层事件用外交工具密钥签名；内核事件由审计服务签名
 }
 ```
+
+> **注**：旧版 `signature: [u8;64]` 升级为 `Signature` 类型（算法标识 + 字节序列），Phase 6 后量子密码迁移（ML-DSA / SLH-DSA）**不破坏审计事件格式**。`Signature` 类型定义见 [Doc 06 §13.2.1](06-system-services-roadmap.md)。
 
 ### 8.2 不可篡改保证
 
@@ -290,14 +313,14 @@ pub struct AuditEvent {
 
 ## 11. 待决策清单（Phase 5 前必须收敛）
 
-- [ ] ChannelRegistry 是否允许运行期注册（受信签名 manifest）
-- [ ] File Channel 的"扫描不通过 → 通知发起方"的协议（异步 IPC？）
-- [ ] Stream Channel 违规时的处置策略（截断 / 打码 / 熔断）
-- [ ] Security Gateway 失败是否熔断整个外交工具（强安全 vs 高可用）
-- [ ] 出站文件脱敏的规则集来源（内置 / 用户可配 / Agent 自描述）
-- [ ] 硬件加速是否纳入 Phase 5（首期建议软件实现，性能不达标再升级）
-- [ ] 跨 AI OS 编解码器标准化（Phase 6+）
-- [ ] 审计事件流是否经过内核（性能考量）vs 仅外交工具内部产生
+- [x] ~~ChannelRegistry 是否允许运行期注册（受信签名 manifest）~~ → **PROPOSED：首期仅编译期注册**；理由：减少攻击面（运行期注册引入动态代码加载风险）；Phase 6+ 再考虑受信签名 manifest
+- [x] ~~File Channel 的"扫描不通过 → 通知发起方"的协议~~ → **PROPOSED：异步 IPC Notification**；理由：扫描可能耗时（大文件），阻塞发起方不划算；发起方通过 Notification 异步接收扫描结果
+- [x] ~~Stream Channel 违规时的处置策略（截断 / 打码 / 熔断）~~ → **PROPOSED：熔断**（切断连接 + 冻结相关 Agent + 审计事件）；理由：流媒体违规（如敏感画面）风险高，截断 / 打码可能遗漏，熔断最安全
+- [x] ~~Security Gateway 失败是否熔断整个外交工具（强安全 vs 高可用）~~ → **PROPOSED：熔断整个外交工具**（强安全）；理由：安全网关是外交工具的核心不变量（"无外交即无网络"），网关失败意味着安全策略失效，必须熔断
+- [x] ~~出站文件脱敏的规则集来源（内置 / 用户可配 / Agent 自描述）~~ → **PROPOSED：首期内置 + 用户可配**；理由：内置覆盖常见 PII（身份证 / 手机号 / 邮箱），用户可配扩展自定义规则；Agent 自描述推迟至 Phase 6（需信任模型成熟）
+- [x] ~~硬件加速是否纳入 Phase 5~~ → **PROPOSED：不纳入**；理由：首期软件实现，性能基准测试后若 P99 > 10ms 再升级硬件加速（TLS offload / IPSec offload）
+- [ ] 跨 AI OS 编解码器标准化（Phase 6+）—— 远期，Phase 5 不决策
+- [x] ~~审计事件流是否经过内核（性能考量）vs 仅外交工具内部产生~~ → **PROPOSED：不经过内核**；理由：审计事件由外交工具内部产生（业务层事件），直接推送到审计服务（用户态进程），避免内核中转开销；内核事件（cap 校验 / IPC 元信息）由内核直接推送到审计服务（见 [Doc 03 §6.3](03-ipc-message-and-single-copy-path.md)），两条路径分离
 
 ---
 

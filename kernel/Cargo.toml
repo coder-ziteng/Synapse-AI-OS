@@ -11,22 +11,57 @@ publish     = false
 [[bin]]
 name = "synapse-kernel"
 path = "src/main.rs"
+test = false  # 不构建 bin 的 test 版本（避免 duplicate core lang item）
+
+# P1-T8: 集成测试 self-contained — 测试框架代码直接放在 tests/basic_boot.rs
+# （不创建 lib，避免与 main.rs 的 #[global_allocator] / C 运行时符号冲突）
 
 [dependencies]
-# HAL 依赖；P1-T7 后 UART 16550 走 HAL::SerialDevice trait 而非直接 uart_16550 crate
+# HAL 依赖；P1-T7 UART 走 HAL::SerialDevice trait
 synapse-hal = { path = "../hal" }
 
-# x86_64 寄存器/特权级辅助（ADR 00 §2 允许）
-# features = instructions 用于 hlt() / interrupts::without_interrupts
+# x86_64 寄存器/特权级辅助
 x86_64 = { version = "0.15", features = ["instructions"] }
 
-# 直接 UART 16550 驱动（P1-T2 占位；P1-T7 后改为 HAL 化路径）
+# UART 16550 底层驱动
 uart_16550 = "0.3"
 
-# P1-T2-bis 引入（multiboot2 头常量 + BIOS stage）：
-# multiboot2 = "0.21"
+# log facade（P1-T5）：info!/warn!/error! 等宏
+log = { version = "0.4", default-features = false }
+
+[features]
+# GUI 演示模式（xtask gui 专用）：内核完整播放一遍开机动画后定格、不走 smoke、
+# 不向 isa-debug-exit 关机 —— QEMU 窗口保留到用户手动关闭。
+# 无头 CI（xtask run/ci）不带此 feature，行为与之前完全一致。
+gui_demo = []
 
 [lints.rust]
 # 内核 entry / 内联汇编 / 中断处理需 unsafe；HAL 化后 unsafe 集中在 hal::arch 子模块
 unsafe_code = "allow"
 missing_docs = "warn"     # 核心 API 鼓励文档注释（rule 6）
+
+# ===== 内核集成层 (2026-09-26): cap/ipc/proc 纯逻辑 crate 接入 =====
+[dependencies.synapse-cap]
+path = "../cap"
+
+[dependencies.synapse-ipc]
+path = "../ipc"
+
+[dependencies.synapse-proc]
+path = "../proc"
+
+# ===== P3-T4 (2026-09-26): 调度纯逻辑 crate 接入（kthread 基建）=====
+[dependencies.synapse-sched]
+path = "../sched"
+
+# ===== P4-T3 (2026-09-27): 用户内存区域表（VMA）纯逻辑 crate 接入 =====
+[dependencies.synapse-vma]
+path = "../vma"
+
+# ===== P4-T4 (2026-09-27): syscall ABI 常量（SyscallId / ABI 版本号）=====
+[dependencies.synapse-abi]
+path = "../abi"
+
+# ===== P4-T5 (2026-09-27): ELF64 静态加载 + cpio newc initramfs 纯逻辑解析 =====
+[dependencies.synapse-elf]
+path = "../elf"

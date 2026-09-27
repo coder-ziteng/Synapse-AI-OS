@@ -4,15 +4,22 @@ version     = "0.1.0"
 edition.workspace     = true
 rust-version.workspace = true
 license.workspace      = true
-description = "Synapse 用户态库（initramfs 程序的运行时基础；Phase 1 占位）"
+description = "Synapse 用户态库（initramfs 程序运行时基础；Phase 4 syscall 包装层）"
 publish     = false
 
 [lib]
 path = "src/lib.rs"
 
-# Phase 4 起加入用户态 syscall ABI；P1-T1 仅占位
-# [dependencies]
+[dependencies]
+# 用户态仅复用：abi（SyscallId 号表 + decode）、cap（Rights / ObjRef / ObjKind）、
+# ipc（AgentId）。与内核 crate **完全解耦**——仅消费纯逻辑 API，不触碰
+# 表/对象/进程内状态（那是内核集成层职责）。
+synapse-abi = { path = "../abi" }
+synapse-cap = { path = "../cap" }
+synapse-ipc = { path = "../ipc" }
 
 [lints.rust]
-unsafe_code = "deny"      # 用户态 syscall 包装需例外
+# syscall 指令 (`syscall` / `int 0x80`) 与 `core::arch::asm!` 必须 unsafe；
+# 这是用户态 syscall 入口的唯二合法 unsafe 集中点（其它 API 一律 safe）。
+unsafe_code = "allow"
 missing_docs = "warn"

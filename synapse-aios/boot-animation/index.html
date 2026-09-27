@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#05070e">
+<title>Synapse AI-OS · Boot Sequence</title>
+<!--
+  Synapse AI-OS 开机动画 v2 — 「玄武 · 徽章」
+  风格：Bento Grid + Liquid Glass + FlatUI 徽章（去卡通化：无面孔/无四肢，几何印章语言）
+  单文件、可离线（字体缺失时回退系统栈）。
+  时间轴 ≈ 10.4s：卡片次第凝结 → 徽章描线 → 内核日志 → 进度 100% → SYSTEM ONLINE → 收束
+-->
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=DM+Sans:wght@300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap');
+
+/* ============ 设计令牌 ============ */
+:root {
+  --bg:        #05070e;
+  --cyan:      #4dd0e1;
+  --violet:    #7c4dff;
+  --mint:      #34d399;
+  --text:      #e6f4f7;
+  --dim:       rgba(230, 244, 247, .55);
+  --faint:     rgba(230, 244, 247, .32);
+  --hairline:  rgba(230, 244, 247, .09);
+  --glass:     rgba(255, 255, 255, .045);
+  --glass-hi:  rgba(255, 255, 255, .085);
+  --font-disp: 'Space Grotesk', 'DM Sans', -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', Consolas, monospace;
+  --ease-out:  cubic-bezier(.16, 1, .3, 1);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%; height: 100%;
+  background: var(--bg);
+  overflow: hidden;
+  font-family: var(--font-disp);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+body.idle { cursor: none; }
+
+/* ============ 背景：极光 + 技术网格 + 暗角 ============ */
+.bg-layer { position: fixed; inset: 0; pointer-events: none; }
+
+.aurora { z-index: 0; opacity: 0; animation: auroraIn 1.6s ease .1s forwards; }
+@keyframes auroraIn { to { opacity: 1; } }
+
+.blob { position: absolute; border-radius: 50%; filter: blur(10px); will-change: transform; }
+.blob-a {
+  width: 62vmax; height: 62vmax; top: -24vmax; left: -18vmax;
+  background: radial-gradient(closest-side, rgba(77,208,225,.15), transparent 70%);
+  animation: driftA 34s ease-in-out infinite alternate;
+}
+.blob-b {
+  width: 56vmax; height: 56vmax; bottom: -22vmax; right: -16vmax;
+  background: radial-gradient(closest-side, rgba(124,77,255,.13), transparent 70%);
+  animation: driftB 40s ease-in-out infinite alternate;
+}
+.blob-c {
+  width: 44vmax; height: 44vmax; top: 32%; left: 44%;
+  background: radial-gradient(closest-side, rgba(30,64,120,.16), transparent 70%);
+  animation: driftA 28s ease-in-out infinite alternate-reverse;
+}
+@keyframes driftA { from { transform: translate(0, 0) scale(1); } to { transform: translate(7vmax, 4vmax) scale(1.12); } }
+@keyframes driftB { from { transform: translate(0, 0) scale(1.05); } to { transform: translate(-6vmax, -5vmax) scale(.95); } }
+
+.grid-lines {
+  z-index: 1;
+  background:
+    linear-gradient(rgba(77,208,225,.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(77,208,225,.03) 1px, transparent 1px);
+  background-size: 64px 64px;
+  -webkit-mask-image: radial-gradient(120% 100% at 50% 42%, #000 30%, transparent 72%);
+          mask-image: radial-gradient(120% 100% at 50% 42%, #000 30%, transparent 72%);
+  opacity: 0; animation: auroraIn 2s ease .5s forwards;
+}
+
+.vignette {
+  z-index: 2;
+  background: radial-gradient(130% 120% at 50% 40%, transparent 52%, rgba(2,4,9,.78) 100%);
+}
+
+/* ============ Bento Grid 布局 ============ */
+.bento {
+  position: fixed; inset: 0; z-index: 3;
+  display: grid;
+  grid-template-columns: 1.1fr 1.1fr 1fr 1fr;
+  grid-template-rows: 64px minmax(330px, 1fr) 108px;
+  grid-template-areas:
+    "brand  brand  status clock"
+    "hero   hero   log    log"
+    "vitals vitals prog   prog";
+  gap: 16px;
+  max-width: 1080px;
+  max-height: 660px;
+  margin: auto;
+  padding: 0 24px;
+  width: 100%; height: 100%;
+}
+
+/* ============ Liquid Glass 卡片 ============ */
+.card {
+  position: relative;
+  background: var(--glass);
+  border: 1px solid var(--glass-hi);
+  border-radius: 18px;
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  box-shadow: 0 16px 48px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.06);
+  padding: 16px 20px;
+  opacity: 0;
+  transform: translateY(16px);
+  animation: cardIn .75s var(--ease-out) forwards;
+  overflow: hidden;
+}
+/* 玻璃顶部高光 */
+.card::before {
+  content: ''; position: absolute; inset: 0 0 auto 0; height: 44%;
+  background: linear-gradient(180deg, rgba(255,255,255,.05), transparent);
+  pointer-events: none;
+}
+@keyframes cardIn { to { opacity: 1; transform: translateY(0); } }
+
+.c-brand  { grid-area: brand;  animation-delay: .50s; display: flex; align-items: center; gap: 14px; }
+.c-status { grid-area: status; animation-delay: .65s; display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+.c-clock  { grid-area: clock;  animation-delay: .80s; display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+.c-hero   { grid-area: hero;   animation-delay: .95s; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
+.c-log    { grid-area: log;    animation-delay: 1.15s; display: flex; flex-direction: column; }
+.c-vitals { grid-area: vitals; animation-delay: 1.35s; display: flex; align-items: center; }
+.c-prog   { grid-area: prog;   animation-delay: 1.55s; display: flex; flex-direction: column; justify-content: center; gap: 10px; }
+
+/* hero 卡片一次性镜面扫光 */
+.c-hero::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(115deg, transparent 34%, rgba(255,255,255,.075) 47%, transparent 60%);
+  background-size: 260% 100%;
+  background-position: 160% 0;
+  animation: sheen 1.7s ease 2.1s forwards;
+  pointer-events: none;
+}
+@keyframes sheen { to { background-position: -60% 0; } }
+
+/* ============ 卡片内通用元素 ============ */
+.label {
+  font-size: 9.5px; font-weight: 500;
+  letter-spacing: .30em; color: var(--faint);
+  text-transform: uppercase;
+}
+
+/* --- Brand --- */
+.brand-mark { width: 30px; height: 30px; flex: none; opacity: 0; animation: cardIn .6s ease 1.9s forwards; }
+.brand-name {
+  font-size: 15px; font-weight: 600; letter-spacing: .34em; color: var(--text);
+  opacity: 0; animation: cardIn .8s ease 1.7s forwards;
+}
+.brand-name em { font-style: normal; color: var(--cyan); }
+.chip {
+  font-family: var(--font-mono); font-size: 9px; letter-spacing: .14em;
+  color: rgba(77,208,225,.85);
+  border: 1px solid rgba(77,208,225,.28);
+  background: rgba(77,208,225,.06);
+  border-radius: 999px; padding: 4px 10px;
+  opacity: 0; animation: cardIn .8s ease 2.0s forwards;
+}
+.brand-spacer { flex: 1; }
+.brand-sub {
+  font-size: 9.5px; letter-spacing: .30em; color: var(--faint);
+  opacity: 0; animation: cardIn .8s ease 2.2s forwards;
+}
+
+/* --- Status pill --- */
+.pill {
+  display: inline-flex; align-items: center; gap: 9px;
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: .22em;
+  color: rgba(77,208,225,.9);
+  border: 1px solid rgba(77,208,225,.25);
+  background: rgba(77,208,225,.05);
+  padding: 7px 14px; border-radius: 999px;
+  width: max-content;
+  transition: color .6s ease, border-color .6s ease, background .6s ease;
+  opacity: 0; animation: cardIn .6s ease 1.3s forwards;
+}
+.pill .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 8px rgba(77,208,225,.8);
+  animation: blink 1.4s ease-in-out infinite;
+}
+@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+.pill.online {
+  color: rgba(52,211,153,.95);
+  border-color: rgba(52,211,153,.3);
+  background: rgba(52,211,153,.06);
+}
+.pill.online .dot { background: var(--mint); box-shadow: 0 0 8px rgba(52,211,153,.7); animation: none; }
+
+/* --- Clock --- */
+.clock-val {
+  font-family: var(--font-mono); font-size: 21px; font-weight: 300;
+  letter-spacing: .06em; color: var(--text);
+  font-variant-numeric: tabular-nums;
+  opacity: 0; animation: cardIn .6s ease 1.5s forwards;
+}
+.clock-val small { font-size: 11px; color: var(--faint); margin-left: 4px; letter-spacing: .1em; }
+
+/* --- Hero：徽章 --- */
+.emblem-stage { position: relative; width: min(340px, 46vh); opacity: 0; animation: cardIn .9s ease 1.5s forwards; }
+.emblem-stage svg { width: 100%; height: auto; display: block; }
+
+.hero-caption {
+  display: flex; align-items: center; gap: 16px;
+  opacity: 0; animation: cardIn .9s ease 4.3s forwards;
+}
+.hero-caption .line { width: 44px; height: 1px; background: linear-gradient(90deg, transparent, rgba(77,208,225,.5)); }
+.hero-caption .line:last-child { background: linear-gradient(90deg, rgba(124,77,255,.5), transparent); }
+.hero-caption .txt { font-size: 12px; font-weight: 500; letter-spacing: .44em; color: var(--dim); text-indent: .44em; }
+
+/* 徽章角落刻度（仪表感） */
+.hero-tick { position: absolute; width: 10px; height: 10px; opacity: 0; animation: cardIn .8s ease 3.9s forwards; }
+.hero-tick.tl { top: 12px; left: 12px; border-top: 1px solid rgba(77,208,225,.4); border-left: 1px solid rgba(77,208,225,.4); }
+.hero-tick.tr { top: 12px; right: 12px; border-top: 1px solid rgba(77,208,225,.4); border-right: 1px solid rgba(77,208,225,.4); }
+.hero-tick.bl { bottom: 12px; left: 12px; border-bottom: 1px solid rgba(124,77,255,.4); border-left: 1px solid rgba(124,77,255,.4); }
+.hero-tick.br { bottom: 12px; right: 12px; border-bottom: 1px solid rgba(124,77,255,.4); border-right: 1px solid rgba(124,77,255,.4); }
+
+/* --- Log --- */
+.log-head { display: flex; justify-content: space-between; align-items: baseline; padding-bottom: 10px; border-bottom: 1px solid var(--hairline); margin-bottom: 10px; }
+.log-head .dev { font-family: var(--font-mono); font-size: 9px; color: var(--faint); letter-spacing: .12em; }
+.log-body { flex: 1; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+.log-line {
+  font-family: var(--font-mono); font-size: 11px; line-height: 2.0;
+  color: rgba(230,244,247,.72); white-space: nowrap;
+  opacity: 0; transform: translateY(6px);
+  transition: opacity .45s ease, transform .45s var(--ease-out);
+}
+.log-line.show { opacity: 1; transform: none; }
+.log-line .ts { color: var(--faint); margin-right: 10px; }
+.log-line .ok   { color: rgba(77,208,225,.95); }
+.log-line .info { color: rgba(167,139,250,.95); }
+.log-line .hi   { color: var(--text); }
+
+/* --- Vitals --- */
+.vitals-row { display: flex; gap: 0; width: 100%; }
+.vital { flex: 1; padding: 0 18px; opacity: 0; animation: cardIn .7s ease forwards; }
+.vital:first-child { padding-left: 0; }
+.vital + .vital { border-left: 1px solid var(--hairline); }
+.vital:nth-child(1) { animation-delay: 1.9s; }
+.vital:nth-child(2) { animation-delay: 2.05s; }
+.vital:nth-child(3) { animation-delay: 2.2s; }
+.vital .v-name { font-size: 9px; letter-spacing: .26em; color: var(--faint); margin-bottom: 10px; text-transform: uppercase; }
+.vital .v-num { font-family: var(--font-mono); font-size: 17px; font-weight: 400; color: var(--text); font-variant-numeric: tabular-nums; margin-bottom: 9px; }
+.vital .v-num small { font-size: 9.5px; color: var(--faint); margin-left: 3px; }
+.vbar { height: 3px; border-radius: 2px; background: rgba(230,244,247,.08); overflow: hidden; }
+.vbar i { display: block; height: 100%; width: 0; border-radius: 2px; transition: width .18s linear; }
+.v1c .vbar i { background: linear-gradient(90deg, rgba(77,208,225,.55), var(--cyan)); }
+.v2c .vbar i { background: linear-gradient(90deg, rgba(124,77,255,.5), #9a7bff); }
+.v3c .vbar i { background: linear-gradient(90deg, rgba(52,211,153,.45), var(--mint)); }
+
+/* --- Progress --- */
+.prog-head { display: flex; justify-content: space-between; align-items: baseline; }
+.prog-stage { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .26em; color: rgba(77,208,225,.75); }
+.prog-pct { font-family: var(--font-mono); font-size: 20px; font-weight: 300; color: var(--text); font-variant-numeric: tabular-nums; }
+.prog-pct small { font-size: 10px; color: var(--faint); margin-left: 2px; }
+.prog-track { position: relative; height: 2px; background: rgba(77,208,225,.12); border-radius: 1px; overflow: visible; }
+.prog-fill {
+  position: absolute; inset: 0; width: 0;
+  background: linear-gradient(90deg, var(--cyan), var(--violet));
+  border-radius: 1px;
+  box-shadow: 0 0 12px rgba(77,208,225,.45);
+}
+.prog-fill::after {
+  content: ''; position: absolute; right: -3px; top: -2px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #c9f4fb; box-shadow: 0 0 10px var(--cyan);
+}
+.prog-scale { display: flex; justify-content: space-between; }
+.prog-scale span { font-family: var(--font-mono); font-size: 8px; color: rgba(230,244,247,.22); letter-spacing: .1em; }
+
+/* ============ 徽章 SVG 动画（描线 / 显影 / 呼吸） ============ */
+.e-ring-outer { opacity: 0; animation: fadeIn .9s ease 1.55s forwards, spin 96s linear 1.55s infinite; transform-origin: 120px 120px; }
+.e-ring-inner { opacity: 0; animation: fadeIn .9s ease 1.7s forwards; }
+@keyframes fadeIn { to { opacity: 1; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.e-hex { stroke-dasharray: 520; stroke-dashoffset: 520; animation: draw 1.5s var(--ease-out) 1.75s forwards; }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+
+.e-facet { opacity: 0; animation: facetIn .7s ease forwards; }
+@keyframes facetIn { to { opacity: 1; } }
+.e-facet.f0 { animation-delay: 2.45s; } .e-facet.f1 { animation-delay: 2.55s; }
+.e-facet.f2 { animation-delay: 2.65s; } .e-facet.f3 { animation-delay: 2.75s; }
+.e-facet.f4 { animation-delay: 2.85s; } .e-facet.f5 { animation-delay: 2.95s; }
+
+.e-spoke { stroke-dasharray: 46; stroke-dashoffset: 46; animation: draw .6s ease forwards; }
+.e-spoke.s0 { animation-delay: 2.9s; } .e-spoke.s1 { animation-delay: 2.97s; }
+.e-spoke.s2 { animation-delay: 3.04s; } .e-spoke.s3 { animation-delay: 3.11s; }
+.e-spoke.s4 { animation-delay: 3.18s; } .e-spoke.s5 { animation-delay: 3.25s; }
+
+.e-ray { stroke-dasharray: 14; stroke-dashoffset: 14; animation: draw .5s ease forwards; }
+.e-ray.r0 { animation-delay: 3.15s; } .e-ray.r1 { animation-delay: 3.22s; }
+.e-ray.r2 { animation-delay: 3.29s; } .e-ray.r3 { animation-delay: 3.36s; }
+.e-ray.r4 { animation-delay: 3.43s; } .e-ray.r5 { animation-delay: 3.5s; }
+.e-ray-dot { opacity: 0; animation: fadeIn .5s ease forwards; }
+.e-ray-dot.r0 { animation-delay: 3.5s; } .e-ray-dot.r1 { animation-delay: 3.57s; }
+.e-ray-dot.r2 { animation-delay: 3.64s; } .e-ray-dot.r3 { animation-delay: 3.71s; }
+.e-ray-dot.r4 { animation-delay: 3.78s; } .e-ray-dot.r5 { animation-delay: 3.85s; }
+
+.e-orbit { stroke-dasharray: 0 520; animation: orbitDraw 1.5s var(--ease-out) 2.7s forwards; }
+@keyframes orbitDraw { to { stroke-dasharray: 428 92; } }
+.e-orbit-node { opacity: 0; animation: fadeIn .6s ease 3.9s forwards; }
+
+.e-core-ring { stroke-dasharray: 3 9; opacity: 0; animation: fadeIn .6s ease 3.5s forwards, spin 16s linear 3.5s infinite reverse; transform-origin: 120px 120px; }
+.e-core { opacity: 0; transform-origin: 120px 120px; animation: coreIn .8s var(--ease-out) 3.35s forwards; }
+@keyframes coreIn { from { opacity: 0; transform: scale(.4); } to { opacity: 1; transform: scale(1); } }
+.e-core-pulse { transform-origin: 120px 120px; animation: breathe 3.6s ease-in-out 4.2s infinite; }
+@keyframes breathe { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.055); opacity: .88; } }
+
+/* ============ 收束：卡片退场 → READY 帧 ============ */
+.seq-exit .card { animation: cardOut .85s ease forwards; }
+.seq-exit .c-vitals, .seq-exit .c-prog  { animation-delay: 0s; }
+.seq-exit .c-log, .seq-exit .c-clock    { animation-delay: .10s; }
+.seq-exit .c-hero, .seq-exit .c-status  { animation-delay: .20s; }
+.seq-exit .c-brand                      { animation-delay: .30s; }
+@keyframes cardOut { to { opacity: 0; transform: translateY(-10px); filter: blur(8px); } }
+.seq-exit .aurora { animation: auroraOut 1.4s ease .3s forwards; }
+@keyframes auroraOut { to { opacity: .25; } }
+
+.ready-frame {
+  position: fixed; inset: 0; z-index: 6;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
+  opacity: 0; pointer-events: none;
+}
+.ready-frame.show { animation: fadeIn 1s ease forwards; }
+.ready-frame .mark { width: 56px; }
+.ready-frame .mark svg { width: 100%; height: auto; }
+.ready-name { font-size: 13px; font-weight: 500; letter-spacing: .5em; text-indent: .5em; color: var(--dim); }
+.ready-sub { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .3em; color: var(--faint); display: flex; align-items: center; gap: 12px; }
+.ready-sub .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 8px rgba(52,211,153,.6); }
+
+/* ============ 重播 ============ */
+.replay {
+  position: fixed; top: 22px; right: 26px; z-index: 10;
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: .22em;
+  color: var(--dim);
+  background: rgba(255,255,255,.04);
+  border: 1px solid var(--glass-hi);
+  border-radius: 999px; padding: 9px 16px;
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  cursor: pointer; opacity: 0; pointer-events: none;
+  transition: color .25s ease, border-color .25s ease, background .25s ease;
+}
+.replay.show { animation: fadeIn .8s ease forwards; pointer-events: auto; }
+.replay:hover { color: var(--cyan); border-color: rgba(77,208,225,.4); background: rgba(77,208,225,.07); }
+.replay svg { width: 12px; height: 12px; }
+
+/* ============ 响应式 ============ */
+@media (max-width: 920px), (max-height: 560px) {
+  .bento {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 56px auto auto auto auto;
+    grid-template-areas:
+      "brand  brand"
+      "status clock"
+      "hero   hero"
+      "log    log"
+      "vitals prog";
+    max-height: none; height: auto; min-height: 100%;
+    align-content: center; padding: 20px;
+  }
+  body { overflow: auto; }
+  .emblem-stage { width: min(260px, 38vh); }
+}
+
+/* ============ 无障碍：减弱动态 ============ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+  .card, .emblem-stage, .pill, .brand-name, .chip, .clock-val,
+  .hero-caption, .hero-tick, .vital, .e-facet, .e-ray-dot, .e-orbit-node, .e-core { opacity: 1 !important; transform: none !important; }
+  .e-hex, .e-spoke, .e-ray { stroke-dashoffset: 0 !important; }
+  .e-orbit { stroke-dasharray: 428 92 !important; }
+}
+</style>
+</head>
+<body>
+
+<!-- 背景层 -->
+<div class="bg-layer aurora">
+  <div class="blob blob-a"></div>
+  <div class="blob blob-b"></div>
+  <div class="blob blob-c"></div>
+</div>
+<div class="bg-layer grid-lines"></div>
+<div class="bg-layer vignette"></div>
+
+<!-- ============ 徽章符号定义（<symbol> 供主舞台与 READY 帧复用） ============ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="xw-orbit-grad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#4dd0e1" stop-opacity=".15"/>
+      <stop offset="30%"  stop-color="#4dd0e1"/>
+      <stop offset="70%"  stop-color="#7c4dff"/>
+      <stop offset="100%" stop-color="#7c4dff" stop-opacity=".15"/>
+    </linearGradient>
+  </defs>
+  <symbol id="xw-emblem" viewBox="0 0 240 240">
+    <!-- 外圈刻度环（缓转） -->
+    <circle class="e-ring-outer" cx="120" cy="120" r="112" fill="none"
+            stroke="rgba(77,208,225,.22)" stroke-width="1" stroke-dasharray="2 7"/>
+    <circle class="e-ring-inner" cx="120" cy="120" r="104" fill="none"
+            stroke="rgba(230,244,247,.07)" stroke-width="1"/>
+
+    <!-- 神经突触放射线（顶点 → 环外，末端节点） -->
+    <g stroke="rgba(77,208,225,.5)" stroke-width="1" stroke-linecap="round">
+      <line class="e-ray r0" x1="120"   y1="28" x2="120"   y2="16"/>
+      <line class="e-ray r1" x1="199.7" y1="74" x2="210.1" y2="68"/>
+      <line class="e-ray r2" x1="199.7" y1="166" x2="210.1" y2="172"/>
+      <line class="e-ray r3" x1="120"   y1="212" x2="120"   y2="224"/>
+      <line class="e-ray r4" x1="40.3"  y1="166" x2="29.9"  y2="172"/>
+      <line class="e-ray r5" x1="40.3"  y1="74" x2="29.9"   y2="68"/>
+    </g>
+    <g fill="#4dd0e1">
+      <circle class="e-ray-dot r0" cx="120"   cy="12"    r="2"/>
+      <circle class="e-ray-dot r1" cx="213.6" cy="66"    r="2"/>
+      <circle class="e-ray-dot r2" cx="213.6" cy="174"   r="2"/>
+      <circle class="e-ray-dot r3" cx="120"   cy="228"   r="2"/>
+      <circle class="e-ray-dot r4" cx="26.4"  cy="174"   r="2"/>
+      <circle class="e-ray-dot r5" cx="26.4"  cy="66"    r="2"/>
+    </g>
+
+    <!-- 灵蛇轨道（抽象化：无头无眼的倾斜椭圆弧，从壳后穿过） -->
+    <g transform="rotate(-18 120 120)">
+      <ellipse class="e-orbit" cx="120" cy="120" rx="100" ry="60" fill="none"
+               stroke="url(#xw-orbit-grad)" stroke-width="3" stroke-linecap="round"
+               pathLength="520"/>
+      <circle class="e-orbit-node" cx="206.6" cy="150" r="2.6" fill="#9a7bff"/>
+    </g>
+
+    <!-- 龟壳：六边形甲片（FlatUI 明暗阶差，无渐变） -->
+    <polygon points="120,32 196.2,76 196.2,164 120,208 43.8,164 43.8,76" fill="#0a1120"/>
+    <g stroke="rgba(77,208,225,.13)" stroke-width="1">
+      <polygon class="e-facet f0" points="120,32 196.2,76 159.8,97 120,74"       fill="#0c1526"/>
+      <polygon class="e-facet f1" points="196.2,76 196.2,164 159.8,143 159.8,97" fill="#0f1b30"/>
+      <polygon class="e-facet f2" points="196.2,164 120,208 120,166 159.8,143"   fill="#0c1526"/>
+      <polygon class="e-facet f3" points="120,208 43.8,164 80.2,143 120,166"     fill="#0f1b30"/>
+      <polygon class="e-facet f4" points="43.8,164 43.8,76 80.2,97 80.2,143"     fill="#0c1526"/>
+      <polygon class="e-facet f5" points="43.8,76 120,32 120,74 80.2,97"         fill="#0f1b30"/>
+    </g>
+    <g stroke="rgba(77,208,225,.2)" stroke-width="1">
+      <line class="e-spoke s0" x1="120"   y1="74"  x2="120"   y2="32"/>
+      <line class="e-spoke s1" x1="159.8" y1="97"  x2="196.2" y2="76"/>
+      <line class="e-spoke s2" x1="159.8" y1="143" x2="196.2" y2="164"/>
+      <line class="e-spoke s3" x1="120"   y1="166" x2="120"   y2="208"/>
+      <line class="e-spoke s4" x1="80.2"  y1="143" x2="43.8"  y2="164"/>
+      <line class="e-spoke s5" x1="80.2"  y1="97"  x2="43.8"  y2="76"/>
+    </g>
+    <polygon class="e-facet f1" points="120,74 159.8,97 159.8,143 120,166 80.2,143 80.2,97"
+             fill="#111e36" stroke="rgba(77,208,225,.35)" stroke-width="1"/>
+    <!-- 壳轮廓最后描线（压在甲片之上） -->
+    <polygon class="e-hex" points="120,32 196.2,76 196.2,164 120,208 43.8,164 43.8,76"
+             fill="none" stroke="rgba(77,208,225,.6)" stroke-width="1.6"
+             stroke-linejoin="round" pathLength="520"/>
+
+    <!-- 中心能量核（AI 之心） -->
+    <circle class="e-core-ring" cx="120" cy="120" r="21" fill="none"
+            stroke="rgba(77,208,225,.5)" stroke-width="1"/>
+    <g class="e-core">
+      <g class="e-core-pulse">
+        <circle cx="120" cy="120" r="12.5" fill="#060b14" stroke="#4dd0e1" stroke-width="1.3"/>
+        <circle cx="120" cy="120" r="4.6" fill="#dff6fa"/>
+        <circle cx="120" cy="120" r="1.6" fill="#0a1120"/>
+      </g>
+    </g>
+  </symbol>
+</svg>
+
+<!-- ============ Bento 主网格 ============ -->
+<main class="bento">
+
+  <!-- Brand -->
+  <section class="card c-brand" aria-label="Brand">
+    <span class="brand-mark"><svg viewBox="0 0 240 240" aria-hidden="true"><use href="#xw-emblem"/></svg></span>
+    <span class="brand-name">SYNAPSE <em>AI-OS</em></span>
+    <span class="chip">v0.1 · PHASE-1</span>
+    <span class="brand-spacer"></span>
+    <span class="brand-sub">XUANWU EDITION</span>
+  </section>
+
+  <!-- Kernel status -->
+  <section class="card c-status" aria-label="Kernel status">
+    <span class="label">Kernel State</span>
+    <span class="pill" id="pill"><span class="dot"></span><span id="pill-txt">BOOTING</span></span>
+  </section>
+
+  <!-- Uptime -->
+  <section class="card c-clock" aria-label="Uptime">
+    <span class="label">Uptime</span>
+    <span class="clock-val" id="uptime">0.00<small>s</small></span>
+  </section>
+
+  <!-- Hero: emblem -->
+  <section class="card c-hero" aria-label="Xuanwu emblem">
+    <span class="hero-tick tl"></span><span class="hero-tick tr"></span>
+    <span class="hero-tick bl"></span><span class="hero-tick br"></span>
+    <div class="emblem-stage">
+      <svg viewBox="0 0 240 240" role="img" aria-label="Synapse AI-OS 玄武徽章"><use href="#xw-emblem"/></svg>
+    </div>
+    <div class="hero-caption">
+      <span class="line"></span><span class="txt">玄武 · XUANWU</span><span class="line"></span>
+    </div>
+  </section>
+
+  <!-- Boot log -->
+  <section class="card c-log" aria-label="Boot log">
+    <div class="log-head">
+      <span class="label">Boot Log</span>
+      <span class="dev">COM1 · 115200 8N1</span>
+    </div>
+    <div class="log-body" id="log-body"></div>
+  </section>
+
+  <!-- Vitals -->
+  <section class="card c-vitals" aria-label="System vitals">
+    <div class="vitals-row">
+      <div class="vital v1c">
+        <div class="v-name">Neural Load</div>
+        <div class="v-num"><span data-v>0</span><small>%</small></div>
+        <div class="vbar"><i data-bar data-to="78"></i></div>
+      </div>
+      <div class="vital v2c">
+        <div class="v-name">Memory</div>
+        <div class="v-num"><span data-v>0.0</span><small>/ 16 GB</small></div>
+        <div class="vbar"><i data-bar data-to="12"></i></div>
+      </div>
+      <div class="vital v3c">
+        <div class="v-name">Synapse Sync</div>
+        <div class="v-num"><span data-v>0</span><small>%</small></div>
+        <div class="vbar"><i data-bar data-to="100"></i></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Progress -->
+  <section class="card c-prog" aria-label="Boot progress">
+    <div class="prog-head">
+      <span class="prog-stage" id="prog-stage">STANDBY</span>
+      <span class="prog-pct"><span id="prog-num">0</span><small>%</small></span>
+    </div>
+    <div class="prog-track"><div class="prog-fill" id="prog-fill"></div></div>
+    <div class="prog-scale"><span>LOADER</span><span>KERNEL</span><span>DRIVERS</span><span>SERVICES</span><span>READY</span></div>
+  </section>
+
+</main>
+
+<!-- ============ READY 收束帧 ============ -->
+<div class="ready-frame" id="ready-frame">
+  <span class="mark"><svg viewBox="0 0 240 240" aria-hidden="true"><use href="#xw-emblem"/></svg></span>
+  <span class="ready-name">SYNAPSE AI-OS</span>
+  <span class="ready-sub"><span class="dot"></span>SYSTEM READY · XUANWU NEURAL CORE ONLINE</span>
+</div>
+
+<!-- ============ 重播 ============ -->
+<button class="replay" id="replay" aria-label="Replay boot animation">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/>
+  </svg>
+  REPLAY
+</button>
+
+<script>
+'use strict';
+
+/* ============ 内核日志（取材真实 Synapse 启动序列） ============ */
+const LOGS = [
+  { t: 1.95, ts: '0.031', html: '<span class="ok">[ OK ]</span> stage2 · EDD read ok, A20 gate opened' },
+  { t: 2.38, ts: '0.058', html: '<span class="ok">[ OK ]</span> long mode entered · identity-map 0–4 GiB' },
+  { t: 2.81, ts: '0.112', html: '<span class="ok">[ OK ]</span> kernel 5.1 MiB loaded @ 0x200000' },
+  { t: 3.24, ts: '0.190', html: '<span class="info">[INFO]</span> serial COM1 online · 115200 8N1' },
+  { t: 3.67, ts: '0.244', html: '<span class="ok">[ OK ]</span> GDT / TSS loaded · IST1 double-fault armed' },
+  { t: 4.10, ts: '0.301', html: '<span class="ok">[ OK ]</span> IDT 256 vectors · #PF #GP #DF handlers set' },
+  { t: 4.53, ts: '0.418', html: '<span class="ok">[ OK ]</span> PIC remapped · PIT 100 Hz IRQ0 ticking' },
+  { t: 4.96, ts: '0.527', html: '<span class="ok">[ OK ]</span> heap online · first-fit 4096 KiB pool' },
+  { t: 5.39, ts: '0.640', html: '<span class="info">[INFO]</span> TSC calibrated 3.199 GHz (PIT cross-check)' },
+  { t: 5.82, ts: '0.702', html: '<span class="hi">[ ** ]</span> smoke: <span class="hi">57/57</span> checks passed' },
+  { t: 6.25, ts: '0.815', html: '<span class="ok">[ OK ]</span> agent runtime ready — awaiting intent' },
+];
+
+const logBody = document.getElementById('log-body');
+LOGS.forEach(l => {
+  setTimeout(() => {
+    const el = document.createElement('div');
+    el.className = 'log-line';
+    el.innerHTML = `<span class="ts">[${l.ts.padStart(7, ' ')}]</span>${l.html}`;
+    logBody.appendChild(el);
+    requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('show')));
+    while (logBody.children.length > 11) logBody.removeChild(logBody.firstChild);
+  }, l.t * 1000);
+});
+
+/* ============ Uptime 实时计数 ============ */
+const uptimeEl = document.getElementById('uptime');
+const T0 = performance.now() + 1200;
+function tickUptime(now) {
+  const s = Math.max(0, (now - T0) / 1000);
+  uptimeEl.innerHTML = s.toFixed(2) + '<small>s</small>';
+  if (s < 9.2) requestAnimationFrame(tickUptime);
+}
+requestAnimationFrame(tickUptime);
+
+/* ============ Vitals 计数 + 条形 ============ */
+const vitals = [...document.querySelectorAll('.vital')].map(v => ({
+  num: v.querySelector('[data-v]'),
+  bar: v.querySelector('[data-bar]'),
+  to: parseFloat(v.querySelector('[data-bar]').dataset.to),
+  decimal: v.querySelector('[data-v]').textContent.includes('.') || v.classList.contains('v2c'),
+}));
+function runVitals() {
+  const start = performance.now(), dur = 2400;
+  (function tick(now) {
+    const t = Math.min(1, (now - start) / dur);
+    const e = 1 - Math.pow(1 - t, 3); // easeOutCubic
+    vitals.forEach(v => {
+      const val = v.to * e;
+      v.num.textContent = v.decimal ? (val / 16 * 1.9).toFixed(1) : Math.round(val);
+      v.bar.style.width = val + '%';
+    });
+    if (t < 1) requestAnimationFrame(tick);
+  })(start);
+}
+setTimeout(runVitals, 2400);
+
+/* ============ 进度条 + 阶段标签 ============ */
+const STAGES = [[0, 'LOADER'], [18, 'KERNEL'], [48, 'DRIVERS'], [76, 'SERVICES'], [100, 'READY']];
+const fillEl = document.getElementById('prog-fill');
+const numEl = document.getElementById('prog-num');
+const stageEl = document.getElementById('prog-stage');
+function runProgress() {
+  const start = performance.now(), dur = 3200;
+  (function tick(now) {
+    const t = Math.min(1, (now - start) / dur);
+    // 缓入缓出 + 微台阶（真实启动的非线性感）
+    const e = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const pct = Math.round(e * 100);
+    fillEl.style.width = pct + '%';
+    numEl.textContent = pct;
+    for (let i = STAGES.length - 1; i >= 0; i--) {
+      if (pct >= STAGES[i][0]) { stageEl.textContent = STAGES[i][1]; break; }
+    }
+    if (t < 1) requestAnimationFrame(tick);
+  })(start);
+}
+setTimeout(runProgress, 5200);
+
+/* ============ 状态切换 & 收束 ============ */
+setTimeout(() => {
+  document.getElementById('pill').classList.add('online');
+  document.getElementById('pill-txt').textContent = 'SYSTEM ONLINE';
+}, 8200);
+
+setTimeout(() => document.body.classList.add('seq-exit'), 8800);
+setTimeout(() => document.getElementById('ready-frame').classList.add('show'), 9700);
+setTimeout(() => document.getElementById('replay').classList.add('show'), 10400);
+
+document.getElementById('replay').addEventListener('click', () => location.reload());
+
+/* ============ 光标闲置隐藏 ============ */
+let idleTimer = null;
+function wakeCursor() {
+  document.body.classList.remove('idle');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => document.body.classList.add('idle'), 2200);
+}
+document.addEventListener('mousemove', wakeCursor);
+wakeCursor();
+</script>
+</body>
+</html>

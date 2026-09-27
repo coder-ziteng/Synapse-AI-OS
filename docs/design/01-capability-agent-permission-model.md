@@ -1,6 +1,6 @@
 # 设计文档 01：Capability 与 Agent 权限模型
 
-> 状态：DRAFT / 设计细化（含五级权限映射、审计钩子、唯一网络出口不变量）
+> 状态：**PROPOSED 完成**（待确认升级为 DECIDED）
 > 关联需求：NFR3 安全性、IPC `capability_token`、FR6/FR9
 > 关联里程碑：Phase 4（用户态与 IPC）
 > 最后更新：2026-09-25
@@ -11,7 +11,18 @@
 
 定义 Synapse 内核的**能力（Capability）系统**与 **Agent 权限模型**。这是 Synapse "AI 原生 + 安全" 定位的核心卖点，也是与 Linux（DAC/MAC）拉开差距的关键。本文档回答：一个 token 由谁铸造、存在哪里、如何校验、如何委托与撤销。
 
-> ⚠️ 本文档为骨架，各章节列出**待决策问题（TBD）**，需在 Phase 4 开工前填充。
+### PROPOSED 决策汇总
+
+| 决策项 | PROPOSED 方案 | 章节 |
+|--------|--------------|------|
+| 根 capability 铸造 | init 进程全量铸造（与 HAL 分离）| §3.1 |
+| 撤销算法 | derivation tree 遍历（seL4 风格）| §3.4 |
+| 委托语义 | 保留父子链（用于撤销）| §3.3 |
+| 数据结构 | Capability.parent + CapTable 256 槽 + CapRef=u8 | §4 |
+| 对象生命周期 | Live→Revoking→Retired→Freed 状态机 + generation 校验 | §4.2 |
+| agent_id 管理 | init 进程统一管理命名空间 | §7 |
+
+> ✅ Phase 4 核心设计决策已完成，剩余 TBD 为安全评审/性能基准相关。
 
 ---
 
@@ -59,7 +70,16 @@
 ```
 
 ### 3.1 铸造（Mint）
-- 谁有权铸造根能力？**TBD**（候选：内核启动时为 init 进程铸造全部根能力；或每个设备在 HAL 注册时铸造）。
+- 谁有权铸造根能力？**PROPOSED → init 进程全量铸造**（候选之二：HAL 分散铸造）。
+  - **理由**：
+    - **单一责任源**：所有能力均从 init 的根能力派生，撤销链路 / 委托链可全局追踪；
+    - **对齐 seL4 模型**：seL4 用 root task（即 init 进程）持有全部根能力，再由 root task 通过 spawn + delegate 分配给其他用户态服务——经过形式化验证的设计；
+    - **避免 HAL 分散铸造的复杂度**：HAL 分散铸造引入"多源能力管理"问题（哪个设备铸造了哪些能力、跨设备能力的依赖关系），对微内核收益不抵成本。
+  - **init 进程职责**：
+    1. 内核启动时，内核**仅为 init 进程**铸造"根 CapTable"（包含所有内核对象的根引用 + 全权限位）；
+    2. init 进程通过 `spawn` 系统调用创建其他进程时，按需 `delegate` 子集能力给新进程（attenuation-only，不可放大）；
+    3. NIC 等独占资源：init 启动外交工具时，**仅**向外交工具 cast NIC capability（见 §6.1 唯一网络出口不变量）。
+  - **与 HAL 的关系**：HAL 仍负责注册设备对象（设备枚举、MMIO 地址、IRQ 号），但**设备对象本身由内核统一持有**；init 进程在启动期通过特殊 syscall（`root_cap_enumerate_devices`）一次性获取所有设备的 capability 引用——HAL 不直接铸造 capability。
 - token 熵源：capability 的不可猜测性依赖随机位。**TBD**：是否引入 RDRAND / 启动期熵池？
 
 ### 3.2 校验（Invoke / Verify）
@@ -69,11 +89,25 @@
 
 ### 3.3 委托（Delegate）
 - 语义：派生一个**权限子集**（attenuation-only，不可放大）。
-- **TBD**：委托是否记录父子关系（用于撤销时级联）？
+- **PROPOSED → 保留父子关系**（用于撤销时级联）：
+  - 每个 capability 对象额外维护 `parent: Option<CapRef>` 字段，指向铸造它的父 capability；
+  - 根 capability（由 init 铸造）的 `parent = None`；
+  - 开销：每个 capability 多一个 pointer（O(1) 空间），可接受；
+  - **必要性**：撤销算法（§3.4）需要从被撤销的 capability 出发，遍历所有派生副本——若无父子链，则无法实现级联撤销。
 
 ### 3.4 撤销（Revoke）
-- **TBD**：撤销算法（候选：seL4 式 derivation tree 遍历 / epoch-based reclamation / 版本号失效）。
+- **PROPOSED → derivation tree 遍历**（seL4 式）：
+  - 撤销某 capability 时，从该 capability 出发，沿 `parent` 反向遍历其所有派生副本，逐一失效；
+  - 复杂度：O(n)，n = 该 capability 的派生树节点数（通常很小，因为微内核 capability 数量受控）；
+  - 与 §3.3 父子链配合，实现级联撤销。
+  - **候选算法比较**：
+    | 算法 | 优势 | 劣势 | 决策 |
+    |------|------|------|------|
+    | **derivation tree 遍历** | 简单、即时失效、与 seL4 对齐 | O(n) 遍历（n 小则无碍）| ✅ PROPOSED |
+    | epoch-based reclamation | 适合高并发、无锁 | 复杂、撤销有延迟、微内核不需要 | ❌ |
+    | 版本号失效 | 极简 | 撤销有延迟（旧 cap 在版本号更新前仍可用）、不符合"即时撤销"语义 | ❌ |
 - 与 IPC 在途消息的交互：撤销时已发出但未接收的消息如何处理？
+  - **PROPOSED → 消息级 cap 校验**：消息到达接收方时，接收方内核再次校验消息中携带的 capability 是否仍有效——若已撤销，则消息丢弃 + 审计事件。
 
 ### 3.5 审计钩子（Audit Hook） *(原始构想新增)*
 - 内核在以下**事件点**产生 append-only 审计事件（推送到独立审计服务，详见 [设计文档 03 §6.3 审计事件流](03-ipc-message-and-single-copy-path.md)）：
@@ -90,11 +124,19 @@
 
 ```rust
 // kernel/src/cap/types.rs
-#[derive(Clone, Copy)]
+
+/// Capability 引用（指向本进程 CapTable 中的槽位）
+pub type CapRef = u8;  // ★ 8-bit，对齐 §7 PROPOSED：per-process 256 槽上限
+
+/// 能力对象
+#[derive(Clone)]
 pub struct Capability {
-    pub obj: ObjRef,       // 指向内核对象（带引用计数 / slot id）
-    pub rights: Rights,    // bitflags
-    pub badge: u32,        // 可选：用于区分同一 endpoint 的不同调用者
+    pub obj: ObjRef,                     // 指向内核对象（带引用计数 / slot id）
+    pub rights: Rights,                  // bitflags
+    pub badge: u32,                      // 可选：用于区分同一 endpoint 的不同调用者
+    pub parent: Option<CapRef>,          // ★ 父 capability 引用（对齐 §3.3 PROPOSED：保留父子链）
+                                         // None = 根 capability（由 init 铸造）
+                                         // 撤销时沿此字段反向遍历 derivation tree
 }
 
 bitflags! {
@@ -105,16 +147,31 @@ bitflags! {
         const READ  = 1 << 3;
         const WRITE = 1 << 4;
         const EXEC  = 1 << 5;
-        const GRANT = 1 << 6;
+        const GRANT = 1 << 6;           // 是否允许再委托（派生子 capability）
     }
 }
 
-// 每进程一张表
+/// 每进程一张能力表
 pub struct CapTable {
-    slots: Vec<Option<Capability>>,
-    // TBD: 空闲槽位管理（freelist）
+    slots: [Option<Capability>; 256],    // ★ 固定 256 槽（对齐 §7 PROPOSED）
+    free_list: [u8; 256],                // 空闲槽位栈（O(1) 分配 / 释放）
+    free_top: u16,                       // 栈中空闲槽数量（0..=256，u8 无法表达 256，故用 u16）
+}
+
+impl CapTable {
+    /// 分配新槽位，返回 CapRef（8-bit 索引）
+    pub fn alloc(&mut self) -> Option<CapRef> { /* ... */ }
+    /// 释放槽位
+    pub fn free(&mut self, cap: CapRef) { /* ... */ }
+    /// 按 CapRef 查找 capability（O(1) 数组索引）
+    pub fn get(&self, cap: CapRef) -> Option<&Capability> { /* ... */ }
 }
 ```
+
+> **设计约束**：
+> - `Capability` 必须是 `Clone`（不可 `Copy`）—— 因为 `parent: Option<CapRef>` 字段需要追踪派生关系，拷贝时必须显式处理父子链；
+> - `CapRef = u8`（而非 u16 / u32）—— IPC 消息中 capability 转移仅占 1 byte / cap，对齐 NFR2 微秒级延迟目标；
+> - `CapTable::slots` 固定 256 项 —— 避免动态扩容带来的锁竞争（虽然首期单核，但锁语义按多核就绪）。
 
 ### 4.1 内核对象类型全集
 
@@ -129,6 +186,57 @@ pub struct CapTable {
 | `Process`（管理面）| `ADMIN`（freeze/thaw/kill）| 监督树 / 行为围栏 | Phase 4 |
 
 > **原则**：内核只认识"对象 + 权限位"，不认识"L1~L5"或"业务通道"——后者是用户态策略（见 §5）。
+
+### 4.2 内核对象生命周期与 Generation *(评审补充，对齐 [需求评审 §2.3](../requirements-review-and-supplement.md))*
+
+**问题**：Capability 指向对象槽位（slot），若 slot 被释放后复用，旧 capability 可能"复活"指向新对象（use-after-free 变体）。
+
+**PROPOSED → 统一对象状态机 + generation 校验**：
+
+```text
+Live ──► Revoking ──► Retired ──► Freed
+  │          │            │
+  │          │            └─ 对象已不可用，等待引用计数归零后释放内存
+  │          └─ 正在撤销派生 capability，新 invoke 返回 E_OBJECT_RETIRED
+  └─ 正常可用状态
+```
+
+**ObjRef 带 generation**：
+
+```rust
+/// 对象引用 = slot index + generation（防 slot 复用攻击）
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ObjRef {
+    pub index: u32,       // 内核对象表索引
+    pub generation: u32,  // ★ 每次 slot 复用时递增
+}
+
+/// 对象状态
+pub enum ObjState {
+    Live,
+    Revoking,    // 撤销进行中（§3.4 derivation tree 遍历）
+    Retired,     // 已撤销，不可 invoke
+    Freed,       // 内存已释放（不应被引用）
+}
+```
+
+**校验规则**：
+
+- `CapTable::get(cptr)` 返回 capability 后，内核**必须**校验 `cap.obj.generation == obj_table[cap.obj.index].generation`；
+- generation 不匹配 → 返回 `E_OBJECT_RETIRED`（-12，对齐 [Doc 02 §4.5](02-userspace-abi-and-process-model.md) 错误码表），**不 panic**；
+- slot 复用时 generation 必须递增（wrap-around 用 u32 足够，2^32 次复用不现实）；
+- 对象进入 `Revoking` 状态后，所有新 invoke 立即返回错误，**不等待遍历完成**（避免阻塞热路径）。
+
+**进程退出时的对象回收顺序**（对齐 [需求评审 §5 跨模块契约](../requirements-review-and-supplement.md)）：
+
+1. 标记进程为 `Exiting`，拒绝新 syscall；
+2. 撤销该进程持有的所有 capability（进入 `Revoking`）；
+3. 唤醒所有阻塞在该进程相关 Endpoint/Notification 上的线程（`PeerDied` 错误）；
+4. 回收地址空间（页表 + 物理页）；
+5. 回收内核对象（TCB、CapTable 等）；
+6. 发送 death notification 给父进程（若已注册）。
+
+> **设计约束**：generation 校验是 O(1) 比较，不影响 NFR2 微秒级目标。
 
 ---
 
@@ -197,16 +305,16 @@ pub struct CapTable {
 
 ## 7. 待决策清单（Phase 4 前必须收敛）
 
-- [ ] 根能力铸造策略（init 全量 vs HAL 分散）
-- [ ] token 熵源与不可猜测性强度
-- [ ] 撤销算法选型（derivation tree vs epoch vs version）
-- [ ] 委托是否保留父子链
-- [ ] cap table 上限与增长策略
-- [ ] 是否支持 capability 随 IPC 消息转移（cap transfer）
-- [ ] `agent_id` 分配与管理（谁负责命名空间）
-- [ ] 审计事件的批量策略（每事件 IPC vs 批量提交，对热路径影响）
+- [x] ~~根能力铸造策略（init 全量 vs HAL 分散）~~ → **PROPOSED：init 进程全量铸造**，理由见 §3.1
+- [ ] token 熵源与不可猜测性强度（需安全评审，保留 TBD）
+- [x] ~~撤销算法选型（derivation tree vs epoch vs version）~~ → **PROPOSED：derivation tree 遍历**，理由见 §3.4
+- [x] ~~委托是否保留父子链~~ → **PROPOSED：保留**（撤销级联的必要前提），理由见 §3.3
+- [x] ~~cap table 上限与增长策略~~ → **PROPOSED：per-process 上限 256 槽位**（8-bit cptr 索引），线性扫描空闲槽；微内核单进程 cap 数量受控，256 足够
+- [x] ~~是否支持 capability 随 IPC 消息转移（cap transfer）~~ → **PROPOSED：支持**（seL4 风格，send 携带 N 个 cptr，内核安装到接收方 CapTable）
+- [x] ~~`agent_id` 分配与管理（谁负责命名空间）~~ → **PROPOSED：init 进程统一管理**（与根能力铸造策略对齐：init 在 spawn 子进程时分配 agent_id，写入进程结构体，内核盖章到 IPC 消息头）
+- [ ] 审计事件的批量策略（每事件 IPC vs 批量提交，对热路径影响）—— 需性能基准测试后决策
 - [ ] L4 / L5 操作的用户确认通道分阶段预案（§5.1）：串口确认的超时值、白名单配置格式；GUI 弹窗形态在 S6 落地
-- [ ] 唯一网络出口的白名单策略：DNS / NTP 等系统级服务的白名单由谁维护（外交工具自维护 vs 内核静态配置）|
+- [ ] 唯一网络出口的白名单策略：DNS / NTP 等系统级服务的白名单由谁维护（外交工具自维护 vs 内核静态配置）
 
 ---
 

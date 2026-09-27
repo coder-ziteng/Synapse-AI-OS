@@ -1,0 +1,18 @@
+[package]
+name        = "synapse-elf"
+version     = "0.1.0"
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace      = true
+description = "Synapse 启动格式纯逻辑解析：ELF64 ET_EXEC 静态加载校验（Doc 02 §2）+ cpio newc initramfs 提取（架构无关，宿主可测；P4-T5）"
+publish     = false
+
+[lib]
+path = "src/lib.rs"
+
+# 零依赖：纯 no_std，固定数组实现（不使用 alloc），与 cap/ipc/proc/sched/vma 同一纪律
+[dependencies]
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

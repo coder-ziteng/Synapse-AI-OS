@@ -1,6 +1,6 @@
 # 设计文档 03：IPC 消息格式与单拷贝路径
 
-> 状态：DRAFT / 设计细化（含审计事件流）
+> 状态：**PROPOSED 完成**（待确认升级为 DECIDED）
 > 关联需求：FR4 IPC、NFR2 微秒级延迟、FR9 审计事件源
 > 关联里程碑：Phase 4（用户态与 IPC）
 > 最后更新：2026-09-25
@@ -11,7 +11,20 @@
 
 定义 Synapse 微内核"灵魂"——IPC 机制的**消息格式、端点语义、传输路径（单拷贝）、能力转移、以及与调度/中断的交互**。目标是达成 NFR2 的微秒级延迟，同时承载 AI 原生的 `agent_id` / capability 校验。
 
-> ⚠️ 本文档为骨架，各章节列出**待决策问题（TBD）**。
+### PROPOSED 决策汇总
+
+| 决策项 | PROPOSED 方案 | 章节 |
+|--------|--------------|------|
+| 传输路径 | 单拷贝（kmap 方案）| §4.1 |
+| 内联阈值 | 4 words (32 bytes) | §4.3 |
+| 最大消息长度 | 4KB (1 页) | §4.3 |
+| 中断通知 | 独立异步 Notification 对象（位图语义）| §6.2 |
+| cap transfer | atomic all-or-nothing 回滚 | §5 |
+| IPC 错误语义 | 复用 Doc 02 错误码 + 对端死亡唤醒规则 | §5.1 |
+| 非阻塞变体 | 首期提供 try_send | §9 |
+| 审计服务 capability | init 铸造 | §9 |
+
+> ✅ Phase 4 核心设计决策已完成，剩余 TBD 为驱动模型/性能基准相关。
 
 ---
 
@@ -90,21 +103,52 @@ pub struct IpcHeader {
 对比"双拷贝"（发送方→内核 buf→接收方）省掉一次拷贝与一份内核内存。
 
 ### 4.2 拷贝时的地址空间处理
-- 发送方与接收方页表不同，内核需能同时访问两者：
-  - **TBD 方案 A**：临时映射（kmap）发送方物理页到内核窗口后 `memcpy`。
-  - **TBD 方案 B**：在接收方页表中临时映射发送方物理页。
-- 拷贝期间需处理缺页（发送方页可能未驻留）。
+- **PROPOSED → kmap 方案**（对齐 §9）：内核维护一个 per-CPU kmap 窗口（虚拟地址固定，如 `0xFFFF_FF00_0000_0000`），拷贝时：
+  1. 将发送方物理页**临时映射**到 kmap 窗口；
+  2. 在接收方页表中查找目标虚拟页（接收方 buf 地址已知）；
+  3. `memcpy` 从 kmap 窗口到接收方虚拟地址（CPU 硬件自动走接收方页表 → 接收方物理页）；
+  4. 解除 kmap 映射。
+- **理由**：实现简单、对齐 seL4 首期方案、无需修改接收方页表；性能开销可接受（微内核 IPC 频率远低于宏内核，kmap 开销在 TLB 命中时 < 100ns）。
+- **对齐 Doc 01 §4 Capability 数据结构**：拷贝时 capability 校验走 O(1) 数组索引（`CapTable::get(cptr)`），不阻塞 memcpy 路径。
+- **拷贝期间缺页处理**：发送方页未驻留时 → 先触发缺页处理（分配物理页）→ 再执行 kmap memcpy；若接收方页也未驻留 → 同理先分配。**不**允许拷贝路径上的嵌套缺页递归（首期简单起见，拷贝前 prefault 两端页面）。
 
 ### 4.3 寄存器直传（fast path）
-- 极小消息（≤ 4~6 个 word）可直接放在 syscall 寄存器 / 内核栈帧里传递，**完全跳过 memcpy**。
+- **PROPOSED 阈值 = 4 words (32 bytes)**（对齐 §9）：x86_64 syscall 入口寄存器 rdi/rsi/rdx/r10 可承载 4 words payload（扣除 endpoint ID + flags 后），直接在内核栈帧中传递，**完全跳过 memcpy**。
+- 超过 4 words 但 ≤ 4KB → 走 §4.2 kmap 单拷贝路径。
+- 超过 4KB → 走共享内存 grant（仅传描述符）。
 
 ---
 
 ## 5. 能力转移（Cap Transfer）
 
-- `send` 可携带 N 个 capability，内核将它们**安装到接收方 CapTable**（见文档 01 §3.3 委托语义）。
+- `send` 可携带 N 个 capability（每个 CapRef 占 1 byte，对齐 Doc 01 §4 `CapRef = u8`），内核将它们**安装到接收方 CapTable**（见文档 01 §3.3 委托语义）。
 - 转移遵循 attenuation：接收方获得的权限 ≤ 发送方持有的权限。
-- **TBD**：转移失败（接收方 cap table 满）时的回滚策略。
+- **PROPOSED → atomic (all-or-nothing) 回滚**（对齐 §9）：若接收方 CapTable 空间不足（剩余空槽 < N），**整批转移失败**，发送方收到错误码，所有 capability 保持原位；理由：简化内核实现、易于推理；微内核 cap transfer 频率低，partial 收益不抵复杂度。
+- **父子链维护**：转移成功的每个 capability，其在接收方 CapTable 中的新 `parent` 字段指向接收方持有的"来源 capability"（即发送方传递该 cap 时所用的 cptr 在接收方的对应引用）—— 确保撤销链路跨进程可追踪。
+
+### 5.1 IPC 错误语义 *(评审补充，对齐 [需求评审 §2.7](../requirements-review-and-supplement.md))*
+
+IPC 操作（`send` / `recv` / `reply` / `try_send`）的错误码复用 [Doc 02 §4.3](02-userspace-abi-and-process-model.md) 的统一错误码表，IPC 特定语义如下：
+
+| 错误码 | IPC 场景 | 说明 |
+|--------|---------|------|
+| `E_INVALID_CAP` (-1) | endpoint cptr 无效 / 权限不足（缺 SEND/RECV/REPLY）| capability 校验失败 |
+| `E_INVALID_ADDR` (-2) | 用户态 msg buffer 地址非法 / 未映射 / 跨页未授权 | 拷贝前校验 |
+| `E_NO_MEMORY` (-3) | 内核无法分配 IPC 临时结构 / cap transfer 时接收方 CapTable 槽位不足（atomic 回滚，对齐 §5）| 资源耗尽 |
+| `E_WOULD_BLOCK` (-4) | `try_send` 时接收方未就绪 / 队列满 | 非阻塞操作失败 |
+| `E_PERMISSION` (-7) | 发送方缺少 SEND 权限 / 转移的 capability 缺 GRANT 位 | 权限不足 |
+| `E_OBJECT_RETIRED` (-12) | endpoint 已撤销（generation 不匹配）| 对齐 Doc 01 §4.2 |
+| `E_QUOTA_EXCEEDED` (-13) | 发送方未完成 IPC 数超配额 | 对齐 Doc 02 §5.5 |
+| `E_PEER_DIED` (-14) | `recv` 等待期间发送方进程退出 / `reply` 时原发送方已死 | 对端死亡 |
+
+**对端死亡处理规则**（对齐 [需求评审 §5 跨模块契约](../requirements-review-and-supplement.md)）：
+
+- 发送方阻塞在 `send` → 接收方退出 → 发送方被唤醒，返回 `E_PEER_DIED`；
+- 接收方阻塞在 `recv` → 所有潜在发送方退出 → 继续阻塞（等待新发送方），**不返回错误**；
+- 接收方处理中 → 发送方退出 → `reply` 返回 `E_PEER_DIED`，接收方可忽略（消息已处理）；
+- 进程退出时，内核**必须**唤醒所有阻塞在该进程相关 Endpoint 上的线程（对齐 Doc 01 §4.2 回收顺序）。
+
+**设计原则**：IPC 错误**不通过 panic 表达**，必须映射为稳定错误码返回用户态。
 
 ---
 
@@ -119,11 +163,15 @@ pub struct IpcHeader {
 用户态驱动收中断的路径：
 ```
 硬件 IRQ → 内核 IDT → 在独立内核栈快速收 IRQ
-        → 内核向"绑定该 IRQ 的 Notification/Endpoint"投递一条消息
+        → 内核向"绑定该 IRQ 的 Notification"投递一次异步通知（位图 or）
         → EOI
-        → 用户态驱动 recv 到通知，处理，再 ack
+        → 用户态驱动 recv-Notification 到事件，处理，再 ack
 ```
-- **TBD**：中断通知用同步 Endpoint 还是异步 Notification 原语（seL4 用独立 Notification 对象）？建议引入轻量异步 Notification。
+- **决策**：采用 seL4 式的**独立异步 Notification 对象**（位图语义，O(1) signal/wait），不复用同步 Endpoint。理由：
+  - 同步 Endpoint 语义（阻塞 send/recv/rpc）与 IRQ 的"一次性通知"语义不匹配；
+  - 多驱动共享同一 Endpoint 会引入消费竞争，而 Notification 的位图 OR 天然支持多 IRQ 源聚合到同一对象；
+  - 异步信号不会把"驱动未就绪"阻塞到内核栈上，避免中断路径上的阻塞风险。
+- **TBD**：Notification 是否支持 mask/unmask（选择性忽略某些 IRQ 源）；是否支持跨进程共享（同一驱动进程同时处理多个设备）。
 
 ### 6.3 审计事件流 *(原始构想新增)*
 
@@ -195,14 +243,16 @@ pub struct IpcHeader {
 
 ## 9. 待决策清单（Phase 4 前必须收敛）
 
-- [ ] 单拷贝的地址空间访问方案（kmap vs 临时映射接收方页表）
-- [ ] payload 内联阈值与最大长度
-- [ ] 中断通知：复用 Endpoint vs 独立 Notification 原语
-- [ ] cap transfer 失败回滚
-- [ ] 是否首期就提供 `try_send` / 超时变体
-- [ ] 审计事件批量提交的 N / T 默认值（实时性 vs 吞吐）
-- [ ] 审计服务的独占 capability 由谁铸造（init？外交工具自铸造？）
-- [ ] 审计事件是否需要分类（DEBUG/INFO/WARN/CRITICAL）与持久化分级
+- [x] ~~单拷贝的地址空间访问方案（kmap vs 临时映射接收方页表）~~ → **PROPOSED：kmap**（内核临时映射发送方物理页到内核虚拟地址窗口，memcpy 到接收方）；理由：实现简单、对齐 seL4 首期方案、无需修改接收方页表；性能开销可接受（微内核 IPC 频率远低于宏内核）
+- [x] ~~payload 内联阈值与最大长度~~ → **PROPOSED：内联阈值 = 4 words (32 bytes)**（x86_64 syscall 寄存器 rdi/rsi/rdx/r10 可用于 payload，扣除 endpoint ID + flags 后剩余 4 words）；**最大长度 = 4KB (1 页)**，超过则走共享内存 grant
+- [x] ~~中断通知：复用 Endpoint vs 独立 Notification 原语~~ → **已决策：独立异步 Notification 对象（位图语义）**，理由见 §6.2
+- [ ] Notification 是否支持 mask/unmask（选择性忽略某些 IRQ 源）—— 需驱动模型确认后决策
+- [ ] Notification 是否支持跨进程共享（同一驱动进程同时处理多个设备）—— 需驱动模型确认后决策
+- [x] ~~cap transfer 失败回滚~~ → **PROPOSED：atomic (all-or-nothing)**；理由：简化内核实现、易于推理（要么全部转移成功，要么全部失败回滚）；微内核 cap transfer 频率低，partial 收益不抵复杂度
+- [x] ~~是否首期就提供 `try_send` / 超时变体~~ → **PROPOSED：首期仅提供 `try_send`（非阻塞）**；理由：驱动需要非阻塞发送通知；超时变体推迟至 Phase 5（用户态 RPC 需求明确后再加）
+- [ ] 审计事件批量提交的 N / T 默认值（实时性 vs 吞吐）—— 需性能基准测试后决策
+- [x] ~~审计服务的独占 capability 由谁铸造~~ → **PROPOSED：init 进程铸造**（与根能力铸造策略对齐，见 [Doc 01 §3.1](01-capability-agent-permission-model.md)）；init 启动审计服务时授予 `AuditLog::APPEND_KERNEL_EVENT` 独占 capability
+- [ ] 审计事件是否需要分类（DEBUG/INFO/WARN/CRITICAL）与持久化分级 —— 需审计服务需求确认后决策
 
 ---
 

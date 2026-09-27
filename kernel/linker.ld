@@ -9,6 +9,7 @@
 PHDRS
 {
     text PT_LOAD FLAGS(5);  /* R+X */
+    note PT_NOTE FLAGS(0);  /* QEMU PVH 检测需要 PT_NOTE 段 */
 }
 
 SECTIONS
@@ -18,11 +19,15 @@ SECTIONS
     .text : {
         *(.text.first)
         *(.text .text.*)
-        KEEP(*(.note.Xen))
         *(.rodata .rodata.*)
         *(.eh_frame)
         *(.gcc_except_table)
     } :text
+
+    /* PVH note — 必须为独立 SHT_NOTE 输出节 + PT_NOTE 段，QEMU 才能识别 */
+    .note.Xen : {
+        KEEP(*(.note.Xen))
+    } :note
 
     . = ALIGN(4K);
     .data : {

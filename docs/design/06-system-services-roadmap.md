@@ -1,9 +1,23 @@
 # 设计文档 06：系统服务层路线图 (System Services Layer Roadmap)
 
-> 状态：DRAFT / 路线图骨架
+> 状态：**PROPOSED 完成**（待确认升级为 DECIDED）
 > 关联需求：原始构想 [记忆系统/自进化/Agent 编排/本体模型/动态 UI/GUI 显示栈/数据层] 等系统层愿景
 > 关联里程碑：**S1~S6 服务层阶段**（与 Synapse 内核层 Phase 1~6 并行）
 > 最后更新：2026-09-25
+
+### PROPOSED 决策汇总
+
+| 决策项 | PROPOSED 方案 | 章节 |
+|--------|--------------|------|
+| 服务层依赖级别 | P0（内存态）/ P1（mock storage）/ P2（真实存储/网络/GPU）三级分类 | §2.1 |
+| S4 矢量检索（首期） | 暴力召回跑通闭环 + `VectorIndex` trait 抽象 | §6.6 |
+| S4 图存储 | 自研极简属性图（邻接表 + 页式存储，与 P6 存储栈同构）| §6.6 |
+| 硬件信任根埋点 | `CryptoProvider` trait（算法无关）+ `TrustRoot` trait 占位 | §13.2 |
+| 审计签名后量子迁移 | `Signature` 不透明类型（含算法标识），Phase 6 替换不改业务层 | §13.2.1 |
+| HAL TrustRoot 首期 | 空实现 `NullTrustRoot`，方法全部返回 `NotImplemented` | §13.2.3 |
+| 服务层强制规则 | 内核 P4 通过即开工 S1，不可无限推迟 | §12 |
+
+> ✅ 系统服务层路线图核心设计决策已完成，剩余 TBD 为 S6 GUI 显示栈选型、WASM 沙箱性能基准、多编程环境边界等。
 
 ---
 
@@ -59,6 +73,35 @@
 | **S4** | 记忆与自进化 | Agent 有记忆、会反思 | STM / EpisodicMemory / SemanticMemory / Reflector / SkillPool | P6 存储栈 + S3 |
 | **S5** | 多 Agent 与安全 | 多 Agent 协作 + 安全可控 | MultiAgentManager / SecurityGuard / 工具链 / WASM 沙箱 | S4 + P4.5/5 |
 | **S6** | 本体模型与动态 UI | 应用 = 本体实例化 + AI 动态生成 UI | OntologyEngine / 渲染栈 / 显示驱动 | S5 + P6 GPU |
+
+### 2.1 服务层依赖级别 *(评审补充，对齐 [需求评审 §2.10](../requirements-review-and-supplement.md))*
+
+**问题**：S1~S6 各阶段对内核能力的依赖程度不同。若所有服务都等待完整存储栈（P6），则 S1/S2 无法在内核 P4 通过后立即开工，违反"强制规则"（§12）。
+
+**PROPOSED → 三级依赖分类**：
+
+| 级别 | 定义 | 可用 mock | 适用阶段 |
+|------|------|----------|---------|
+| **P0** | 不依赖持久化的内存态服务，可在 QEMU 上演示 | 无需 | S1（日志/监控）、S2（AgentBus）|
+| **P1** | 依赖内核 IPC、进程和配额，但可使用 host-side/mock storage | initramfs 只读配置 + 内存态 KV | S1（配置中心）、S3（监督树）|
+| **P2** | 依赖真实存储、网络或 GPU，必须等相应内核能力完成 | 无 | S4（向量/图库）、S5（WASM）、S6（显示栈）|
+
+**各阶段首期承诺**：
+
+| 阶段 | 首期承诺级别 | 降级策略 |
+|------|-------------|---------|
+| **S1** | P0 + P1 | 配置中心先用 initramfs 只读配置 + 内存态 KV；SQLite 推迟至 P2 |
+| **S2** | P0 + P1 | Planner 调用远程 LLM API（走外交工具）；本地推理推迟至 P6 |
+| **S3** | P1 | 监督树状态存内存；持久化回滚快照推迟至 P2 |
+| **S4** | P2（但允许 P1 内存态过渡）| 向量/图库先用内存实现（§6.6）；trait 抽象从 S4.0 起存在 |
+| **S5** | P2 | WASM 沙箱依赖进程隔离（P4 已有）；工具链注册表可先用内存态 |
+| **S6** | P2 | 显示栈依赖 virtio-gpu（P6）；本体引擎可先用内存态图库 |
+
+**关键约束**：
+
+- S1/S2 **不允许**以"等待存储栈"为由推迟——P0/P1 级别的服务必须在内核 P4 通过后立即开工；
+- 每个 S 阶段必须有**独立退出测试**，不能以"内核 Phase 完成"自动视为服务层完成；
+- P1 → P2 迁移时，**trait 接口不变**（如 `VectorIndex` / `GraphStore` / `ConfigStore`），仅替换实现。
 
 ---
 
@@ -220,11 +263,30 @@ S4 的两个存储引擎是**外部依赖缺口**，必须在 S4 启动前决策
 | **显示栈** | virtio-gpu 驱动 + 合成器 + 渲染管线 |
 | **应用注册表** | 应用 = 本体模型实例化（运行时可加载）|
 
-### 8.2 GUI 显示栈选型（待决策）
-- 显示驱动：virtio-gpu（QEMU 支持）
-- 合成器：**TBD**（自研最小合成器 vs 移植现成方案）
-- 渲染：浏览器引擎（Tauri 风格 WebView vs 自研最小渲染器 vs Skia 子集）
-- **TBD**：选择路径对路线图影响巨大，建议 S6 启动前专门评审。
+### 8.2 GUI 显示栈选型（**DECIDED → 见 [设计文档 07](07-display-stack-and-spatial-shell.md)**）
+
+完整选型决策、对比、ABI、混合模式、阶段拆分见 [设计文档 07](07-display-stack-and-spatial-shell.md)。本节仅给核心结论：
+
+| 决策项 | DECIDED |
+|--------|---------|
+| 渲染栈 | **tiny-skia** + 自研矢量场景图 |
+| 显示驱动 | virtio-gpu 用户态驱动（PCI） |
+| 合成器 | 自研极简合成器（分层 SceneGraph → framebuffer 单遍绘制） |
+| 虚拟人 | 2D 矢量动画起步（Live2D 风格），后期可换 3D |
+| 交互范式 | **混合模式**：空间外壳（3D 摄像机 + 锚点 + 虚拟人）+ 平面内容（动态卡片面板） |
+| UI 生成 | DynamicUIGenerator 读 OntologyEngine → PanelSchema JSON → DisplayService 消费 |
+
+**为什么不是 WebView / 浏览器引擎套壳**（否决记录）：
+
+- 与原始构想"AI 原生"叙事冲突——浏览器是给人用的，不是给 AI 编排 UI 用的。
+- 工作量并不显著小于自研（浏览器引擎移植堪比内核）。
+- 性能不可控（无法保证 60 FPS 帧时间预算）。
+- C++ FFI 污染用户态 Rust 栈。
+
+**为什么不上 wgpu/vulkan 原生 GPU**（否决记录）：
+
+- 裸机用户态需自研 GPU 驱动栈，工作量 6 个月+，个人项目不可承受。
+- Phase 6.x 远期可加 GPU backend（`Renderer` trait 抽象，SceneGraph 与合成器不变）。
 
 ### 8.3 退出标准
 - 动态 UI 可基于意图实时生成（demo：用户说"整理会议录音" → UI 自动出现录音列表 + 任务进度面板）。
@@ -316,6 +378,71 @@ P6 存储栈 + virtio-gpu → S6 本体 + 动态 UI（demo：意图 → 实时 U
 - **`CryptoProvider` trait 抽象**：外交工具与审计服务的签名 / 密钥交换**不得直接硬编码算法**。首期实现 Ed25519 + X25519，但接口按"可替换为 ML-DSA / ML-KEM"设计。这是**唯一必须现在做**的事，成本极低。
 - **审计事件的签名字段预留算法标识**（如 `sig_alg: u8`），避免后期迁移时改变事件格式。
 - **HAL 预留 `TrustRoot` trait**（可为空实现），不实现任何方法，仅占位——防止 Phase 6 时侵入式修改核心层。
+
+#### 13.2.1 `CryptoProvider` trait 接口草案 *(本窗口新增)*
+
+```rust
+// user/diplomat/src/crypto/provider.rs (概念设计)
+pub trait CryptoProvider: Send + Sync {
+    /// 签名（算法作为参数，支持后量子迁移不破坏业务层）
+    fn sign(&self, alg: SigAlgorithm, msg: &[u8]) -> Result<Signature, CryptoError>;
+    fn verify(&self, alg: SigAlgorithm, msg: &[u8], sig: &Signature) -> Result<bool, CryptoError>;
+
+    /// 密钥交换（ephemeral 模式，每次会话重新协商）
+    fn kx_ephemeral(&self, alg: KxAlgorithm) -> Result<(KxPublic, KxPrivate), CryptoError>;
+    fn kx_derive(&self, alg: KxAlgorithm, priv: &KxPrivate, peer_pub: &KxPublic)
+        -> Result<SharedSecret, CryptoError>;
+
+    /// 哈希（审计事件指纹 / 内容去重）
+    fn hash(&self, alg: HashAlgorithm, data: &[u8]) -> Digest;
+}
+
+// 算法标识枚举（首期只实现第一项，预留后量子位）
+pub enum SigAlgorithm { Ed25519,        /* Phase 6: */ MlDsa65, SlhDsaSha2Small }
+pub enum KxAlgorithm { X25519,         /* Phase 6: */ MlKem768, MlKem1024 }
+pub enum HashAlgorithm { Sha256,       /* Phase 6: */ Sha3_256, Blake3 }
+
+// 签名不透明封装 —— 业务层只能"持有 + 序列化"，不解释字节内容
+pub struct Signature { alg: SigAlgorithm, bytes: Vec<u8> }
+```
+
+**关键设计约束**：
+- `Signature` 是不透明类型：业务层不得解析内部字节，避免算法迁移时业务层代码扩散改动
+- `CryptoProvider` 以 `Arc<dyn CryptoProvider>` 单例注入，首期注入 Ed25519 实现，Phase 6 替换 ML-DSA 实现**不改业务层**
+- 审计事件签名字段使用 `Signature`（见 §13.2.2），与外交工具跨层解耦
+
+#### 13.2.2 审计事件 `sig_alg` 字段 *(跨文档对齐 Doc 04 §8.1)*
+
+将 Doc 04 §8.1 的 `signature: [u8;64]` 升级为 `signature: Signature`（包含算法标识），Phase 6 后量子迁移**不破坏审计事件格式**。详见 Doc 04 §8.1 同步修订。
+
+#### 13.2.3 HAL `TrustRoot` trait 占位 *(本窗口新增)*
+
+```rust
+// kernel/src/hal/trust_root.rs (概念设计，首期全部为空实现)
+pub trait TrustRoot: Send + Sync {
+    /// TPM PCR 扩展（Phase 6+）
+    fn extend_pcr(&self, _pcr: u32, _digest: &[u8; 32]) -> Result<(), HalError> {
+        Err(HalError::NotImplemented)
+    }
+    /// TPM 密封（Phase 6+）
+    fn seal(&self, _data: &[u8], _policy: &SealPolicy) -> Result<Vec<u8>, HalError> {
+        Err(HalError::NotImplemented)
+    }
+    /// TPM 解封（Phase 6+）
+    fn unseal(&self, _sealed: &[u8]) -> Result<Vec<u8>, HalError> {
+        Err(HalError::NotImplemented)
+    }
+}
+
+// 首期默认实现：无 TPM/TEE 环境
+pub struct NullTrustRoot;
+impl TrustRoot for NullTrustRoot {}
+```
+
+**设计原则**：
+- trait 方法签名按 Phase 6 TPM 2.0 规范设计，首期**全部返回 `NotImplemented`**
+- 任何代码路径**不得假设 TrustRoot 可用**——必须先查询 trait 能力（`if trust_root.extend_pcr(...).is_ok()`）
+- Phase 6 集成真实 TPM 时，只需实现新 struct（如 `Tpm2TrustRoot`），不改 trait 接口
 
 ### 13.3 明确不做（首期）
 

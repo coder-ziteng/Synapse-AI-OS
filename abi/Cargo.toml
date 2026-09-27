@@ -1,0 +1,18 @@
+[package]
+name        = "synapse-abi"
+version     = "0.1.0"
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace      = true
+description = "Synapse syscall ABI：18 号 syscall 枚举 + 参数解码/编码 + abi_query 版本协商（用户态与内核共享，宿主可测）"
+publish     = false
+
+[lib]
+path = "src/lib.rs"
+
+# ABI 层为纯常量/枚举定义，零依赖（用户态与内核态共享同一份定义）
+[dependencies]
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

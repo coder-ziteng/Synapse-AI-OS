@@ -1,0 +1,20 @@
+[package]
+name        = "synapse-proc"
+version     = "0.1.0"
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace      = true
+description = "Synapse 进程模型核心：PCB / 生命周期状态机 (spawn→exit/fault→zombie→reap) / agent_id 命名空间 / death notification / 孤儿过继（架构无关，宿主可测）"
+publish     = false
+
+[lib]
+path = "src/lib.rs"
+
+# 仅依赖同 workspace crate：cap（错误码/配额）、ipc（AgentId）
+[dependencies]
+synapse-cap = { path = "../cap" }
+synapse-ipc = { path = "../ipc" }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

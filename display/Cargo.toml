@@ -1,0 +1,26 @@
+[package]
+name = "synapse-display"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Synapse S6 显示栈 PoC — 宿主 std 渲染管线验证（tiny-skia + 自研矢量场景图）"
+
+[dependencies]
+# 渲染后端：纯 Rust 2D 矢量光栅化，no_std 友好（PoC 阶段先在 std 用）
+tiny-skia = { version = "0.11", optional = true }
+# PNG 导出（仅 PoC 用，裸机用户态阶段去掉）
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[features]
+default = []
+# 真实渲染管线（启用 tiny-skia + image）
+renderer = ["dep:tiny-skia", "dep:image"]
+
+[[example]]
+name = "poc"
+required-features = ["renderer"]
+
+[[example]]
+name = "logo"
+required-features = ["renderer"]

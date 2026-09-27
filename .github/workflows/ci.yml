@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+# 单一 job：构建 + 启动 QEMU + 断言 serial 输出。
+# 失败时上传日志产物便于诊断。
+jobs:
+  build-and-boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (respects rust-toolchain.toml)
+        run: rustup show
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build + boot test (xtask ci)
+        run: cargo run -p synapse-xtask -- ci --timeout 10
+
+      - name: Upload boot logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-logs
+          path: |
+            serial.log
+            debugcon-stage12.log
+            debugcon-kernel.log
+          retention-days: 7

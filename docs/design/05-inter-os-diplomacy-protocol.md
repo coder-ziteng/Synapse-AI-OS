@@ -1,9 +1,23 @@
 # 设计文档 05：跨 OS 外交协议 (Inter-OS Diplomacy Protocol)
 
-> 状态：DRAFT / **远期骨架**（Phase 6+，首期仅登记不实现）
+> 状态：**PROPOSED 完成**（待确认升级为 DECIDED）
 > 关联需求：原始构想 "未来的远程访问，本质上就是两个 agent 之间的交互"、"外交工具"系列
 > 关联里程碑：Phase 6+（远期）；与 [设计文档 04](04-diplomat-channel-architecture.md) 共享外交工具实现
 > 最后更新：2026-09-25
+
+### PROPOSED 决策汇总
+
+| 决策项 | PROPOSED 方案 | 章节 |
+|--------|--------------|------|
+| DID 解析机制 | did:web（HTTP-based，最简单）| §2.1 |
+| 信誉模型 | 本地优先（per-DID reputation score）| §5.2 |
+| 协议主协议 | A2A（JSON-RPC 2.0 + SSE）| §3 |
+| 信封版本格式 | diplomat/major.minor（semver）| §11 |
+| 短期凭证 | SD-JWT（任务绑定，会话结束即失效）| §4 |
+| 大对象跨 OS 共享 | 联邦存储（per-session negotiated HTTPS PUT/GET）| §11 |
+| 交互模式 | 分层混合（低风险主动 / 高风险经确认）| §8 |
+
+> ✅ Phase 6+ 远期骨架核心设计决策已完成，剩余 TBD 为分布式基础设施相关（跨 OS CRL 同步、自动仲裁机制、主动/被动分层阈值等）。
 
 ---
 
@@ -31,9 +45,12 @@
 ## 2. 身份层 (Identity)
 
 ### 2.1 去中心化身份 (DID)
-- 每个 Synapse 实例在启动时由外交工具生成自己的 DID（`did:synapse:<hash>`），基于 W3C DID 规范。
-- 私钥存于外交工具进程内存（**永不出外交工具**）；公钥嵌入 DID Document，可通过 gossip 协议或目录服务发布。
-- **TBD（Phase 6+）**：DID 解析机制——是通过去中心化注册表（did:web / did:ion）还是 P2P gossip？
+- 每个 Synapse 实例在启动时由外交工具生成自己的 DID（**PROPOSED：`did:web:<domain>/synapse/<instance_id>`**，对齐 §11）；
+  - `<domain>` = 外交工具可达的 HTTPS 域名（如 `alice.example.com`）；
+  - `<instance_id>` = 实例唯一标识（UUID 或 hash）；
+  - DID Document 存放在 `https://<domain>/.well-known/did.json`（标准 did:web 路径）；
+- 私钥存于外交工具进程内存（**永不出外交工具**）；公钥嵌入 DID Document，通过 HTTPS 发布；
+- **理由**：did:web 最简单（基于 HTTPS + JSON），无需区块链 / P2P 基础设施；Phase 6+ 若需去中心化可迁移至 did:ion / did:btccoin。
 
 ### 2.2 Agent 身份
 - Agent 在实例内由 `agent_id`（内核盖章）标识。
@@ -221,14 +238,14 @@ pub enum ContractClause {
 
 ## 11. 待决策清单（Phase 6+ 启动时再细化）
 
-- [ ] DID 解析机制：去中心化注册表 vs P2P gossip
-- [ ] 信誉模型：本地 vs 联盟共享
-- [ ] 跨 OS CRL 同步
-- [ ] 自动仲裁机制（可信第三方 / 链上合约）
-- [ ] 主动协商 / 被动响应的分层阈值
-- [ ] 大对象跨 OS 共享存储方案（联邦存储 / IPFS / 自研）
-- [ ] 协议版本协商细节（信封 v 字段语义）
-- [ ] 与 [设计文档 04](04-diplomat-channel-architecture.md) 的 v1 协议兼容性测试策略
+- [x] ~~DID 解析机制：去中心化注册表 vs P2P gossip~~ → **PROPOSED：did:web（HTTP-based）**；理由：最简单（基于 HTTPS + JSON），无需区块链 / P2P 基础设施；Phase 6+ 若需去中心化可迁移至 did:ion / did:btccoin
+- [x] ~~信誉模型：本地 vs 联盟共享~~ → **PROPOSED：本地优先**；理由：首期无联盟基础设施，本地信誉表（per-DID reputation score）足够；Phase 6+ 若需跨实例信誉共享，引入联邦信誉协议（基于 DID 签名交换）
+- [ ] 跨 OS CRL 同步 —— 需分布式系统基础设施，Phase 6+ 决策
+- [ ] 自动仲裁机制（可信第三方 / 链上合约）—— 需信任模型评审，Phase 6+ 决策
+- [ ] 主动协商 / 被动响应的分层阈值 —— 需 UX 设计，Phase 6+ 决策
+- [x] ~~大对象跨 OS 共享存储方案（联邦存储 / IPFS / 自研）~~ → **PROPOSED：联邦存储（per-session negotiated）**；理由：不依赖第三方（IPFS），外交工具协商临时共享存储（如 HTTPS PUT/GET），会话结束即清理；简单且对齐"外交工具是唯一网络出口"不变量
+- [x] ~~协议版本协商细节（信封 v 字段语义）~~ → **PROPOSED：信封 v = "diplomat/major.minor"（semver）**；major 不兼容变更，minor 向后兼容新增；首期 v = "diplomat/1.0"
+- [ ] 与 [设计文档 04](04-diplomat-channel-architecture.md) 的 v1 协议兼容性测试策略 —— 需 Doc 04 实现后决策
 
 ---
 
