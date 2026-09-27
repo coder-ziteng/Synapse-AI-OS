@@ -42,6 +42,8 @@ pub mod initrd;
 pub mod elfload;
 pub mod umem;
 pub mod ipc;
+pub mod kstack;
+pub mod proc_ext;
 
 // 把 trampoline 汇编链入二进制；`boot.S` 中 `.global _start` 提供链接器 entry。
 global_asm!(include_str!("boot.S"));

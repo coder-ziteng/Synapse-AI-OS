@@ -5,7 +5,7 @@
 //!        -Zjson-target-spec -Zbuild-std=core,alloc`
 //!    → `user/hello/target/x86_64-synapse-user/{debug|release}/hello`
 //!    （cwd 必须是仓库根：target json 的 `--script=user/linker.ld`
-//!      由 ld.lld 相对 cargo cwd 解析。）
+//!    由 ld.lld 相对 cargo cwd 解析。）
 //! 2. 宿主侧 ELF 头断言（task.json P4-T1 verify）：
 //!    * `e_type == ET_EXEC`（非 PIE，Doc 02 §2.1）
 //!    * `e_entry` 落在 1GB 基址区 [0x4000_0000, 0x8000_0000)（Doc 02 §3.1 UPDATE(P4-T2)）

@@ -45,7 +45,6 @@
 //!   进程调度 hook 接进来后（T6+）用 per-thread 标志位防重入。
 
 use core::arch::asm;
-use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -118,8 +117,9 @@ core::arch::global_asm!(
 
     // swapgs：GS.base ← IA32_KERNEL_GS_BASE = &PER_CPU
     "swapgs",
-    // 加载内核栈顶（per-CPU 数据首字段 = kstack_top）
-    "mov rsp, gs:[0]",
+    // 加载当前进程 kstack_top（P4-T9a：per-process kstack，gs:[8] = kstack_top）
+    // gs:[0] = current_pid（cap lookup 等用，本处不读）
+    "mov rsp, gs:[8]",
 
     // 推送 SyscallFrame（synapse_abi 布局：num(offset 0)=rax, args[0..5](offset 8..48)=rdi/rsi/rdx/r10/r8/r9,
     // user_RSP/RIP/RFLAGS 保留供 sysret 还原(offset 56+))。
@@ -173,29 +173,8 @@ core::arch::global_asm!(
 );
 
 // ---------------------------------------------------------------------------
-// Per-CPU 数据（IA32_KERNEL_GS_BASE → &KSTACK_TOP_ADDR，gs:[0] = kstack_top）
-// ---------------------------------------------------------------------------
-
-/// 内核栈顶（per-CPU；MVP 单核 static；Phase 5+ 多核改为 per-core 数组）。
-///
-/// 放在独立 8B 对齐位置而非 PerCpu struct — 简化 IA32_KERNEL_GS_BASE 写入
-/// （直接 wrmsr 该值地址）；asm `gs:[0]` 读首字段 = kstack_top。
-#[repr(align(8))]
-#[allow(dead_code)]
-struct KstackTopCell(u64);
-
-// SAFETY: 单核 MVP；init_syscall 唯一写入者，syscall_entry_asm 是 asm 读者
-// （CPU 直接读 GS.base 指向地址，无 Rust 借用），串行访问不并发。
-struct KstackTopWrap(UnsafeCell<KstackTopCell>);
-unsafe impl Sync for KstackTopWrap {}
-static KSTACK_TOP_WRAP: KstackTopWrap = KstackTopWrap(UnsafeCell::new(KstackTopCell(0)));
-
-fn kstack_top_addr() -> u64 {
-    &KSTACK_TOP_WRAP.0 as *const UnsafeCell<KstackTopCell> as *const u64 as u64
-}
-
-// ---------------------------------------------------------------------------
-// 启动时初始化（写 MSR）
+// Per-CPU 数据由 `proc_ext::PerCpu` 提供（P4-T9a：current_pid + kstack_top）。
+// 此处只负责 MSR 配置。
 // ---------------------------------------------------------------------------
 
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
@@ -205,28 +184,23 @@ static INIT_DONE: AtomicBool = AtomicBool::new(false);
 /// # Safety
 ///
 /// - 必须在 long mode + CPL=0 + IDT 已装 + GDT 含 ring-3 描述符之后调用；
+/// - 必须先调用 `proc_ext::init_proc_ext()`（TSS.RSP0 已就绪）；
 /// - 重复调用会 panic。
 pub unsafe fn init_syscall() {
     if INIT_DONE.swap(true, Ordering::SeqCst) {
         panic!("init_syscall called twice");
     }
 
-    // 1. 填 per-CPU kstack_top = TSS.RSP0（gdt 模块权威）
-    let ksp = crate::gdt::rsp0_stack_top();
-    unsafe {
-        ptr::write_volatile(
-            KSTACK_TOP_WRAP.0.get() as *mut u64,
-            ksp,
-        );
-    }
+    // 1. PROC_EXT + PerCpu（init 必须已调用；TSS.RSP0 + GDT ring-3 描述符已就绪）
+    crate::proc_ext::init_proc_ext();
 
     // 2. 写 MSR
     wrmsr(MSR_STAR, STAR_VALUE);
     wrmsr(MSR_LSTAR, syscall_entry_asm as *const () as u64);
     wrmsr(MSR_FMASK, FMASK_VALUE);
 
-    // 3. IA32_KERNEL_GS_BASE = &KSTACK_TOP_WRAP（asm `gs:[0]` 读首字段）
-    let gs_base = kstack_top_addr();
+    // 3. IA32_KERNEL_GS_BASE = &PER_CPU（asm `gs:[8]` 读 kstack_top）
+    let gs_base = crate::proc_ext::per_cpu_pointer();
     wrmsr(MSR_KERNEL_GS_BASE, gs_base);
 
     log::info!(
@@ -235,7 +209,7 @@ pub unsafe fn init_syscall() {
         syscall_entry_asm as *const () as u64,
         FMASK_VALUE,
         gs_base,
-        ksp,
+        crate::proc_ext::current_kstack_top(),
     );
 }
 

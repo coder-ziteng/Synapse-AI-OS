@@ -154,6 +154,12 @@ impl RegionTable {
     }
 }
 
+impl Default for RegionTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

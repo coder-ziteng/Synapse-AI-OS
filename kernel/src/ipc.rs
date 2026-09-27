@@ -193,19 +193,23 @@ static AUX: SpinLock<[EpAux; MAX_AUX]> = SpinLock::new([const { EpAux::empty() }
 // 当前进程标识（per-thread；MVP：单进程 = init）
 // ---------------------------------------------------------------------------
 
-static CURRENT_PID: AtomicU32 = AtomicU32::new(0);
-
 /// 设置当前 syscall 服务进程（`elfload` AS 武装时调用，MVP=1=init）。
 ///
 /// 真机多进程上下文（T9+）由 per-thread kernel stack 上的进程上下文切换接管，
 /// 当前实现：所有 syscall 都视为同一进程（hello = init）。
+///
+/// **P4-T9a 迁移**：底层存储迁到 `proc_ext::PerCpu.current_pid`（gs:[0]），
+/// 这里薄封装保留调用兼容性；新代码请直接用 [`crate::proc_ext::set_current_pid`]
+/// （注意：仅写 current_pid，不触发 PROC_EXT 校验；IPC smoke 用合成 kthread ID）。
 pub fn set_current_pid(pid: u32) {
-    CURRENT_PID.store(pid, Ordering::SeqCst);
+    crate::proc_ext::set_current_pid(pid);
 }
 
 /// 读取当前 syscall 服务进程 pid。
+///
+/// **P4-T9a 迁移**：底层迁到 `proc_ext::PerCpu.current_pid`（gs:[0]）。
 pub fn current_pid() -> u32 {
-    CURRENT_PID.load(Ordering::SeqCst)
+    crate::proc_ext::current_pid()
 }
 
 // ---------------------------------------------------------------------------
