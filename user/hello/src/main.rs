@@ -27,7 +27,8 @@ use core::panic::PanicInfo;
 
 use synapse_abi::{
     abi_query_value, SyscallId, Timespec, CLOCK_MONOTONIC, CLOCK_WALL, E_INVALID_ADDR,
-    E_INVALID_CAP, E_NO_MEMORY, E_NOT_FOUND, E_NOT_IMPLEMENTED, E_PERMISSION, E_WOULD_BLOCK,
+    E_INVALID_CAP, E_NO_MEMORY, E_NOT_FOUND, E_NOT_IMPLEMENTED, E_PERMISSION,
+    E_WOULD_BLOCK,
     MAP_GROWABLE, PROT_EXEC, PROT_READ, PROT_WRITE,
 };
 use synapse_user::invoke;
@@ -96,9 +97,12 @@ pub extern "C" fn _start() -> ! {
     let a3 = sys!(SyscallId::Mmap, [0, 0x1000, RW, MAP_GROWABLE, 0, 0]);
     assert!(a3 >= a2 + 0x1000, "mmap GROWABLE addr");
     // 4d. 显式地址（arena 上方 16MB 处，页对齐、无重叠）
-    let hint = ((a3 as u64 + 0x10_0000) & !0xFFF) as i64;
-    let a4 = sys!(SyscallId::Mmap, [hint as u64, 0x1000, RW, 0, 0, 0]);
-    assert_eq!(a4, hint, "mmap explicit addr honored");
+    //     注意：hint 必须高于 §4e 末段的 quota 拒绝测试（4093 页 = 0xFFD_000）的
+    //     bump 候选区，否则 overlaps_vma 抢先于 quota 拒绝并返 -2 而非 -13。
+    //     bump 候选区终点 = 0x41004000 + 0xFFD_000 = 0x42001000，故 a4 落在 ≥ 0x42002000。
+    let hint: u64 = 0x4210_0000;
+    let a4 = sys!(SyscallId::Mmap, [hint, 0x1000, RW, 0, 0, 0]);
+    assert_eq!(a4, hint as i64, "mmap explicit addr honored");
 
     // 4e. mmap 错误路径
     assert_eq!(sys!(SyscallId::Mmap, [0, 0, RW, 0, 0, 0]), E_INVALID_ADDR, "mmap len=0 -> -2");
@@ -118,6 +122,9 @@ pub extern "C" fn _start() -> ! {
     assert_eq!(sys!(SyscallId::Mmap, [0x4000_0000u64, 0x1000, RW, 0, 0, 0]), E_INVALID_ADDR, "mmap onto ELF text -> -2");
     // 巨型 len 超 arena → E_NO_MEMORY（2GB 窗口装不下 1GB 请求）
     assert_eq!(sys!(SyscallId::Mmap, [0, 0x4000_0000u64, RW, 0, 0, 0]), E_NO_MEMORY, "mmap huge len -> -3");
+    // 注：P4-T9e quota 拒绝由 crasher 子进程（max_pages=16）覆盖——init
+    // 持有 INIT_QUOTA.max_pages=1<<20（4 GB），无法在本进程触发 quota 拒绝。
+    // crash_smoke 链路上 `proc_life::quota_denied_count() >= 1` 即断言。
 
     // ---- 5. munmap
     assert_eq!(sys!(SyscallId::Munmap, [a1 as u64, 0x2000, 0, 0, 0, 0]), 0, "munmap a1");
