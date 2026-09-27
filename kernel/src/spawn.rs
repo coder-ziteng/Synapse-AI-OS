@@ -97,9 +97,43 @@ pub fn spawn_smoke() -> ! {
         .expect("[spawn-smoke] k_create_cap_table failed");
     info!("[spawn-smoke]   ok: CapTable created");
 
+    // 3b. 给子进程铸造**自有**的 endpoint 根 cap → slot 1。
+    //     hello §6 IPC 用例硬编码 ep_cap=1，而子进程 CapTable 是新建空表：
+    //     不铸则 6.2 IpcRecv(cptr=1) 的 resolve_endpoint 失败 → E_INVALID_CAP(-1)，
+    //     但 hello 期望 boot 围栏的 E_WOULD_BLOCK(-4) → assert 失败 panic → ring3
+    //     hlt #GP（真机暴露：子进程曾走 kill 路径而非自身 process_exit 退出）。
+    //     必须用**全新** endpoint，不能复用 init 的 bootstrap ep：init 的 hello
+    //     §6.6 try_send 已向其 Queued 一条消息，子进程 6.2 recv 会出队 Message
+    //     而非 Waiting，同样打破 -4 期望。
+    let child_ep_obj = crate::kstate::k_alloc_object(synapse_cap::ObjKind::Endpoint)
+        .expect("[spawn-smoke] alloc child endpoint failed");
+    let child_ep_cap = crate::kstate::k_mint_root(
+        child_pid,
+        child_ep_obj,
+        synapse_cap::Rights::SEND
+            | synapse_cap::Rights::RECV
+            | synapse_cap::Rights::REPLY
+            | synapse_cap::Rights::GRANT,
+    )
+    .expect("[spawn-smoke] mint child ep cap failed");
+    assert_eq!(
+        child_ep_cap, 1,
+        "[spawn-smoke] child ep cap must land in slot 1 (hello hardcodes ep_cap=1), got {}",
+        child_ep_cap
+    );
+    info!(
+        "[spawn-smoke]   ok: child endpoint minted → cap slot {} (obj {}:{})",
+        child_ep_cap, child_ep_obj.index, child_ep_obj.generation
+    );
+
     // 4. load hello ELF into child AS
     let (mut child_as, entry, stack_top) = crate::elfload::load_hello_into_as();
     SPAWN_CHILD_AS_PTR.store(&mut child_as as *mut AddressSpace as u64, Ordering::SeqCst);
+    // syscall 分发层（gettime/mmap/munmap）经 elfload::current_as_ptr() 取激活的
+    // 用户 AS 走页表——必须指向子进程 AS。否则子进程 gettime 会 walk elf_continuation
+    // 已 drop 的陈旧 init AS → E_INVALID_ADDR → hello §3 assert panic（真机暴露：
+    // abi_query/yield 不碰 AS 故正常，gettime 一碰即 ring3 #GP）。
+    crate::elfload::set_current_as_ptr(&mut child_as as *mut AddressSpace as u64);
 
     // 5. 武装 KERNEL_FRAME（spawn_continuation 为 RIP）
     unsafe {

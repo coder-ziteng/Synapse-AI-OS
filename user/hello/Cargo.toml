@@ -36,9 +36,16 @@ synapse-abi  = { path = "../../abi" }
 [profile.dev]
 panic = "abort"
 debug = true
+# 剥除符号表——hello 是测试 ELF，内核只走 PT_LOAD（memsz 0x13c40 = 20 页），
+# 不需要 2.8 MB debug 符号占着 initrd。否则 initrd 预留 ~688 帧，page_frame 总
+# 量只剩 294，spawn-smoke 子进程稍多一点帧（kstack + AS + Pcb）就立刻
+# frame-out → mmap -3 E_NO_MEMORY。剥符号后 hello ≈ 90 KB，initrd 预留 ~23 帧，
+# 释放 ~665 帧（详见 T9b）。
+strip = "symbols"
 
 [profile.release]
 panic = "abort"
 debug = true
 opt-level = "s"
 lto = "thin"
+strip = "symbols"

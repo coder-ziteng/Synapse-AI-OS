@@ -66,6 +66,18 @@ pub(crate) fn current_as_ptr() -> u64 {
     AS_PTR.load(Ordering::SeqCst)
 }
 
+/// 设置当前激活的用户 AS 裸指针（spawn-smoke 切子进程 AS 用）。
+///
+/// `elf_load_smoke` 装 init 的 hello 时写 [`AS_PTR`]；`spawn_smoke` 把 hello 装进
+/// 子进程 AS 后**也必须更新它**——否则子进程 syscall（gettime/mmap/munmap 经
+/// `current_as_ptr()` 走用户页表）会读到 init 那个已被 `elf_continuation` drop 的
+/// 陈旧 AS 指针 → walk 已释放页表帧 → gettime 返回 E_INVALID_ADDR → hello §3
+/// `assert r==0` panic → ring3 hlt #GP（真机首次暴露：abi_query/yield 不碰 AS 故
+/// 前两条 syscall 正常，gettime 一碰就崩）。
+pub(crate) fn set_current_as_ptr(as_ptr: u64) {
+    AS_PTR.store(as_ptr, Ordering::SeqCst);
+}
+
 // ============================================================================
 // 提取 + 解析
 // ============================================================================
@@ -333,19 +345,11 @@ extern "C" fn elf_continuation() -> ! {
 
     info!("[elf-smoke] PASS");
 
-    // 6. 主动退出 QEMU：isa-debug-exit (0x502) 写 0xB5 → exit 363（成功出口）。
-    // TODO: spawn-smoke 被 elf-smoke 的 #GP 阻塞，暂跳过
-    // crate::spawn::spawn_smoke()
-    unsafe {
-        asm!(
-            "mov dx, 0x502",
-            "mov al, 0xB5",
-            "out dx, al",
-            options(nostack, preserves_flags),
-        );
-    }
-
-    loop {
-        unsafe { asm!("hlt", options(nostack, preserves_flags)) };
-    }
+    // 6. 链式接力 spawn-smoke（P4-T9b）：此前被 elf-smoke 末尾的 ring3 #GP 阻塞
+    //    （STAR_VALUE 字段错位 → sysretq 装载非法 CS/SS；+ IPC recv boot-fence
+    //    未回滚 receiver_waiting → hello §6.6 try_send E_NOT_FOUND panic），只能
+    //    在此内联 isa-debug-exit 0xB5 → exit 363 收尾。两 bug 均已修复、hello 正常
+    //    跑到 process_exit，故此处交棒 spawn_smoke()：spawn 子进程跑 hello → 子
+    //    process_exit → spawn_continuation 清理子资源 → exit 363。
+    crate::spawn::spawn_smoke()
 }
