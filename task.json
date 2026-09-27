@@ -968,8 +968,8 @@
         },
         {
           "id": "P4.5-T4",
-          "name": "virtio-net 用户态驱动预研 + diplomat spawn 接入契约",
-          "status": "pending",
+          "name": "virtio-net 用户态驱动预研 + diplomat spawn 接入契约（实做 modern 1.x 协商 + device_map #52，路线口径见 decision_log 2026-09-27 P4.5-T3 两条 + T4 两条）",
+          "status": "done",
           "deliverables": [
             "user/diplomat/src/driver/virtio_net.rs：virtio-net legacy MMIO 驱动结构（与 P4.5-T3 同构，仅设备 ID 不同）+ smoltcp PHY trait 实现骨架（send/receive 钩子指向 virtqueue）",
             "BAR mmap 由用户态进程通过 P4-T4 paging 路径发起（kernel/src/mmio_user.rs 或复用 umem）：把设备 BAR 映射到用户态虚拟地址（Doc 01 §2.1 capability 控制：仅外交工具进程持 NIC Device cap）",
@@ -984,7 +984,8 @@
             "P4.5-T2",
             "P4.5-T3"
           ],
-          "estimate": "1-2 窗口"
+          "estimate": "1-2 窗口",
+          "actual_approach": "2026-09-27 真机验收（worktree d:/ai-os-p4.5 分支 claude/p4.5-pci-extract @1cc97ff）。\n【实现】kernel/src/mmio_user.rs：boot 期 init_net 扫 PCI bus0 找 0x1AF4:{0x1041,0x1000}（transitional find_cap 短布局复用 T3）→ BAR4 四区页对齐并集 + 使能 MEM|bus-master → 分配 8 连续帧 DMA arena（RX desc+avail/页0、RX used/页1、TX desc+avail/页2、TX used/页3、报文缓冲/页4~7，内核用户两侧同源契约）→ 注册 ObjKind::Device。新 syscall DeviceMap #52（ABI_MINOR 5→6）：resolve_device_map（slot0/空槽/非 Device kind → E_INVALID_CAP，缺 MAP 权 → E_PERMISSION，retired → -12）+ obj==注册 NIC 比对 → BAR 并集(4页)+arena(8页)映进调用方 AS（USER|WRITABLE|NX，0x4800_0000 起，AlreadyMapped 拒绝不覆盖）→ DeviceMapInfo(80B) 经 write_user_chunked 8B 分块写出参（info_out 8B 对齐 + user_mem_ok 逐页围栏，违例 -2 拒绝而非 fault）→ rax 返回 mmio VA；MAPS 幂等表（重复调用返同组 VA）。kernel/src/net_smoke.rs：进 ring-3 前 kthread 直调 1 正 + 3 负断言 → spawn diplomat（slot1 MAP 正 cap + slot2 缺 MAP + slot3 错 kind 负 fixture；E1 口径：NIC cap 只铸 diplomat，负 fixture 非第二出口）→ 续体确证（幂等表条目=device_map 真被调用的直接证据 + death fault=0/exit_code=1 + FR8 回基线）。user/diplomat：负路径 4 断言在 ring-3 直接观测（-7/-1/-2/-2）→ 正路径 → modern 协商（VERSION_1+MRG_RXBUF+MAC）→ RX/TX 双队列 setup（notify_off*mult kick、used_off 与内核 arena 对账）→ dummy TX（12B hdr+60B 帧，广播 dst/设备 MAC src/0x8863）→ DRIVER_OK 后 kick → used 轮询 → exit(TX 完成数=1)。user/src/net.rs 纯 kit（三环算术/帧构造/PHY trait 骨架，宿主单测与内核布局同源对账，smoltcp 真依赖留 P5-T1/T3）。\n【真机修复三处】① ring3.rs handle_process_exit swapgs 条件化：syscall 源（GS 已入口交换）补平衡 swapgs、fault 源（异常递送不动 GS，合同已正确）跳过——判别器 rdmsr(0xC0000102)==&PER_CPU；无条件补 swapgs 会翻转合同，毒化下一 ring-3 会话首次 syscall（gs:[8] 垃圾栈指针 → push fault → 递送再失败 #DF，exit 355）。与 P4-T7 的 ensure_kernel_gs_base 同根因的另一半收敛；② diplomat DRIVER_OK 必须先于任何 notify（spec §2.4；QEMU 未 OK 不启动队列处理，kick 被丢 → used 恒 0 → 轮询超时 exit 0）；③ 设备/arena 页回收先 unmap_device_pages（只解映射）再 free_all_user_pages——DMA arena 是内核持有设备资源，误 free = FR8 账本 -8（真机 used 258≠266 暴露）+ 伙伴系统二次分配踩脏。\n【真机三重证据】① xtask run exit 363（marker $）；② serial [net-smoke] PASS（resolve 4 断言 + device_map 往返记录 + exit_code=1/fault=0 + FR8 回基线 266）；③ 前序 8 smoke（ipc/notif/irq/ring3/elf/spawn/crash/net）全 PASS 无 PANIC。\n【宿主】cargo test --workspace --exclude synapse-kernel 全绿（abi 18 + user 57 含 8 新 #52/net 布局测 + kint DeviceMap 桩臂）。【口径注】任务书 legacy 口径已被 T3 实测推翻（QEMU 11.1 无 legacy 通路），real 路线 = modern 1.x + #52 用户态映射；PHY 为骨架非 smoltcp 实装（P5-T1/T3）。"
         },
         {
           "id": "P4.5-T5",
@@ -2380,6 +2381,18 @@
       "scope": "P6.11-T1 用户会话体系决策：候选 C 双轨制（cap 命名空间隔离 + 会话 token 认证）用户批准",
       "decision": "【背景】GAP-1/R13 登记的产品缺口：单用户 capability 模型无登录/账户/会话隔离/锁屏；S6 桌面（空间外壳）多用户形态需要决策收敛，阻塞 P6.11-T2。【约束】D1 内核唯一强制点=cap（Doc 01 §1.1）；D2 扁平 per-process CapTable 首期不做 CNode 树（§1.2/§7）；D3 derivation tree 级联撤销现成（§3.4）；D4 agent_id 内核盖章 init 统管（§2.3/§7，R5）；D5 锁屏属 shell 独占前台交互层（Doc 07 §1.3/§6）；D6 无存储/无信任根→token 定位在场性断言（R6/R9）；D7 本地会话≠跨 OS DID/VC（Doc 05）。【对比】A cap 命名空间=内核改动最小、隔离有强制力，但无认证 bearer，锁屏解锁语义悬空；B 会话 token=认证完整，但 token 无内核牙齿即 UI 装饰、进内核即破 D1 双权威源，二难无解；C 双轨=两轨各就各位，唯一接缝 SessionManager 翻译（认证通过→铸会话根 cap；登出→撤销级联失效），闭环无缺口。【定夺】用户批准候选 C。per-user CapTable 落地为派生子树视图（非新内核结构）；agent_id 加会话维 (user_session, agent_id) 盖章不变；首期单用户默认不启用，现行为零破坏；启用条件=S6 多用户/锁屏实施。【落盘】docs/design/10-user-session-decision.md 状态 DECIDED；需求目标 Phase 6 用户会话行标 DECIDED、R13 处置更新（T2 落地前风险保留）；docs/README.md 索引补 10 行。",
       "alternatives_rejected": "× A（cap 命名空间单轨）：隔离有力但认证语义缺载体，锁屏/多用户切换无标准 bearer，等于把认证悄悄推给物理在场默认信任；× B（会话 token 单轨）：token 不进内核无强制力、进内核破坏 Doc 01 单一强制点不变量，半套方案；× 等 S6 实施时再决策：GAP-1 原文即要求 S6 设计时收敛，P6.11-T2 排期在即，决策点前移成本最低且不阻塞 S6 自身推进。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4.5-T4 device_map #52 语义定夺：MAP 权围栏 + 内核供给 DMA arena + E1 唯一铸口",
+      "decision": "DeviceMap(#52) 权限模型：Device cap 须持 Rights::MAP 且 ObjKind::Device 且 obj==注册 NIC（缺 MAP→-7，错 kind/空槽→-1，retired→-12）；映射带 USER|WRITABLE|NX（W^X）；info 出参逐页 user_mem_ok + 8B 对齐围栏（违例 -2 拒绝而非 fault）；幂等表按 pid 恒返同组 VA。DMA 地址口径：desc.addr 须设备可见 PA 而 ring-3 无平移能力→本期内核预分配 8 连续帧 arena（恒等映射）并把 dma_va/dma_pa 经 DeviceMapInfo 交给驱动；P6 IOMMU 落地后切换为用户自分配 + IOVA 映射（Doc 01 §2.1 Device-MAP 语义演进点）。E1（Doc 04 §3.2）：NIC Device cap 只铸给 diplomat（net_smoke 即铸即验），init/boot 不持 MAP 权设备 cap——负路径 fixture（缺 MAP/错 kind）验证围栏逻辑，不构成第二出口。ABI_MINOR 5→6。",
+      "rationale": "PCI 配置空间在 ring-3 不可达（out 0xCF8 → #GP），用户态驱动必须经内核转发映射；MAP 权与 IRQ_BIND 分立使'能收中断'与'能碰寄存器'两能力正交（Doc 01 §2.1）。内核供给 arena 是 IOMMU 缺位下唯一不破坏 ring-3 无特权约束的方案；提前把布局做成 dma_va/pa 出参，P6 切换实现不动 ABI 结构。"
+    },
+    {
+      "date": "2026-09-27",
+      "scope": "P4.5-T4 真机暴露两合同：process_exit swapgs 二态条件化 + 设备帧所有权 unmap-only",
+      "decision": "① handle_process_exit 的 iretq 路径 swapgs 改为条件化——判别器 rdmsr(IA32_KERNEL_GS_BASE)==&PER_CPU 即 fault 源（异常递送不动 GS，合同已正确，跳过），否则 syscall 源（入口已交换，补被 sysretq 跳过的平衡 swapgs）。与 P4-T7 ensure_kernel_gs_base 是同一账本两半：T7 修 enter_user_at 防御归一化，本次修 exit 侧按源分账，此后六处调用点（ProcessExit dispatch/terminate_current/legacy idt 分支）无需感知入口态。② DMA arena 帧是内核持有的设备资源（随 NET ctx 跨进程存续），不归子进程——terminate_current 与 net 续体两条回收路径都先 unmap_device_pages（只解映射）再 free_all_user_pages；设备页混进进程叶页 free = 伙伴系统二次分配踩脏 + FR8 账本漂移（真机 used 258≠266 实证）。FR8 口径：net-smoke 基线含 arena，arena 恒持有→恒等式成立。③ virtio 时序：DRIVER_OK 必须先于任何 notify（spec §2.4；QEMU 未 OK 不启动队列处理，kick 静默丢→used 恒 0）。",
+      "rationale": "①的必要性只有 T4 才暴露：此前 crash-smoke 是链尾（terminate 后立即 exit 363），GS 合同翻转只毒化'下一个 ring-3 会话'——T4 首次让 crasher 之后再进 diplomat，首条 syscall push 即 #DF（gs:[8] 读实模式 IVT 垃圾）。无条件 swapgs 从 P4-T5 起就是半对半错，syscall 源掩盖了 fault 源的错误。②是'映射即拥有'直觉的反例：页表项归进程、帧所有权归设备，两层必须分开记账。"
     }
   ],
   "current_task": "P3-T8",

@@ -2,27 +2,32 @@
   "featureName": "P4.5-T4",
   "description": "virtio-net 用户态驱动预研 + diplomat spawn 接入契约",
   "mode": "create",
-  "currentStage": "01-analysis",
+  "currentStage": "05-integration",
   "stages": {
-    "01-analysis": "pending",
-    "02-architecture": "pending",
-    "03-planning": "pending",
-    "04-codegen": "pending",
-    "05-integration": "pending"
+    "01-analysis": "done",
+    "02-architecture": "done",
+    "03-planning": "done",
+    "04-codegen": "done",
+    "05-integration": "done"
   },
   "subtaskCompletion": {
-    "T4a-userland-virtio-net-skeleton": "pending",
-    "T4b-bar-mmap-userland-path": "pending",
-    "T4c-smoltcp-phy-trait-stub": "pending",
-    "T4d-diplomat-spawn-contract": "pending",
-    "T4e-real-machine-validation": "pending"
+    "T4a-userland-virtio-net-skeleton": "done",
+    "T4b-bar-mmap-userland-path": "done",
+    "T4c-smoltcp-phy-trait-stub": "done",
+    "T4d-diplomat-spawn-contract": "done",
+    "T4e-real-machine-validation": "done"
   },
   "notes": {
-    "scope": "user/diplomat/src/driver/virtio_net.rs（virtio-net legacy MMIO 驱动结构 + smoltcp PHY trait 实现骨架）；BAR mmap 由用户态进程发起（kernel/src/mmio_user.rs 或复用 umem，仅外交工具进程持 NIC Device cap）；diplomat 进程启动契约 + 提交路径测试",
-    "design-contract": "Doc 04 §3.1 唯一网络出口不变量；Doc 07 §1.1 + Doc 08 §1.1 一致契约；本期仅预研不发真实包（P5-T3 实做）",
-    "scope-defer": "真实 smoltcp PHY 完整实现、ARP/IPv4 全协议栈 → P5-T3；本期仅结构骨架 + dummy submit 用 used ring 回调验证 IRQ_BIND 链路通",
-    "cross-task-dep": "P4.5-T2 IRQ_BIND（用户态订阅 IRQ）；P4.5-T1 pci 抽离"
+    "scope": "QEMU 挂 virtio-net-pci（-netdev user 不出外网）；内核 boot 期 PCI 探测 NIC 0x1AF4:{0x1000,0x1040} → transitional vendor cap 短布局（T3 实测 16B/条）解析 BAR4 common/notify/device 三区并集页对齐注册 Device 对象；新 syscall DeviceMap #52（Device cap 须持 Rights::MAP + ObjKind::Device + obj==注册 NIC，映射进调用方 AS USER|RW|NX 返回用户 VA）；user/diplomat ELF：用户态 modern 协商（RX/TX 双队列）+ dummy TX 提交 + used 轮询 + PHY trait 骨架（不引 smoltcp 依赖，接口对齐）；负路径：无 MAP 权 cap → E_PERMISSION（内核断言）",
+    "route-correction": "任务书原口径 virtio-net legacy MMIO——T3 已证实本机 QEMU 11.1 legacy 数据通路移除，统一 modern 1.x（decision_log 2026-09-27 P4.5-T3 两条）",
+    "design-contract": "Doc 04 §3.1/§3.2 E1 唯一网络出口不变量预研：仅外交工具进程持 NIC Device cap；Doc 01 §2.1 Device 行 MAP 权限位；W^X：MMIO 映射带 PT_NX；ABI_MINOR 4→5",
+    "reuse": "resolve_device_irq 同构 helper（改 MAP 权校验）；spawn.rs step-3b 铸 cap 模式；T3 find_cap 短布局解析口径",
+    "scope-defer": "IRQ_BIND RX 中断收包与 smoltcp 真依赖 → P5-T1/T3；本期 dummy TX 轮询验证 BAR mmap + virtqueue 提交回路",
+    "cross-task-dep": "P4.5-T2 IRQ_BIND（本期未用，留 P5）；P4.5-T3 modern 协商/描述符链同构",
+    "verifier": "真机 exit 363：[net] 探测注册 → spawn diplomat → DeviceMap 往返 → 协商 + dummy TX used 回调 → exit(0) 断言 death fault=0；宿主 diplomat crate cfg(test) mock 编译通过",
+    "actual_approach": "2026-09-27 真机收口（claude/p4.5-pci-extract @1cc97ff，worktree d:/ai-os-p4.5）。【口径修正】ABI_MINOR 实为 5→6（4→5 已被 P5 设计稿预写，T2 时实际到 5）。【实现】kernel/src/mmio_user.rs：init_net boot 探测 0x1AF4:{0x1041,0x1000}→BAR4 四区页对齐并集(4页)+8 连续帧 DMA arena（RX desc+avail/0、RX used/0x1000、TX desc+avail/0x2000、TX used/0x3000、报文缓冲/0x4000，两侧同源契约由 user/src/net.rs 宿主测对账）→ ObjKind::Device 注册；sys_device_map(#52)：resolve_device_map（-1/-7/-12 围栏）+ NIC obj 比对 + user_mem_ok/8B 对齐（-2）+ write_user_chunked 8B 分块填 DeviceMapInfo(80B) + MAPS 幂等表 + rax=mmio VA(0x4800_0000)；net_smoke.rs 进 ring-3 前 1 正+3 负直调断言 → spawn diplomat（slot1 MAP + slot2/3 负 fixture，E1 只铸 diplomat）→ 续体（幂等表=往返直证 + fault=0/exit_code=1 + FR8 回基线 266）；user/diplomat：ring-3 负路径 4 观测（-7/-1/-2/-2）→ modern 协商（VERSION_1+MRG_RXBUF+MAC）→ RX/TX 双队列 setup → dummy TX（12B hdr+60B 帧 0x8863）→ DRIVER_OK → kick → used 轮询 → exit(1)。【真机三修】① ring3.rs handle_process_exit swapgs 条件化（rdmsr KGS==&PER_CPU 判别 syscall/fault 源；无条件补平衡被 fault 源二次翻转 → diplomat 首条 syscall gs:[8] 垃圾 → #DF exit 355；与 P4-T7 ensure_kernel_gs_base 同根因另一半收敛）；② DRIVER_OK 必须先于 notify（QEMU 未 OK 丢 kick → used 恒 0 → exit 0）；③ unmap_device_pages（arena 内核持有 unmap-only）先于 free_all_user_pages（真机 FR8 used 258≠266 暴露'映射即拥有'反例）。【证据】exit 363 marker $；[net-smoke] PASS；8 smoke 全绿无 PANIC；宿主 cargo test --workspace --exclude synapse-kernel 全绿（user 57 含 #52/布局 8 新测）。",
+    "carry-forward": "P4.5-T5 集成 smoke 收口；P5-T1/T3 smoltcp PHY 真实现直接消费 DeviceMapInfo + net.rs 纯 kit；P6 IOMMU 后 arena 切用户自分配（ABI 结构不变）；handle_process_exit 六调用点契约见 decision_log 2026-09-27 T4 条①"
   },
   "createdAt": "2026-09-27T20:50:00",
-  "updatedAt": "2026-09-27T20:50:00"
+  "updatedAt": "2026-09-28T00:30:00"
 }
