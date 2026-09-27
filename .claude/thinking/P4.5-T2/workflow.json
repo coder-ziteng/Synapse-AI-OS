@@ -2,21 +2,21 @@
   "featureName": "P4.5-T2",
   "description": "IRQ 用户态化：IRQ_BIND capability + irq_bind/irq_forward syscall",
   "mode": "create",
-  "currentStage": "01-analysis",
+  "currentStage": "done",
   "stages": {
-    "01-analysis": "pending",
-    "02-architecture": "pending",
-    "03-planning": "pending",
-    "04-codegen": "pending",
-    "05-integration": "pending"
+    "01-analysis": "done",
+    "02-architecture": "done",
+    "03-planning": "done",
+    "04-codegen": "done",
+    "05-integration": "done"
   },
   "subtaskCompletion": {
-    "T2a-device-cap-IRQ_BIND-rights": "pending",
-    "T2b-irq-bind-forward-table": "pending",
-    "T2c-syscall-irq-bind": "pending",
-    "T2d-idt-handler-forward": "pending",
-    "T2e-audit-event-point": "pending",
-    "T2f-real-machine-validation": "pending"
+    "T2a-device-cap-IRQ_BIND-rights": "done",
+    "T2b-irq-bind-forward-table": "done",
+    "T2c-syscall-irq-bind": "done",
+    "T2d-idt-handler-forward": "done",
+    "T2e-audit-event-point": "done",
+    "T2f-real-machine-validation": "done"
   },
   "notes": {
     "scope": "kernel/src/irq_forward.rs（IRQ 0~23 静态绑定表 + Notification CapRef + 进程 PID）；Device kind 新增 IRQ_BIND 权限位；syscall irq_bind(device_cap, irq_vector, notification_cap, rights_mask)；idt#IRQ handler 尾巴调 irq_forward_dispatch(vector) → signal notification；审计埋点 EventKind::IrqBind",

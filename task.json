@@ -920,7 +920,7 @@
         {
           "id": "P4.5-T2",
           "name": "IRQ 用户态化：IRQ_BIND capability + irq_bind/irq_forward syscall",
-          "status": "pending",
+          "status": "done",
           "deliverables": [
             "kernel/src/irq_forward.rs：IRQ 0~23 静态绑定表（扩展 24~47 走 IOAPIC 留 P6 SMP）+ 每项保存 Notification CapRef + 进程 PID",
             "Capability 扩展：Device kind 新增 IRQ_BIND 权限位；持卡进程可调 irq_bind",
@@ -1239,7 +1239,7 @@
         {
           "id": "P6.0-T1",
           "name": "E820 真实探测恢复（解 INT 15h 挂起，build_disk.py 移除硬编码）",
-          "status": "pending",
+          "status": "in_progress",
           "deliverables": [
             "build_disk.py 移除 stage2 16-bit 实模式硬编码 QEMU 内存布局（当前为 7 条 entries 168 字节的临时方案，决策日志 2026-09-26 P2-T1 条目已说明）",
             "stage2 16-bit 实模式恢复 BIOS INT 15h AX=E820h 调用（解 stage2 挂起根因，已识别 PC 跳回 stage2 起点的具体原因）",
@@ -1663,7 +1663,7 @@
         {
           "id": "P6.8-T1",
           "name": "本地推理决策（Rust 推理栈 vs 用户态 libc shim + llama.cpp）",
-          "status": "pending",
+          "status": "in_progress",
           "deliverables": [
             "决策报告（落 docs/design/09-local-inference-decision.md）：三候选对比",
             "候选 A：candle/burn no_std 裁剪版（Rust 原生推理栈）",
@@ -1847,7 +1847,7 @@
         {
           "id": "P6.11-T1",
           "name": "用户会话决策点（capability 命名空间 + 会话 token 双轨，S6 桌面设计时收敛）",
-          "status": "pending",
+          "status": "in_progress",
           "deliverables": [
             "决策报告（落 docs/design/10-user-session-decision.md）：",
             "候选 A：capability 命名空间（多用户 → per-user CapTable + per-user 命名空间）",
