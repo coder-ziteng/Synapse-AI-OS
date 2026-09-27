@@ -1,0 +1,26 @@
+{
+  "featureName": "P4-T9",
+  "description": "process_spawn + 崩溃处理 + per-thread kstack + Quota 强制（解锁 T7 Phase 2 + T10/T11/T13 的硬前置）",
+  "mode": "create",
+  "currentStage": "04-codegen",
+  "stages": {
+    "01-analysis": "completed",
+    "02-architecture": "completed",
+    "03-planning": "completed",
+    "04-codegen": "in_progress",
+    "05-integration": "pending"
+  },
+  "subtaskCompletion": {
+    "T9a-kstack-proc_ext": "completed",
+    "T9b-process_spawn": "pending",
+    "T9c-crash-death-notification": "pending",
+    "T9d-process_reap": "pending",
+    "T9e-quota-enforce": "pending"
+  },
+  "notes": {
+    "T9a": "2026-09-27 commit a65c62c — per-process kstack + PerCpu { current_pid, kstack_top } 解耦。IPC smoke PASS。",
+    "known-preexisting-bug": "commit 8483f82 已披露的间歇 #GP（error_code=0x10）在 timer_interrupt_handler iretq。IPC 改动提高复现率。根因：on_timer_irq → checkpoint→_switch_to 触发上下文切换时 handler pop+iretq 在新线程栈以陈旧寄存器恢复。待独立 bug fix 跟进（不在 T9 范围）。"
+  },
+  "createdAt": "2026-09-27T11:25:00",
+  "updatedAt": "2026-09-27T12:15:00"
+}

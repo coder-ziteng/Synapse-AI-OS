@@ -32,6 +32,12 @@ pub(crate) fn is_success_status(status: &std::process::ExitStatus) -> bool {
     status.success() || status.code() == Some(KERNEL_SUCCESS_EXIT)
 }
 
+/// GUI 模式退出是否成功：除正常出口外，用户手动关闭 GTK 窗口时 QEMU
+/// 在不同内存配置 / 平台下可能返回 -1（非 isa-debug-exit 触发），视为正常。
+fn is_gui_success(status: &std::process::ExitStatus) -> bool {
+    is_success_status(status) || status.code() == Some(-1)
+}
+
 /// 退出码的可读形式（被信号杀死时无退出码）。
 fn exit_code_str(status: &std::process::ExitStatus) -> String {
     match status.code() {
@@ -54,6 +60,19 @@ fn report_exit(status: &std::process::ExitStatus) -> Result<(), String> {
     }
 }
 
+/// GUI 模式退出判定：接受 -1（用户关窗）。
+fn report_gui_exit(status: &std::process::ExitStatus) -> Result<(), String> {
+    let code = exit_code_str(status);
+    println!("[xtask] QEMU exited with exit code: {code}");
+    if is_gui_success(status) {
+        Ok(())
+    } else {
+        Err(format!(
+            "QEMU abnormal exit {code} (expected 0, {KERNEL_SUCCESS_EXIT}=kernel success, or -1=window closed)"
+        ))
+    }
+}
+
 /// 构造 QEMU 命令行参数。
 ///
 /// 关键参数说明：
@@ -67,7 +86,7 @@ fn report_exit(status: &std::process::ExitStatus) -> Result<(), String> {
 /// | `-device isa-debugcon,iobase=0x501` | kernel `_start64` 入口追踪字符                         |
 /// | `-no-reboot`                        | triple fault 时 QEMU 退出（exit != 0），而非重启       |
 /// | `-monitor none`                     | 禁用 monitor（避免额外 socket 残留）                   |
-/// | `-m 128M`                           | 内存；足够 4GB 恒等映射页表 + 内核                     |
+/// | `-m 1024M`                          | 内存；足够 4GB 恒等映射页表 + 内核                     |
 /// | `-cpu qemu64`                       | 最小可用 x86_64 CPU（无特殊 feature 依赖）             |
 pub fn build_args(serial_log: &Path, dc402: &Path, dc501: &Path) -> Vec<String> {
     let root = workspace_root();
@@ -94,7 +113,7 @@ pub fn build_args(serial_log: &Path, dc402: &Path, dc501: &Path) -> Vec<String> 
         "-monitor".into(),
         "none".into(),
         "-m".into(),
-        "128M".into(),
+        "1024M".into(),
         "-cpu".into(),
         "qemu64".into(),
     ]
@@ -116,17 +135,18 @@ pub fn build_args_gui(serial_log: &Path, dc402: &Path, dc501: &Path) -> Vec<Stri
 /// 无头启动 QEMU 并**等待退出**。用于 `xtask run`（用户想看到完整日志后再返回 shell）。
 pub fn run_headless() -> Result<(), String> {
     let logs = logs_dir();
-    let serial = logs.join("serial.log");
-    let dc402 = logs.join("debugcon-stage12.log");
-    let dc501 = logs.join("debugcon-kernel.log");
-
-    // 清理旧日志，避免误读上一轮残留
-    let _ = std::fs::remove_file(&serial);
-    let _ = std::fs::remove_file(&dc402);
-    let _ = std::fs::remove_file(&dc501);
+    // 使用时间戳避免文件锁定冲突
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let serial = logs.join(format!("serial-{}.log", ts));
+    let dc402 = logs.join(format!("debugcon-stage12-{}.log", ts));
+    let dc501 = logs.join(format!("debugcon-kernel-{}.log", ts));
 
     let args = build_args(&serial, &dc402, &dc501);
     println!("[xtask] QEMU: qemu-system-x86_64 {}", args.join(" "));
+    println!("[xtask] Logs: serial={}, dc402={}, dc501={}", serial.display(), dc402.display(), dc501.display());
 
     let status = Command::new("qemu-system-x86_64")
         .args(&args)
@@ -178,5 +198,5 @@ pub fn run_gui() -> Result<(), String> {
         .status()
         .map_err(|e| format!("qemu spawn failed: {e}"))?;
 
-    report_exit(&status)
+    report_gui_exit(&status)
 }

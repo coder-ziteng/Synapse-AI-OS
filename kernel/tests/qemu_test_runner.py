@@ -86,7 +86,7 @@ def main() -> None:
         "-serial", f"file:{SERIAL_LOG}",
         "-device", "isa-debug-exit,iobase=0x502",
         "-no-reboot", "-monitor", "none",
-        "-m", "128M", "-cpu", "qemu64",
+        "-m", "1024M", "-cpu", "qemu64",
     ]
     try:
         r = subprocess.run(cmd, cwd=REPO_ROOT, timeout=QEMU_TIMEOUT_S,

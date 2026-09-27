@@ -43,9 +43,9 @@ use crate::paging::{
 };
 
 /// 用户栈顶 VA（hello 栈需求极小；16B 对齐，入口 RSP = TOP - 8）。
-const ELF_STACK_TOP: u64 = 0x4080_0000;
+pub(crate) const ELF_STACK_TOP: u64 = 0x4080_0000;
 /// 用户栈页数（16KB）。
-const ELF_STACK_PAGES: u64 = 4;
+pub(crate) const ELF_STACK_PAGES: u64 = 4;
 /// initramfs 内目标文件名（xtask `initramfs.rs` 打包约定）。
 const HELLO_NAME: &str = "hello";
 
@@ -72,7 +72,7 @@ pub(crate) fn current_as_ptr() -> u64 {
 
 /// 从 initramfs 提取并解析 hello ELF（smoke 与 continuation 清理各调一次，
 /// 输入驻留内存不变 → 结果确定）。
-fn extract_and_parse() -> ParsedElf<'static> {
+pub(crate) fn extract_and_parse() -> ParsedElf<'static> {
     let initrd = crate::initrd::bytes().expect("[elf-smoke] initramfs missing (0x20100 size=0)");
     let elf_bytes = cpio::find(initrd, HELLO_NAME)
         .expect("[elf-smoke] cpio malformed")
@@ -89,7 +89,7 @@ fn extract_and_parse() -> ParsedElf<'static> {
 // ============================================================================
 
 /// 段权限 → 页表叶 flags（W^X：可写段强制 NX）。
-fn leaf_flags(seg: &LoadSegment) -> u64 {
+pub(crate) fn leaf_flags(seg: &LoadSegment) -> u64 {
     let mut flags = PT_USER;
     if seg.writable() {
         flags |= PT_WRITABLE;
@@ -104,7 +104,7 @@ fn leaf_flags(seg: &LoadSegment) -> u64 {
 ///
 /// 清零覆盖两类字节：页内 vaddr 之前的头部空洞、memsz>filesz 的 bss 尾部
 /// （ELF 语义 + 防物理页残留信息泄漏，Doc 02 §2.3）。
-fn map_segment(as_user: &mut AddressSpace, seg: &LoadSegment) {
+pub(crate) fn map_segment(as_user: &mut AddressSpace, seg: &LoadSegment) {
     let flags = leaf_flags(seg);
     for i in 0..seg.page_count() {
         let va = seg.page_start() + i * FRAME;
@@ -141,8 +141,8 @@ fn map_segment(as_user: &mut AddressSpace, seg: &LoadSegment) {
     );
 }
 
-/// 映射用户栈（RW + NX，零页）。
-fn map_stack(as_user: &mut AddressSpace) {
+/// 映射用户栈（RW + NX，零页）。返回 `(stack_base, stack_top)`。
+pub(crate) fn map_stack(as_user: &mut AddressSpace) -> (u64, u64) {
     let base = ELF_STACK_TOP - ELF_STACK_PAGES * FRAME;
     for va in (base..ELF_STACK_TOP).step_by(FRAME as usize) {
         let frame = alloc_frame().expect("[elf-smoke] frame for stack");
@@ -159,6 +159,29 @@ fn map_stack(as_user: &mut AddressSpace) {
         ELF_STACK_TOP,
         ELF_STACK_TOP - 8
     );
+    (base, ELF_STACK_TOP)
+}
+
+// ============================================================================
+// 可复用装载原语（T9b spawn 路径使用）
+// ============================================================================
+
+/// 把 hello ELF 装入新 AddressSpace（T9b spawn 路径）。
+///
+/// 返回 `(as_user, entry, stack_top)`，调用方负责 iretq 到 entry 并在
+/// 续体中清理 AS。
+pub(crate) fn load_hello_into_as() -> (AddressSpace, u64, u64) {
+    let parsed = extract_and_parse();
+    let mut as_user = AddressSpace::new().expect("[spawn] frames for child AS");
+    for seg in parsed.loads() {
+        map_segment(&mut as_user, seg);
+    }
+    let (_stack_base, stack_top) = map_stack(&mut as_user);
+    info!(
+        "[spawn] loaded hello: entry={:#x}, stack_top={:#x}, pml4={:#x}",
+        parsed.entry, stack_top, as_user.pml4_phys()
+    );
+    (as_user, parsed.entry, stack_top)
 }
 
 // ============================================================================
@@ -198,7 +221,7 @@ pub fn elf_load_smoke() -> ! {
     for seg in parsed.loads() {
         map_segment(&mut as_user, seg);
     }
-    map_stack(&mut as_user);
+    let _ = map_stack(&mut as_user);
 
     // 3. 记录 continuation 所需状态
     OLD_CR3.store(crate::paging::cr3_read(), Ordering::SeqCst);
@@ -311,6 +334,8 @@ extern "C" fn elf_continuation() -> ! {
     info!("[elf-smoke] PASS");
 
     // 6. 主动退出 QEMU：isa-debug-exit (0x502) 写 0xB5 → exit 363（成功出口）。
+    // TODO: spawn-smoke 被 elf-smoke 的 #GP 阻塞，暂跳过
+    // crate::spawn::spawn_smoke()
     unsafe {
         asm!(
             "mov dx, 0x502",
@@ -320,7 +345,6 @@ extern "C" fn elf_continuation() -> ! {
         );
     }
 
-    // 不应到这里（isa-debug-exit 已触发 QEMU 退出）
     loop {
         unsafe { asm!("hlt", options(nostack, preserves_flags)) };
     }

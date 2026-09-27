@@ -44,6 +44,13 @@ pub fn kstack_alloc() -> Option<(u64, u64)> {
     let top_frame = p0.max(p1).max(p2).max(p3);
     let top = top_frame + 4096 - 8;
 
+    // 检查是否连续（MVP 期望连续，不连续会导致栈空洞）
+    let contiguous = (top_frame - bottom) == 3 * 4096;
+    log::info!(
+        "[kstack] alloc: frames=[{:#x}, {:#x}, {:#x}, {:#x}] bottom={:#x} top={:#x} contiguous={}",
+        p0, p1, p2, p3, bottom, top, contiguous
+    );
+
     // poison: 填 0xCC 让栈溢出越界可见
     unsafe {
         poison_range(bottom, KSTACK_SIZE);

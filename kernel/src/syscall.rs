@@ -45,7 +45,6 @@
 //!   进程调度 hook 接进来后（T6+）用 per-thread 标志位防重入。
 
 use core::arch::asm;
-use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use synapse_abi::{
@@ -64,26 +63,17 @@ const MSR_LSTAR: u32 = 0xC000_0082;
 const MSR_FMASK: u32 = 0xC000_0084;
 const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
-/// STAR 寄存器布局（Linux 习惯）：
-/// - bits 47:32 = kernel CS（syscall 时 CPU 把它 +8 作 SS、+16 作 CS）
-/// - bits 63:48 = user CS base（sysret 时 CPU 把它 +8 作 SS、+16 作 CS）
+/// STAR 寄存器布局（AMD64 Vol.2 §4）：
+/// - bits 47:32 = kernel CS（syscall 入口 CPL=0，CS = STAR[47:32]）
+/// - bits 63:48 = user CS - 16（sysret 出口 CS = STAR[63:48] + 16，SS = STAR[63:48] + 8）
 ///
-/// 设 STAR = `(0x08 << 32) | 0x23`：syscall 路径 CS=0x08+16=0x18?
-/// 实际 AMD64 Vol.2 §4.1：syscall 把 STAR[63:48] 加载到 CS（不是 STAR[47:32]）。
-/// 重读：STAR[47:32] 用于 syscall CS 加载，STAR[63:48] 用于 sysret CS 加载。
-///
-/// 正确布局（Linux 实测）：
-/// - STAR[47:32] = 0x10（kernel DS），syscall 路径 CS = 0x10 + 8? 不，
-///   Linux 写的是 0x08 kernel CS：syscall 入口 CPL=0，CS = STAR[47:32]+8?
-///   Vol.2 表 4-1：syscall 设 CS.Sel = STAR[47:32] + 8? 不，CS.Sel = STAR[63:48]
-///   也不对 — 实际 Linux 把 STAR = (CS_K << 32) | (CS_U-16)，CS_U=0x33：
-///   STAR = (0x08 << 32) | 0x23 —— syscall 入口 CS = STAR[47:32]=0x08，
-///   sysret 出口 CS = STAR[63:48]+16=0x33。
-///
-/// 我们对齐 Linux：STAR = (kernel_CS << 32) | (user_CS - 16)，
-/// 其中 user_CS = 0x33（ring-3 code sel），sysret 把它读回；user_DS = 0x2B，
-/// sysret SS = (user_CS - 16) + 8 = 0x23 + 8 = 0x2B。
-const STAR_VALUE: u64 = 0x0000_0008_0000_0023u64;
+/// 我们对齐 Linux 习惯：
+/// - kernel_CS = 0x08（GDT index 1, RPL=0）
+/// - user_CS = 0x2B（GDT index 5, RPL=3）
+/// - STAR[63:48] = user_CS - 16 = 0x2B - 16 = 0x1B
+/// - sysret CS = 0x1B + 16 = 0x2B ✓
+/// - sysret SS = 0x1B + 8 = 0x23（user DS）✓
+const STAR_VALUE: u64 = 0x0000_001B_0000_0008u64;
 
 /// FMASK：syscall 入口自动清除的 RFLAGS 位。设 0 = 保留全部（含 IF），
 /// 允许中断嵌套。
@@ -266,6 +256,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> i64 {
 }
 
 fn dispatch_inner(frame: &SyscallFrame) -> i64 {
+    log::info!("[syscall] dispatch: num={} ({:#x})", frame.num, frame.num);
     let Some(sc) = decode(frame) else {
         // IllegalSyscall（Doc 02 §5.3）：未知号 / 窄参数越界。不静默截断、
         // 不按 E_NOT_IMPLEMENTED 温和返回——杀进程语义。MVP smoke 下与

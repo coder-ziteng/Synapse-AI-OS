@@ -1,4 +1,16 @@
-# Synapse — AI 原生微内核
+# Synapse — AI 原生操作系统
+
+<p align="center">
+  <img src="synapse-aios/logo/synapse-xuanwu-color.png" alt="Synapse 玄武 Logo" width="160">
+  <br>
+  <b>SYNAPSE &nbsp;AI-OS</b>
+  <br>
+  <sub>AI 原生操作系统 · 让 Agent 成为一等公民</sub>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+</p>
 
 > 一个从零自研的 x86_64 微内核，目标是让 **AI Agent 成为一等公民**：
 > 内核态只保留调度 / 内存 / IPC / 能力（Capability）原语，所有 AI 业务
@@ -61,7 +73,7 @@ QEMU 真机跑通端到端 smoke（spawn → 委托 → 撤销 → IPC → exit 
 | P4 | 用户态与 IPC（用户地址空间 · syscall · ELF 加载 · init 进程） | 🔄 进行中 (6/14)：已分解 14 任务（T1 target+ELF → T12 PCID+收尾 · T13 cap syscall 接线+安全回归 · T14 NFR2 基准+idle 根治，T13/T14 自 s6 分支缺口审查并入）· T1 ✅ 用户态 target json + 基址 1GB 链接脚本 + 第一个静态 ELF · T2 ✅ 内核 4KB 页表 + AddressSpace（CR3 切换/用户页读写/#PF 期望故障恢复，真机 15/15）· T3 ✅ VMA 表 + 按需分页缺页路径（synapse-vma 纯逻辑 crate 20/20 宿主测 + 内核 handle_user_fault 接 idt#PF 真机 14/14：VMA 注册/需求映射/权限违例 kill/未注册 kill/NULL guard/FR8 归零；顺带强化 #PF trampoline 保存 caller-saved GPR 让 faulting 指令正确重执）· T4 ✅ Ring3 切换 smoke（GDT ring-3 描述符启用 + TSS.RSP0 16KB 内核栈 + MSR STAR/LSTAR/FMASK/IA32_KERNEL_GS_BASE 配置 + syscall 入口汇编 swapgs→切内核栈→push GPR→dispatch→sysret + iretq 首次进入用户态 + CPL=3 往返；真机 exit 363：用户态 _start 跑起 → syscall abi_query 往返 → 用户态写共享页 → syscall process_exit → 内核 iretq 回 continuation → ABI 值回读校验 → FR8 归零；顺带修 PML4[0] 缺 U/S 位致 user walk 在 PML4 级被拒 + syscall frame push 顺序错位导致 dispatch 误读 user_RSP 为 num）· T5 ✅ 静态 ELF 加载器 + initramfs（synapse-elf 纯逻辑 crate：ELF64 ET_EXEC 完整校验 20 错误变体 + cpio newc 解析器，宿主 18/18；构建管线 xtask cpio 写器 → build_disk.py 把 initramfs 追加在 kernel.bin 后由 stage2 连续加载、0x20100 写 {base,size} 引导记录；内核 initrd.rs + page_frame 出账保留 + elfload.rs 装入用户 AS（逐页 alloc/清零/拷贝/映射 W^X + 用户栈 entry RSP=TOP-8）→ iretq 进 hello e_entry；真机 exit 363：hello ring-3 跑 abi_query 往返 → process_exit → continuation 断言计数=2 + CR3 还原 + 逐页 unmap/free + FR8 回基线；顺带修 T4 遗留两 bug：process_exit iretq 路径缺平衡 swapgs 致再进用户态首次 syscall #DF + sysretq 前未还原 user RSP 致真实 ELF pop 即 #PF）· T6 ✅ syscall 分发 + 基础调用（abi crate：Doc 02 §4.3 错误码 10 常量 + Timespec + clock_id + prot/flags 位（与 vma RegionFlags 低位对齐零转换）+ ABI_MINOR 1→2，宿主 16/16；内核 dispatch 重写：synapse_abi::decode 严格解码接入，未知号/窄参数越界 → IllegalSyscall 杀进程（ring3 stub #999 真机验证 count==1），外壳统一 frame.num 写回（修旧路径负错误码不写回 → 用户态读旧号的潜伏 bug）；gettime 接 clock.rs TSC 单调钟（WALL 延后 -10，user_mem_ok 前置逐页校验）；umem.rs mmap eager 映射（bump 0x4100_0000/显式 hint + prot/flags/len 全错误路径 -2/-3/-5/-7/-10）+ munmap 精确匹配 ACTIVE；yield/exit 接 sched；hello 重写为 6-syscall 全序列真机测试程序（成功路径 + 每条错误路径负码断言 + mmap 写读回环 + 单调钟两次不减）；真机 exit 363：elf-smoke PASS umem stats mmap 4ok/11err + munmap 4ok/5err + FR8 回基线；前置 merge s6@b5b2e8d 引入 P3-T8 竞态修复解除 mutex smoke 阻塞，P3-T8 marker i/j 撞 P4-T4 → 迁 s/t）（独立 worktree d:/ai-os-p4，分支 claude/p4-userspace）· T7 🔄 IPC 内核接线 Phase 1（kernel/src/ipc.rs ~1100 行：5 表 static + k_ipc_send/recv/reply/try_send + AUX sleepq + synapse_ipc Endpoint 状态机 + synapse_cap transfer_caps + walk_flags PA-to-PA 单拷贝；syscall dispatch 接 4 IPC 号 + ABI_MINOR 2→3 + 5 新错误码 -11..-15；真机 kthread_ipc_smoke marker u/v：A.send→B.recv→B.reply→A.recv + cap transfer + try_send Queued + 4 条错误路径全 PASS exit 363；hello 加 6 条 IPC 用例含 boot fence -4 围栏 + try_send 错误/Queued 路径；Phase 2 待 P4-T9 per-thread kstack 解除 boot fence 后启用真双向时序断言） |
 | P4.5 | PCI 枚举与中断用户态化 | 未开始 |
 | P5 | 外交工具与 Agent 雏形 | 未开始 |
-| P6 | SMP / 存储栈 / IOMMU / 本地推理 / 跨 OS 外交 | 远期 |
+| P6 | SMP / 存储栈 / IOMMU / 本地推理 / 跨 OS 外交 / **内存自适应三件套**(GAP-4) / **USB+蓝牙外设栈**(GAP-3) / **音频栈**(GAP-2) / **登录会话体系决策**(GAP-1) | 远期（4 项需求缺口已登记 task.json `requirement_gaps`，2026-09-27） |
 | S6 预研 | 显示栈 PoC（tiny-skia 渲染管线 · Bento Grid + Liquid Glass 玄武视觉 · 赛博朋克虚拟人表情状态机，Doc 07） | ✅ PoC 完成 (S6-T0 v2)：19 tests 绿 · 1080p 整帧 ~105ms；内核侧 `bootanim/` 已在 VBE 1024×768 上还原 HTML 时间轴（SETTLED + blit_settled 架构，QMP screendump 多时间点 QA） |
 
 ## 4. 快速开始
@@ -108,6 +120,7 @@ python kernel/tests/run_tests.py      # QEMU 测试套件
 | `user/` | 用户态程序（P4-T1 起启用：`synapse-user` 运行时 + `user/hello` 第一个静态 ELF，构建入口 `xtask user`） |
 | `display/` | S6 显示栈预研（synapse-display：tiny-skia 渲染管线 + 混合模式场景图 + 2D 虚拟人；examples/logo 导出玄武徽章 4 版 PNG，`renderer` feature 门控） |
 | `xtask/` | 构建 / 运行 / CI 任务封装（P4-T5 起含 initramfs cpio 打包，build 三段：kernel → hello → cpio+磁盘镜像；`gui` 子命令 GTK 窗口看 VBE 动画） |
+| `synapse-aios/` | 品牌视觉识别系统：玄武 Logo 4 版 PNG（`logo/`）+ 开机动画单文件 HTML（`boot-animation/`）+ 设计说明 |
 | `docs/design/` | 设计文档 00~07 + rule.md 开发规则 |
 | `scripts/` `build_disk.py` `verify-all.ps1` | 辅助脚本 |
 
@@ -127,6 +140,7 @@ python kernel/tests/run_tests.py      # QEMU 测试套件
 | Doc 07 显示栈与空间外壳 | [`docs/design/07-display-stack-and-spatial-shell.md`](docs/design/07-display-stack-and-spatial-shell.md) |
 | 设计文档索引（状态总览 + 阅读顺序） | [`docs/README.md`](docs/README.md) |
 | **开发规则（含 README 同步协议）** | [`docs/design/rule.md`](docs/design/rule.md) |
+| 品牌视觉设计（玄武 Logo · 开机动画） | [`synapse-aios/README.md`](synapse-aios/README.md) |
 
 ## 7. 协作与贡献
 
@@ -141,6 +155,49 @@ python kernel/tests/run_tests.py      # QEMU 测试套件
    三重证据写入 task.json 的 `actual_approach`。
 4. 面向 GitHub 开源维护：README 是新成员（人类与 AI Agent）的第一入口，
    价值主张与架构图必须保持最新。
+
+## 8. 品牌视觉 · 玄武 Logo
+
+**玄武**镇场，**神经突触**驱动内核。品牌视觉以北方神兽「玄武」（龟蛇合体，
+主水、主智、主冬）为核心意象——龟壳象征内核的**镇守与稳定**，缠绕蛇身象征
+调度的**灵动**，中心能量核即 **AI 之心**，与项目「AI 原生」的定位同构：
+
+| Logo 元素 | 象征意义 |
+| --- | --- |
+| 玄武龟壳（六边形） | 北方神兽 · 镇守 · 稳定 · 玄色主调 |
+| 缠绕蛇身 | 灵动 · 阴阳合一 |
+| 中心能量核 | AI 之心 · 系统内核 |
+| 神经突触放射线 | Synapse（突触）· 信息互联 |
+| 甲纹节点（发光点） | 神经信号 · 数据流通 |
+
+配色取自玄武玄色 + 突触辉光：玄黑底色 `#02050b`、龟壳渐变 `#0d1421 → #1f2a3d`、
+主光晕青 `#4dd0e1`、副光晕紫 `#7c4dff`、高光 `#e0f7fa`。
+
+资源位于 [`synapse-aios/`](synapse-aios/)：Logo 提供 4 版 PNG
+（[color](synapse-aios/logo/synapse-xuanwu-color.png) /
+[color-on-dark](synapse-aios/logo/synapse-xuanwu-color-on-dark.png) /
+[mono-dark](synapse-aios/logo/synapse-xuanwu-mono-dark.png) /
+[mono-light](synapse-aios/logo/synapse-xuanwu-mono-light.png)），
+配套约 9.5 秒的[开机动画](synapse-aios/boot-animation/index.html)
+（单文件 HTML，浏览器打开即可预览；内核侧已在 QEMU VBE 帧缓冲上还原该时间轴，
+见进度表 S6 预研 `bootanim/`）。完整设计说明与分镜脚本见
+[`synapse-aios/README.md`](synapse-aios/README.md)。
+
+**命名释义**：Synapse（神经突触，信息传递的节点）· Xuanwu 玄武（四象之一，
+镇北方）· AI-OS（AI-Native Operating System）——「北冥有鱼，其名为鲲……
+玄武出，神经启。」
+
+## 9. 许可证
+
+本项目基于 **[Apache License 2.0](LICENSE)** 开源：任何人可自由使用、修改、
+分发与商用，前提是**保留版权与来源声明**（LICENSE 文本、版权声明及改动说明）。
+Apache-2.0 同时提供明示专利授权，贡献者自动向使用者授予相关专利许可。
+
+- 版权署名：`Copyright 2026 Synapse AI-OS Contributors`（集体署名，
+  所有人类与 AI Agent 贡献者均涵盖在内，后续贡献无需修改 LICENSE）
+- 修改声明义务：改动过的源文件需注明修改（Apache-2.0 §4(b)）
+- 商标不授权：Apache-2.0 §6 不授予商标使用权——**「Synapse」「玄武」名称与
+  Logo 的品牌使用权仍归项目所有**， forks 发布衍生版时不得冒用本项目品牌
 
 ---
 

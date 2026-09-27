@@ -50,14 +50,14 @@
 //! PA 后直接 `copy_nonoverlapping` 写入接收方 PA），等价于 kmap 退化形态，
 //! 无需维护 kmap 窗口。后续 kernel 上半部迁移后切换为真正 kmap。
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::AtomicU32;
 
 use synapse_abi::{
     SyscallFrame, E_INVALID_ADDR, E_INVALID_CAP, E_NOT_FOUND, E_PEER_DIED, E_PERMISSION,
     E_WOULD_BLOCK,
 };
 use synapse_cap::{CapError, CapRef, ObjKind, Rights, TransferItem, MAX_TRANSFER};
-use synapse_ipc::{Endpoint, RecvOutcome, SendOutcome, SendRequest};
+use synapse_ipc::{RecvOutcome, SendOutcome, SendRequest};
 
 use crate::paging::{AddressSpace, PT_USER, PT_WRITABLE};
 use crate::sync::SpinLock;
@@ -93,7 +93,6 @@ struct SenderWait {
 #[derive(Clone, Copy)]
 struct InFlight {
     sender_thread: ThreadId,
-    sender_pid: u32,
     sender_as: u64,
     sender_buf: u64,
     sender_len: u32,
@@ -220,7 +219,6 @@ pub fn current_pid() -> u32 {
 ///
 /// 返回 (ObjRef, badge)；错误码直接对应 Doc 03 §5.1。
 fn resolve_endpoint(pid: u32, cptr: u8, need: Rights) -> Result<(synapse_cap::ObjRef, u32), i64> {
-    use synapse_cap::ObjRef;
     // slot 0 是 NULL trap。
     if cptr == 0 {
         return Err(E_INVALID_CAP);
@@ -521,7 +519,6 @@ pub fn k_ipc_send(frame: &SyscallFrame) -> i64 {
                 });
                 aux.in_flight = Some(InFlight {
                     sender_thread: kthread::kthread_current_id(),
-                    sender_pid: pid,
                     sender_as: user_as,
                     sender_buf: msg,
                     sender_len: len,
@@ -723,7 +720,6 @@ pub fn k_ipc_recv(frame: &SyscallFrame) -> i64 {
                     if sw.expects_reply {
                         aux.in_flight = Some(InFlight {
                             sender_thread: sw.thread,
-                            sender_pid: sw.pid,
                             sender_as: sw.as_ptr,
                             sender_buf: sw.payload_addr,
                             sender_len: sw.payload_len,
