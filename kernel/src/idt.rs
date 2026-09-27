@@ -188,6 +188,7 @@ core::arch::global_asm!(
 
 #[no_mangle]
 extern "C" fn general_protection_inner(ip: u64, error_code: u64, cs: u64) -> ! {
+    crate::syscall::star_watchdog("gp-fault");
     if cs & 3 == 3 {
         // ring3 #GP：用户态违规（hlt / 非法 MSR / 段选择子违规等）。
         // 走 ProcessExit/IllegalSyscall 同一 kill 路径（KERNEL_FRAME iretq
@@ -218,15 +219,22 @@ extern "C" fn general_protection_inner(ip: u64, error_code: u64, cs: u64) -> ! {
 // 指令以 rax 等作内存操作数基址（如 `mov rax, [rax]`），handler 返回后 rax 已被
 // 覆写为恢复点 ip，iretq 重执时 `mov rax, [rax]` 会从 ip 自身读字节而非原目标地址
 // （T3 vma-smoke 首次真机暴露：read_volatile(code_base) 返回 faulting 指令自身的字节）。
-// 修复：trampoline 在调 inner 前 push 9 个 caller-saved，inner 返回后 pop 复原；
-// resume RIP 借 callee-saved r12 跨调用传递。
+// 修复：trampoline 在调 inner 前 push 9 个 caller-saved，inner 返回后 pop 复原。
 //
-// 栈纪律：入口 rsp → [err|rip|cs|rflags|rsp|ss]；先 push 9 GPR → [9 regs | cpu frame]，
-// 然后对齐 + call → [pad | ret | 9 regs | cpu frame]；ret 后复原 rsp，逐项 pop GPR，
-// 再覆写 [frame+8]=resume、弃 err、iretq。
+// **r12 保存（P4-T9b 修复）**：resume RIP 需跨 9 个 pop 传递，原实现借用 callee-saved
+// r12 但未保存/恢复原值——若编译器将活跃局部变量（如 paging_smoke 的 f1）分配到 r12，
+// #PF handler 返回后该变量被静默覆写为 resume RIP，导致 unmap 返回值比对失败。
+// 修复：push r12 与 caller-saved 一起保存，pop GPR 后再 pop r12 → rax 用于 patch。
+//
+// 栈纪律：入口 rsp → [err|rip|cs|rflags|rsp|ss]；先 push r12 + 9 GPR → [10 regs | cpu
+// frame]，然后对齐 + call → [pad | ret | 10 regs | cpu frame]；ret 后复原 rsp，逐项
+// pop GPR，再 pop r12 → rax 覆写 [frame+8]=resume、弃 err、iretq。
 core::arch::global_asm!(
     ".global page_fault_trampoline_asm",
     "page_fault_trampoline_asm:",
+    // 保存 callee-saved r12（用作 resume RIP 跨 pop 传递的临时寄存器，
+    // 必须保存原值以防破坏调用者的活跃变量）
+    "push r12",
     // 保存 caller-saved GPR（rax/rcx/rdx/rsi/rdi/r8-r11），让 faulting 指令的
     // 寄存器操作数在重执时保持原值
     "push r11",
@@ -238,16 +246,17 @@ core::arch::global_asm!(
     "push rdx",
     "push rcx",
     "push rax",
-    // 此时 [rsp] = rax (top), [rsp+72] = cpu frame 的 err, [rsp+80] = RIP
-    "mov rdi, [rsp + 9*8 + 8]",   // rdi = ip (RIP)
-    "mov rsi, [rsp + 9*8]",       // rsi = error_code
+    // 此时 [rsp] = rax (top), [rsp+80] = r12, [rsp+88] = cpu frame 的 err,
+    // [rsp+96] = RIP（10 个 push = 80 字节）
+    "mov rdi, [rsp + 10*8 + 8]",  // rdi = ip (RIP)
+    "mov rsi, [rsp + 10*8]",      // rsi = error_code
     // 对齐 + 调 inner；rax 返回 resume RIP（0 = panic 路径）
     "mov rdx, rsp",
     "and rsp, -16",
     "sub rsp, 16",
     "mov [rsp], rdx",             // 保存对齐前 rsp（指向 rax 槽）
     "call page_fault_inner",
-    "mov r12, rax",               // resume RIP 借 callee-saved r12 跨 pop 传递
+    "mov r12, rax",               // resume RIP 借 r12 跨 pop 传递
     "test rax, rax",
     "jz 1f",                      // 0 = 非期望/未处理 → panic 防御
     // 复原栈，逐项 pop caller-saved
@@ -263,11 +272,15 @@ core::arch::global_asm!(
     "pop r9",
     "pop r10",
     "pop r11",
-    // 此时 rsp → cpu frame（[err|rip|cs|rflags|rsp|ss]）
-    "mov [rsp + 8], r12",         // 覆写保存的 RIP = resume
+    // rsp → [saved_r12][err][rip][cs|rflags|rsp|ss]；r12 = resume RIP。
+    // 用 xchg 把 resume 直接换进 RIP 槽（不碰任何已恢复的 GPR——此前版本
+    // `mov rax, r12` 会覆写刚 pop 回来的 rax，导致重执 `mov rax,[rax]` 类
+    // faulting 指令时 rax = resume RIP，从内核代码段读出指令字节当数据）。
+    "xchg r12, [rsp + 16]",       // [rip 槽] = resume；r12 = 旧 rip（弃用）
+    "pop r12",                    // 恢复 r12 callee-saved 原值；rsp → err 槽
     "add rsp, 8",                 // 弃 error_code → iretq 弹 RIP/CS/RFLAGS/RSP/SS
     "iretq",
-    // panic 路径：仍需清理 9 GPR 再 ud2（让 #UD handler 拿到干净栈）
+    // panic 路径：仍需清理 10 GPR（r12 + 9 caller-saved）再 ud2
     "1:",
     "mov rdx, [rsp]",
     "add rsp, 16",
@@ -281,11 +294,13 @@ core::arch::global_asm!(
     "pop r9",
     "pop r10",
     "pop r11",
+    "pop r12",                    // 恢复 callee-saved r12 原值
     "ud2",
 );
 
 #[no_mangle]
 extern "C" fn page_fault_inner(ip: u64, error_code: u64) -> u64 {
+    crate::syscall::star_watchdog("page-fault");
     let fault_addr = Cr2::read_raw();
 
     // expected-fault 钩子（P4-T2 smoke 专用，见 paging.rs 模块头）：

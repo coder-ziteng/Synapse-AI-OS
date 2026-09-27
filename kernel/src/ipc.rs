@@ -758,6 +758,11 @@ pub fn k_ipc_recv(frame: &SyscallFrame) -> i64 {
         }
         Ok(RecvOutcome::Waiting) => {
             if is_current_boot() {
+                // ep.recv() 已把 receiver_waiting 置 true，但 boot 围栏下我们
+                // 不登记 recv_waiter、不阻塞——必须回滚，否则后续 try_send 会因
+                // 残留标记误走 Delivered → 找不到 recv_waiter → E_NOT_FOUND
+                // （P4 elf-smoke hello §6.6 首次真机暴露）。
+                let _ = crate::kstate::k_ep_cancel_recv(obj);
                 if if_on { x86_64::instructions::interrupts::enable(); }
                 return E_WOULD_BLOCK;
             }

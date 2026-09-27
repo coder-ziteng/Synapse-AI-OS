@@ -68,12 +68,19 @@ const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
 /// - bits 63:48 = user CS - 16（sysret 出口 CS = STAR[63:48] + 16，SS = STAR[63:48] + 8）
 ///
 /// 我们对齐 Linux 习惯：
-/// - kernel_CS = 0x08（GDT index 1, RPL=0）
+/// - kernel_CS = 0x08（GDT index 1, RPL=0）→ **STAR[47:32] = 0x0008**
 /// - user_CS = 0x2B（GDT index 5, RPL=3）
 /// - STAR[63:48] = user_CS - 16 = 0x2B - 16 = 0x1B
 /// - sysret CS = 0x1B + 16 = 0x2B ✓
 /// - sysret SS = 0x1B + 8 = 0x23（user DS）✓
-const STAR_VALUE: u64 = 0x0000_001B_0000_0008u64;
+///
+/// **P4 elf-smoke #GP 根因修复**：旧值 0x0000_001B_0000_0008 把两个字段整体
+/// 放低了 16 位——STAR[47:32]=0x1B（syscall 入口 CS=0x18/SS=0x20，因 GDT
+/// index 3 恰好是兼容 ring0 code 而"能跑"），STAR[63:48]=0（sysret 出口
+/// CS=0x13/SS=0xb——非法选择子，但 sysretq 不校验描述符，用户态带病运行，
+/// 直到下一次 ring3 中断把 0x13 压入帧、handler iretq 查 GDT → #GP）。
+/// 正确布局：高 16 位 = 0x001B（sysret base），次 16 位 = 0x0008（syscall CS）。
+const STAR_VALUE: u64 = 0x001B_0008_0000_0000u64;
 
 /// FMASK：syscall 入口自动清除的 RFLAGS 位。设 0 = 保留全部（含 IF），
 /// 允许中断嵌套。
@@ -220,6 +227,55 @@ unsafe fn wrmsr(msr: u32, value: u64) {
     );
 }
 
+/// 读 MSR（CPL=0）。
+///
+/// # Safety
+/// 调用方必须处于 ring-0。
+#[inline]
+unsafe fn rdmsr(msr: u32) -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        asm!("rdmsr", out("eax") lo, out("edx") hi, in("ecx") msr, options(nostack));
+    }
+    ((hi as u64) << 32) | lo as u64
+}
+
+// ---------------------------------------------------------------------------
+// STAR/LSTAR 看门狗（P4 elf-smoke #GP 回归保险）
+// ---------------------------------------------------------------------------
+//
+// 根因（已修复，见上方 STAR_VALUE）：旧常量 0x0000_001B_0000_0008 把两个
+// 16-bit 字段整体放低了一位——[63:48]=0（应为 0x1b）、[47:32]=0x1b（应为
+// 0x08）、0x08 落到保留位 [15:0]。后果：sysretq 从 STAR[63:48]=0 算出
+// CS=(0+16)|3=0x13（**kernel data 描述子**）、SS=(0+8)|3=0xb（**kernel code
+// 描述子**）；sysretq **不校验描述符合法性**，用户态带着非法 CS/SS 照常运行
+// （64-bit 平坦模型不看段基址），直到下一次 ring3 中断把 0x13/0xb 压入中断帧、
+// handler `iretq` 查 GDT 校验 DPL/类型才 #GP（error_code 随被中断点 = 0x20/
+// 0x13/0x0b）。syscall 入口因 STAR[47:32]=0x1b 指向 GDT index 3（恰为兼容
+// ring0 code）而"能跑"，掩盖了 bug。ring3-smoke 经手搓 iretq 帧（硬编码
+// cs=0x2b）+ kill 走 iretq-to-continuation、不经 sysretq 而幸免；真实 ELF
+// 每次 syscall 都经 sysretq 返回 → 必中。
+//
+// 常量已归位，本看门狗转为**回归保险**：在内核入口 rdmsr 校验 STAR[63:48]==0x1b
+// 且 LSTAR 未被踩，首个发现点报告一次（防未来误改常量或野指针写 MSR 再退化为
+// 难查的延迟 #GP）。
+static STAR_WATCHDOG_FIRED: AtomicBool = AtomicBool::new(false);
+
+/// 校验 STAR/LSTAR 完整性；发现破坏时仅报告一次（含发现点 tag）。
+pub(crate) fn star_watchdog(tag: &str) {
+    let star = unsafe { rdmsr(MSR_STAR) };
+    let lstar = unsafe { rdmsr(MSR_LSTAR) };
+    let expect_lstar = syscall_entry_asm as *const () as u64;
+    if (star >> 48 != 0x1b || lstar != expect_lstar)
+        && !STAR_WATCHDOG_FIRED.swap(true, Ordering::SeqCst)
+    {
+        log::error!(
+            "[star-diag] MSR CORRUPT first seen at [{tag}]: STAR={star:#x} (hi16 must be 0x1b) LSTAR={lstar:#x} (expect {expect_lstar:#x})"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // C-ABI 分发（syscall 入口 asm 调用此函数）
 // ---------------------------------------------------------------------------
@@ -250,6 +306,7 @@ pub fn illegal_syscall_count() -> u64 {
 /// - 返回值 = `i64`（≥0 成功，<0 错误码，Doc 02 §4.3）
 #[no_mangle]
 extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) -> i64 {
+    star_watchdog("syscall-dispatch");
     let ret = dispatch_inner(frame);
     frame.num = ret as u64;
     ret

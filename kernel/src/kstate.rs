@@ -329,6 +329,21 @@ pub fn k_ep_recv(obj: ObjRef) -> Result<RecvOutcome, CapError> {
     Ok(ep.recv())
 }
 
+/// 回滚 `k_ep_recv` 在 `Waiting` 分支置起的 `receiver_waiting` 标记。
+///
+/// boot 围栏下 recv 返回 E_WOULD_BLOCK 而不真正阻塞/登记 waiter，若不回滚，
+/// 后续 try_send 会因残留标记误判 `Delivered` 而找不到 recv_waiter → E_NOT_FOUND
+/// （P4 elf-smoke hello §6.6 首次真机暴露）。
+pub fn k_ep_cancel_recv(obj: ObjRef) -> Result<(), CapError> {
+    let mut eps = ENDPOINTS.lock();
+    let ep = eps
+        .get_mut(obj.index as usize)
+        .and_then(|s| s.as_mut())
+        .ok_or(CapError::InvalidCap)?;
+    ep.cancel_recv();
+    Ok(())
+}
+
 /// 对端死亡回收：摘除 `sender` 全部排队请求，返回摘除数。
 pub fn k_ep_cancel_sender(obj: ObjRef, sender: AgentId) -> Result<usize, CapError> {
     let mut eps = ENDPOINTS.lock();

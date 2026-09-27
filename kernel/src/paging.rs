@@ -612,7 +612,7 @@ pub(crate) fn handle_user_fault(cr2: u64, error_code: u64, ip: u64) -> u64 {
     match as_ref.map_page(va, frame, flags) {
         Ok(()) => {
             info!(
-                "[vma] demand-mapped {:#x} -> frame {:#x} ({:?}, leaf flags {:#x})",
+                "[vma] demand-mapped {:#x} -> frame {:#x} ({:?}, flags {:#x})",
                 va, frame, region.kind, flags
             );
             ip // 重执 faulting 指令

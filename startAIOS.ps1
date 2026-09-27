@@ -10,8 +10,10 @@
 #  判定标准 (解析 xtask 输出的退出码行，不依赖 xtask 自身 $LASTEXITCODE):
 #    1. QEMU 退出码 = 363  ((0xB5<<1)|1, isa-debug-exit 正常收尾)
 #       QEMU 退出码 = 355  ((0xB1<<1)|1, kernel panic 确定性出口 — 直接判失败)
-#    2. logs\serial.log 出现 "N/N checks passed" 且无 [PANIC]
-#    3. logs\debugcon-kernel.log boot marker 序列完整 (打印供人工核对)
+#    2. 本次 serial 日志出现 "N/N checks passed" 且无 [PANIC]
+#       (日志路径从 xtask stdout 的 "[xtask] Logs: serial=..." 行解析，
+#        xtask run 写带时间戳的 serial-<ts>.log，非固定名 serial.log)
+#    3. 本次 debugcon-kernel 日志 boot marker 序列完整 (打印供人工核对)
 # ============================================================
 param(
     [switch]$BuildOnly,
@@ -82,6 +84,12 @@ $runOut -split "`n" | Where-Object { $_ -match '\[xtask\]' } | ForEach-Object { 
 
 $qemuExit = -1
 if ($runOut -match 'QEMU exited with exit code: (\d+)') { $qemuExit = [int]$Matches[1] }
+
+# xtask run 写的是**带时间戳**的 serial-<ts>.log（避免文件锁），不是固定名 serial.log。
+# 从 xtask stdout 的 "[xtask] Logs: serial=<path>, dc402=<path>, dc501=<path>" 行解析
+# 真实路径，判定才能读到本次运行的日志（否则会误读上一次 CI/GUI 留下的过期 serial.log）。
+if ($runOut -match 'serial=([^,\r\n]+)') { $serialLog = $Matches[1].Trim() }
+if ($runOut -match 'dc501=([^\r\n]+)')   { $dbg501Log = $Matches[1].Trim() }
 
 # ---------- 结果判定 ----------
 Write-Step '[3/3] 结果判定'

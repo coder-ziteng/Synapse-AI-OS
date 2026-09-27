@@ -99,6 +99,16 @@ impl Endpoint {
         self.receiver_waiting
     }
 
+    /// 撤销 `recv()` 置起的接收方等待标记（状态回滚）。
+    ///
+    /// 集成层调用 `recv()` 得到 `Waiting` 后**决定不阻塞**时（如 boot 围栏返回
+    /// E_WOULD_BLOCK）必须回滚：否则残留的 `receiver_waiting=true` 会让后续
+    /// `try_send` 误走 `Delivered` 路径，而集成层并未登记 waiter →
+    /// E_NOT_FOUND（P4 elf-smoke hello 6.6 首次真机暴露的状态泄漏）。
+    pub fn cancel_recv(&mut self) {
+        self.receiver_waiting = false;
+    }
+
     /// 非阻塞发送（`try_send`，Doc 03 §9：首期唯一非阻塞变体）。
     ///
     /// - 接收方等待中 → [`SendOutcome::Delivered`]（清除等待标记）；
