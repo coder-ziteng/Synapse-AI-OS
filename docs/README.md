@@ -18,6 +18,8 @@
 | 06 | [系统服务层路线图](design/06-system-services-roadmap.md) | **PROPOSED 完成** | S1~S6 | 6 |
 | 07 | [显示栈与空间外壳](design/07-display-stack-and-spatial-shell.md) | **DECIDED** | S6 + Phase 6 | 9 |
 | 08 | [AI 原生文件系统与语义索引](design/08-fs-ai-index.md) | **DECIDED** | P4.5 + P5 + S4 | 13 |
+| 09 | [本地推理栈决策](design/09-local-inference-decision.md) | **DECIDED** | P6.8 | 4 |
+| 10 | [用户会话体系决策](design/10-user-session-decision.md) | **DECIDED** | P6.11 + S6 | 6 |
 
 ---
 

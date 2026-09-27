@@ -4,15 +4,17 @@
 //!
 //! `build_disk.py` 把 cpio newc initramfs 追加在 kernel.bin 之后；stage2
 //! 的加载循环把 (kernel + initramfs) **连续**读入物理 0x200000+，然后在
-//! 32-bit PM（平坦段、分页未开）往物理 [`INITRD_INFO_ADDR`] = 0x20100 写：
+//! 32-bit PM（平坦段、分页未开）往物理 [`INITRD_INFO_ADDR`] = 0x21000 写：
 //!
 //! ```text
 //! +0x00 : u64 LE  initrd 物理基址（= 0x200000 + ksectors*512）
 //! +0x08 : u64 LE  initrd 字节长度（0 = 镜像未打包 initramfs）
 //! ```
 //!
-//! 0x20100 位于 E820 raw buffer（0x20000..0x200AC）之后的空闲低内存，
-//! 两者都在页帧分配器的"低 1MB 保留区"内（page_frame.rs 步骤 1.5）。
+//! 0x21000 位于 E820 raw buffer 之后 —— P6.0-T1 真实探测上限 127 条，
+//! entries 区最多铺到 0x20004 + 127×24 = 0x20BE4（原 0x20100 只按硬编码
+//! 7 条布局预留，>10 条即冲突）。两者都在页帧分配器的"低 1MB 保留区"内
+//! （page_frame.rs 步骤 1.5）。
 //!
 //! ## 消费方
 //!
@@ -24,7 +26,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use log::info;
 
 /// 引导记录物理地址（stage2 写入；布局见模块头）。
-pub const INITRD_INFO_ADDR: usize = 0x20100;
+pub const INITRD_INFO_ADDR: usize = 0x21000;
 
 static INITRD_BASE: AtomicU64 = AtomicU64::new(0);
 static INITRD_SIZE: AtomicU64 = AtomicU64::new(0);
@@ -38,7 +40,7 @@ pub fn initrd_init() {
     if INIT_DONE.swap(1, Ordering::SeqCst) != 0 {
         panic!("initrd_init called twice");
     }
-    // SAFETY: 0x20100 在 boot 恒等映射低 1MB 内（stage2 跳转前已写完记录），
+    // SAFETY: 0x21000 在 boot 恒等映射低 1MB 内（stage2 跳转前已写完记录），
     // 8 字节对齐读两个 u64；本函数是记录的唯一 Rust 侧读者。
     let (base, size) = unsafe {
         let p = INITRD_INFO_ADDR as *const u64;

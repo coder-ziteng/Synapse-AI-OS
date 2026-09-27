@@ -3,7 +3,7 @@
 //! ## 端到端流程（task.json P4-T5 verify）
 //!
 //! 1. [`crate::initrd::bytes`] 取 initramfs（stage2 连续加载在内核镜像后，
-//!    0x20100 引导记录）→ `synapse_elf::cpio::find("hello")` 提取 ELF 字节；
+//!    0x21000 引导记录）→ `synapse_elf::cpio::find("hello")` 提取 ELF 字节；
 //! 2. `synapse_elf::parse` 完整校验：ET_EXEC / x86-64 / PT_LOAD 文件边界 /
 //!    页同余 / W^X / 用户窗口 [1GB, 2GB) / 段重叠 / entry 落点（Doc 02 §2）；
 //! 3. 新建用户 [`AddressSpace`]：每个 PT_LOAD 页 alloc_frame → 清零（bss +
@@ -108,7 +108,7 @@ pub(crate) fn extract_init_parsed() -> Option<ParsedElf<'static>> {
 /// P4-T9e：通用化版本——按名字从 initramfs 取任意 ELF。spawn 路径按需传入
 /// "hello" / "crasher" 等不同目标。
 pub(crate) fn extract_and_parse_named(name: &str) -> ParsedElf<'static> {
-    let initrd = crate::initrd::bytes().expect("[elf-smoke] initramfs missing (0x20100 size=0)");
+    let initrd = crate::initrd::bytes().expect("[elf-smoke] initramfs missing (0x21000 size=0)");
     let elf_bytes = cpio::find(initrd, name)
         .expect("[elf-smoke] cpio malformed")
         .unwrap_or_else(|| panic!("[elf-smoke] '{name}' not in initramfs"));

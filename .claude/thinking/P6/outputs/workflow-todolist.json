@@ -1,0 +1,118 @@
+{
+  "featureName": "P6（本窗口首批认领：3 任务）",
+  "note": "P6 全量 32 任务切分已登记 task.json（notes/03-planning.md）；本文件仅覆盖 2026-09-27 用户批准立即启动的 3 个任务的 04-codegen 执行计划。",
+  "checkpoints": [
+    {
+      "id": "CP-01",
+      "title": "P6.0-T1 E820 真实探测（实施型）",
+      "checks": [
+        "build_disk.py stage2 实模式恢复 INT 15h AX=E820h 循环探测（EDX='SMAP'，EAX/EDX 高 32 位清零，输出 20B 直写内核 24B 步长记录）",
+        "探测失败 fallback 到既有硬编码 QEMU -m 128M 表（保留原 rep movsb 数据块）",
+        "debugcon 标记 'M'/'N' + 条目数回显 / 'X' fallback 标记",
+        "宿主 cargo xtask test：memory_map.rs 单测无回归",
+        "QEMU -m 128M 真机：内核 [memory_map] 解析 ≥7 条且与 SeaBIOS e820 一致",
+        "QEMU -m 8G 真机：E820 entries 完整（≥10 条，含 ACPI/Reserved）",
+        "原有 smoke 全绿（cargo xtask ci 或 run_headless exit 363）"
+      ],
+      "subtasks": [
+        "P6.0-T1"
+      ],
+      "status": "completed",
+      "completedAt": "2026-09-27",
+      "result": "E820 真实探测三档真机 1:1（128M/1024M/8G，与 SeaBIOS e820 map 逐字节一致）；终止双判据修复 P2-T1 挂起真因；fallback 保留（'p' 标记，本机未触发）；INITRD_INFO_ADDR 0x21000 碰撞修复；xtask run=363 / ci=OK。口径修正：'≥10 条含 ACPI' 为机型假设作废；'UEFI GetMemoryMap' 超出 stage2 范围；memory_map.rs 宿主单测因 [[bin]] test=false 历史不可达，以真机 1:1 比对替代。"
+    },
+    {
+      "id": "CP-02",
+      "title": "P6.8-T1 本地推理决策（决策型）",
+      "checks": [
+        "决策报告 docs/design/09-local-inference-decision.md（候选 A candle/burn、B libc shim+llama.cpp、C 远程 API 代理对比）",
+        "与 Doc 04/05/06 + 避坑指南 §5 一致性自检",
+        "用户决策通过 + decision_log 追加"
+      ],
+      "subtasks": [
+        "P6.8-T1"
+      ],
+      "status": "completed",
+      "completedAt": "2026-09-27",
+      "result": "决策报告 docs/design/09（DECIDED）：六段结构（约束 C1~C6 / 三候选矩阵 / 推荐 / 再决策触发 / 决策记录 / 一致性自检）；用户批准候选 C=远程 AI API 代理 + InferenceProvider 埋点（2026-09-27）；P6.8-T2 解锁并缩为 ≤1 窗口（切换配置项 + 脱机 fail-fast + 埋点）；decision_log 追加；需求目标 Phase 6 行标 DECIDED。"
+    },
+    {
+      "id": "CP-03",
+      "title": "P6.11-T1 用户会话决策（决策型）",
+      "checks": [
+        "决策报告 docs/design/10-user-session-decision.md（候选 A cap 命名空间、B 会话 token、C 双轨）",
+        "与 Doc 01 §7 agent_id / Doc 02 / Doc 07 §6 / GAP-1 一致性自检",
+        "用户决策通过 + decision_log 追加"
+      ],
+      "subtasks": [
+        "P6.11-T1"
+      ],
+      "status": "completed",
+      "completedAt": "2026-09-27",
+      "result": "决策报告 docs/design/10（DECIDED）：约束 D1~D7（单一强制点/扁平 CapTable/级联撤销/agent_id 盖章/shell 独占前台/R6·R9 边界/Doc 05 分界）+ 三候选矩阵 + S6 收敛点表 + 一致性自检（Doc 01/02/05/07/GAP-1）；用户批准候选 C=双轨制（cap 命名空间内核隔离 + 会话 token 用户态认证，接缝=SessionManager 翻译为 cap 铸造/撤销，token 不进内核）；登出复用 derivation tree 级联撤销，无新内核原语；首期单用户默认不启用零破坏；P6.11-T2 解锁；需求目标 Phase 6 [x] + R13 处置更新；decision_log 追加。"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "P6.0-T1",
+      "checkpoint": "CP-01",
+      "type": "modify",
+      "title": "build_disk.py stage2 恢复 BIOS INT 15h AX=E820h 真实探测 + fallback",
+      "action": {
+        "type": "modify_file",
+        "params": {
+          "path": "build_disk.py"
+        }
+      },
+      "status": "completed"
+    },
+    {
+      "id": "P6.8-T1",
+      "checkpoint": "CP-02",
+      "type": "implement",
+      "title": "本地推理三候选决策报告（docs/design/09）",
+      "action": {
+        "type": "create_file",
+        "params": {
+          "path": "docs/design/09-local-inference-decision.md"
+        }
+      },
+      "status": "completed"
+    },
+    {
+      "id": "P6.11-T1",
+      "checkpoint": "CP-03",
+      "type": "implement",
+      "title": "用户会话双轨决策报告（docs/design/10）",
+      "action": {
+        "type": "create_file",
+        "params": {
+          "path": "docs/design/10-user-session-decision.md"
+        }
+      },
+      "status": "completed"
+    }
+  ],
+  "finalChecks": [
+    {
+      "category": "构建",
+      "check": "cargo xtask build + build_disk.py 生成镜像无错误"
+    },
+    {
+      "category": "测试",
+      "check": "memory_map.rs 宿主单测 + QEMU smoke（exit 363）全绿"
+    },
+    {
+      "category": "代码质量",
+      "check": "cargo clippy 无新增告警；build_disk.py 注释与低内存约定表同步"
+    },
+    {
+      "category": "文档",
+      "check": "task.json/README §3 P6 行同步；两份决策文档入 docs/design + docs/README 索引联动"
+    }
+  ],
+  "stats": {
+    "totalTasks": 3,
+    "checkpoints": 3
+  }
+}

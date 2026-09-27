@@ -29,7 +29,8 @@ stage 2 流程:
 调试检查点 (port 0x402, 配合 -device isa-debugcon):
   'A' 进入 stage2, 'a' A20 已开, 'b' EDD 可用, 'B' LGDT 完成,
   'e' 每块 int13h 读成功, 'f' 每块 PM 复制完成, 'c' 内核加载完成,
-  'M' E820 start, 'N' E820 done, 'X' E820 failed (新增),
+  'M' E820 start, 'p' E820 探测失败→硬编码 fallback,
+  'N' E820 done + 1 字节条目数回显 (P6.0-T1 真实探测),
   'C' 进入 32-bit, 'D' 段/栈就绪, 'E' 页表清零完,
   'F' 顶层页表项写完, 'G' PD 填充完, 'H' 分页+长模式已开,
   'K' 进入 64-bit, 'J' 即将跳内核, 'A'(内核) Rust _start64 已到达,
@@ -47,7 +48,10 @@ IMG = sys.argv[2] if len(sys.argv) > 2 else 'kernel_hd.img'
 INITRD = sys.argv[3] if len(sys.argv) > 3 else None   # P4-T5: cpio newc initramfs
 IMG_SECTORS = 32768          # 16 MB
 KERNEL_LOAD = 0x200000       # 链接基址
-INITRD_INFO_ADDR = 0x20100   # stage2 写 {base u64, size u64}；内核 initrd.rs 消费
+# P6.0-T1: 0x21000。原 0x20100 会与真实 E820 探测结果冲突 —— 127 条上限时
+# entries 区最多铺到 0x20004 + 127×24 = 0x20BE4，0x21000 在其后且仍远低于
+# 内核加载基址 0x200000。stage2 写 {base u64, size u64}；内核 initrd.rs 消费。
+INITRD_INFO_ADDR = 0x21000
 EDD_MAX_SECTORS = 127        # 单次 AH=42h 读上限(保守值)
 
 # ============================================================
@@ -109,7 +113,7 @@ print(f'kernel: base=0x{base:x} size={len(kernel)} ({ksectors} sectors) '
 
 # ============================================================
 # P4-T5 initramfs: cpio newc 归档追加到 kernel.bin 之后，stage2
-# 连续加载 (kernel + initramfs) 到 0x200000+，并在 0x20100 写
+# 连续加载 (kernel + initramfs) 到 0x200000+，并在 0x21000 写
 # {base, size} 记录。initrd_base = 0x200000 + ksectors*512（构建期常量）。
 # ============================================================
 if INITRD:
@@ -298,20 +302,80 @@ emit(bytes([0x0F, 0x85, 0x00, 0x00]))
 struct.pack_into('<h', s2, _jnz_off + 2, load_loop - (_jnz_off + 6))
 debug16(0x63)                            # 'c' 内核加载完成
 
-# ==== BIOS INT 15h AX=E820h (实模式, 写 count 到 0x20000; entries 从 0x20004 起) ====
+# ==== BIOS INT 15h AX=E820h 真实探测 (P6.0-T1, 16-bit 实模式) ====
 #   QEMU/SeaBIOS 在 16-bit 实模式下提供 E820；32-bit PM 没有 IDT 不能直接调 INT 15h。
 #   物理 0x20000 是 P2 阶段预留给 E820 的 4KB 区（与内核加载 0x200000+ 不重叠）。
-#   16-bit 实模式下 moffs16 只有 16 位, 不能直接写 0x20000；用 ES=0x2000 拐一下
-#   （ES:0 = 0x20000）, pop/push AX 绕开 AX 被覆盖。
+#   输出布局 (与 memory_map.rs Rust 端解析契约一致):
+#     count(u32 LE) @ 0x20000..0x20004; entries @ 0x20004.. (24 字节/条步长)
+#   探测循环契约 (ACPI spec INT 15h E820 + SeaBIOS rel-1.17 实测):
+#     每轮 EAX=0xE820 / EDX='SMAP' / ECX=20 / EBX=continuation / ES:DI=输出槽。
+#     终止双判据: CF=1（ACPI 规范, 本轮槽无效丢弃）或 EBX 回绕 0（本轮槽有效
+#     计入后退出）。⚠️ 本机 SeaBIOS rel-1.17.0 实测**从不置 CF**, 仅在返回
+#     最后一条后把 continuation 归零 —— 只认 CF 会无限循环（P2-T1 挂起真因,
+#     2026-09-27 debugcon 逐轮取证）。BIOS 在 ES:DI 写 20 字节
+#     [base u64 | size u64 | type u32], 正是内核 E820Entry 记录的前 20 字节
+#     —— 槽位每轮 +24B 前进, 尾随 4 字节留洞（个别 BIOS 带 attrs 写满 24B 也
+#     恰好落在洞内）, 无需任何转换。
+#   历史避坑（P2-T1 挂起：'PC 跳回 stage2 起点', 2026-09-26 记录）:
+#     1. EAX/EDX/EBX/EDI/EBP 凡跨 int 使用必须 66 前缀 32-bit 全宽清零 ——
+#        加载循环 rep movsd 使高 32 位残留大值, 仅 mov ax/dx 会带上残值。
+#        （首轮"127 槽全同"的根因是终止判据缺失, 见上; 全宽清零仍属必需。）
+#     2. 探测循环内严禁 debug16 —— 其 `mov al,imm` 污染 AL（同 LBA 推进区教训）。
+#     3. int 15h 只保证保留 SI/DI/BP; EAX/EBX/ECX/EDX/DS/ES 均视为可破坏 ——
+#        写 count 前重建 ES=0x2000, tail 统一重建 DS=0（后续 V/W/X 诊断依赖）。
+#     4. 条目数 ≥127 保险退出; 0 条目（首轮即 CF=1/不支持）→ 回退 P2-T1 硬编码表。
+#   debugcon 标记: 'M' start; 'p' 探测失败→fallback; 'N' done + 1 字节条目数回显。
 debug16(0x4D)                              # 'M' E820 start
-# 实测 SeaBIOS INT 15h AX=E820h 在 -cpu qemu64 + 直连 MBR 引导路径下 hang
-# (调用后 PC 跳回 stage2 起点, debugcon 出现 'a' marker; 去掉 INT 即恢复)。
-# P2-T1 MVP 临时硬编码 QEMU -m 128M 已知布局, 真机探测留 P2 后续。
-# 输出布局 (与 memory_map.rs Rust 端解析契约一致):
-#   count(u32 LE) @ 0x20000..0x20004
-#   entries       @ 0x20004..       (24 字节/条, 共 7 条 = 168 字节)
-# 数据放在 stage2 二进制末尾, 代码 emit 完后追加; 运行时用 rep movsb
-# 从 DS=0x800 (stage2 加载段) 拷到 ES=0x2000 目标段。
+# ⚠️ 寄存器全宽赋值：实模式 16-bit 指令 (mov di/bx,imm16 / xor bp,bx) 只动低
+# 16 位，高 16 位残留加载循环 rep movsd 的 EDI/EBX 大值 → BIOS 把 continuation
+# 读成巨值 / 把输出地址读错。凡跨 int 使用的指针/计数寄存器一律 66 前缀
+# 32-bit 赋值（挂起真因另见上方终止双判据注释）。
+emit(bytes([0x31, 0xC0]))                   # xor ax, ax
+emit(bytes([0x8E, 0xD8]))                   # mov ds, ax (DS=0)
+emit(bytes([0x66, 0xB8, 0x00, 0x20, 0x00, 0x00]))  # mov eax, 0x2000 (ES 段基全宽)
+emit(bytes([0x8E, 0xC0]))                   # mov es, ax   (线性基 0x20000)
+emit(bytes([0x66, 0xBF, 0x04, 0x00, 0x00, 0x00]))  # mov edi, 0x0004 (首槽全宽清零!)
+emit(bytes([0x66, 0xBD, 0x00, 0x00, 0x00, 0x00]))  # mov ebp, 0 (条目计数, 全宽)
+emit(bytes([0x66, 0xBB, 0x00, 0x00, 0x00, 0x00]))  # mov ebx, 0 (continuation, 全宽!)
+e820_probe_loop = len(s2)
+emit(bytes([0x66, 0xB8, 0x20, 0xE8, 0x00, 0x00]))  # mov eax, 0xE820 (高 32 位清零!)
+emit(bytes([0x66, 0xBA, 0x50, 0x41, 0x4D, 0x53]))  # mov edx, 'SMAP' (高 32 位清零!)
+emit(bytes([0x66, 0xB9, 0x14, 0x00, 0x00, 0x00]))  # mov ecx, 20 (全宽; 非 EDNS → 恰好 20B 输出)
+emit(bytes([0xCD, 0x15]))                   # int 0x15
+# 终止双判据（2026-09-27 debugcon 逐轮取证，SeaBIOS rel-1.17.0 实测）:
+#   1. CF=1 → 经典 ACPI 尽头信号，本轮槽未写入有效数据 → 丢弃本轮;
+#   2. EBX 回绕 0 → 本轮已写入最后一条后 continuation 归零 (本机实测:
+#      此 SeaBIOS 从不置 CF, 7 条后 bl=0 → 从头循环 —— 这正是 P2-T1 当年
+#      无限循环挂起的真正根因, 而非寄存器污染) → 本轮有效, 计入后退出。
+# 先 pushf/pop si 快照 flags（SI 高 16 位残留无碍, 只用 bit0）。
+emit(bytes([0x9C]))                         # pushf
+emit(bytes([0x5E]))                         # pop si
+emit(bytes([0xF7, 0xC6, 0x01, 0x00]))      # test si, 1
+_e820_jnz = len(s2); emit(bytes([0x75, 0x00]))   # jnz e820_probe_end (CF=1, patch)
+emit(bytes([0xFF, 0xC5]))                   # inc bp (本轮槽数据有效, 先计数)
+emit(bytes([0x85, 0xDB]))                   # test ebx, ebx (continuation 回绕?)
+_e820_jz2 = len(s2); emit(bytes([0x74, 0x00]))   # jz e820_probe_end (列表尽头, patch)
+emit(bytes([0x83, 0xC7, 0x18]))            # add di, 24 (下一槽数据区)
+emit(bytes([0x83, 0xFD, 0x7F]))            # cmp bp, 127
+_e820_jb = len(s2); emit(bytes([0x72, 0x00]))   # jb e820_probe_loop (patch)
+_e820_end = len(s2)                        # probe_end 起点（三处 rel8 目标）
+for _off in (_e820_jnz, _e820_jz2):
+    _rel = _e820_end - (_off + 2)
+    assert 0 <= _rel <= 127
+    s2[_off + 1] = _rel
+s2[_e820_jb + 1] = (e820_probe_loop - (len(s2) + 2)) & 0xFF
+assert e820_probe_loop - (len(s2) + 2) == int.from_bytes(bytes([s2[_e820_jb + 1]]), 'big', signed=True)
+# ---- 探测收尾: count 写回 ----
+emit(bytes([0x85, 0xED]))                   # test bp, bp
+_e820_jz = len(s2); emit(bytes([0x74, 0x00]))   # jz e820_fallback (patch)
+emit(bytes([0xB8, 0x00, 0x20]))            # mov ax, 0x2000 (防御性重建 ES, int15h 出口可能已破坏)
+emit(bytes([0x8E, 0xC0]))                   # mov es, ax
+emit(bytes([0x26, 0x89, 0x2E, 0x00, 0x00])) # mov [es:0x0000], bp (count 低 16 位)
+emit(bytes([0x26, 0xC7, 0x06, 0x02, 0x00, 0x00, 0x00]))  # mov word [es:0x0002], 0 (高 16 位)
+_e820_jmp = len(s2); emit(bytes([0xEB, 0x00]))   # jmp e820_tail (patch)
+# ---- fallback: P2-T1 硬编码 QEMU -m 128M 表 (数据在 stage2 末尾) ----
+e820_fallback = len(s2)
+debug16(0x70)                               # 'p' E820 探测失败 → 硬编码 fallback
 emit(bytes([0xB8, 0x00, 0x08]))            # mov ax, 0x800 (stage2 加载段)
 emit(bytes([0x8E, 0xD8]))                   # mov ds, ax
 data_si_patch = len(s2)
@@ -322,15 +386,27 @@ emit(bytes([0xBF, 0x04, 0x00]))            # mov di, 0x0004 (目标段内偏移 
 emit(bytes([0xB9]) + struct.pack('<H', 7 * 24))  # mov cx, 168 (7 entries × 24 bytes)
 emit(bytes([0xFC]))                         # cld
 emit(bytes([0xF3, 0xA4]))                   # rep movsb
-emit(bytes([0x31, 0xC0]))                   # xor ax, ax (恢复 DS=0 给后续 V/W/X)
+emit(bytes([0x31, 0xC0]))                   # xor ax, ax (count 写回用)
 emit(bytes([0x8E, 0xD8]))                   # mov ds, ax
-# count (u32 LE = 7) @ 0x20000
 emit(bytes([0xBF, 0x00, 0x00]))            # mov di, 0 (目标段内偏移 0 = 线性 0x20000)
 emit(bytes([0xB8, 0x07, 0x00]))            # mov ax, 7 (count)
 emit(bytes([0x26, 0x89, 0x05]))            # mov [es:di], ax (count 低 16 位)
 emit(bytes([0xB8, 0x00, 0x00]))            # mov ax, 0
 emit(bytes([0x26, 0x89, 0x45, 0x02]))      # mov [es:di+2], ax (count 高 16 位 = 0)
+# ---- 两条路径汇合 ----
+e820_tail = len(s2)
+s2[_e820_jz + 1] = (e820_fallback - (_e820_jz + 2)) & 0xFF
+s2[_e820_jmp + 1] = (e820_tail - (_e820_jmp + 2)) & 0xFF
+assert e820_fallback - (_e820_jz + 2) == int.from_bytes(bytes([s2[_e820_jz + 1]]), 'big', signed=True)
+assert e820_tail - (_e820_jmp + 2) == int.from_bytes(bytes([s2[_e820_jmp + 1]]), 'big', signed=True)
+emit(bytes([0x31, 0xC0]))                   # xor ax, ax (统一恢复 DS=0 给后续 V/W/X)
+emit(bytes([0x8E, 0xD8]))                   # mov ds, ax
+emit(bytes([0xB8, 0x00, 0x20]))            # mov ax, 0x2000 (重建 ES 供 count 回显)
+emit(bytes([0x8E, 0xC0]))                   # mov es, ax
 debug16(0x4E)                               # 'N' E820 done
+emit(bytes([0xBA, 0x02, 0x04]))            # mov dx, 0x402
+emit(bytes([0x26, 0x8A, 0x06, 0x00, 0x00])) # mov al, [es:0x0000] (count 低字节 ≤127)
+emit(bytes([0xEE]))                          # out dx, al (条目数回显)
 
 # ==== 诊断: 加载完成后回读 RAM 关键 dword (定位损坏发生阶段) ====
 # 'V' + [0x200000] 4B | 'W' + [0x207140] 4B | 'X' + [0x20FE00] 4B (block1 首)
@@ -376,7 +452,7 @@ emit(bytes([0xBC, 0x08, 0x00, 0x06, 0x00]))  # mov esp, 0x60008
 
 debug32(0x44)                            # 'D'
 
-# ---- P4-T5: 写 initramfs 引导记录到物理 0x20100（32-bit PM 平坦段，分页未开）----
+# ---- P4-T5: 写 initramfs 引导记录到物理 0x21000（32-bit PM 平坦段，分页未开；P6.0-T1 自 0x20100 后移至 127 条 E820 表之外）----
 #   {base u64, size u64}；构建期常量（initrd_base = 0x200000 + ksectors*512）。
 #   mov dword [abs], imm32 编码：C7 04 25 <disp32> <imm32>（SIB 无基址寄存器）。
 def mov_mem_imm32(addr, imm):
