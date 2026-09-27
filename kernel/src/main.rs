@@ -46,6 +46,7 @@ pub mod kstack;
 pub mod proc_ext;
 pub mod spawn;
 pub mod proc_life;
+pub mod block;
 
 // 把 trampoline 汇编链入二进制；`boot.S` 中 `.global _start` 提供链接器 entry。
 global_asm!(include_str!("boot.S"));
@@ -248,6 +249,13 @@ pub extern "C" fn _start64() -> ! {
     boot_marker(b'Y');
     clock::calibrate();
     boot_marker(b'Z');
+
+    // P4.5 预研：块设备驱动层 init（仅探测 virtio-blk 候选，不真实注册）。
+    // 当前 stub：PCI 扫描 + log，不挂盘（系统仍从 initrd 启动）。
+    // marker 'w'/'x'：未占用的首组小写字母（a..v 已被 P3/P4 smoke 占满）。
+    boot_marker(b'w');
+    block::init_block();
+    boot_marker(b'x');
 
     smoke::run_integration_smoke(&refs);
     boot_marker(b'I');

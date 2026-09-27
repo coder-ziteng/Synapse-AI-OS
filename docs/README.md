@@ -1,7 +1,7 @@
 # Synapse 设计文档索引
 
 > 本目录包含 Synapse AI 原生微内核的全部设计文档。
-> 最后更新：2026-09-25
+> 最后更新：2026-09-27
 
 ---
 
@@ -17,6 +17,7 @@
 | 05 | [跨 OS 外交协议](design/05-inter-os-diplomacy-protocol.md) | **PROPOSED 完成** | Phase 6+ | 7 |
 | 06 | [系统服务层路线图](design/06-system-services-roadmap.md) | **PROPOSED 完成** | S1~S6 | 6 |
 | 07 | [显示栈与空间外壳](design/07-display-stack-and-spatial-shell.md) | **DECIDED** | S6 + Phase 6 | 9 |
+| 08 | [AI 原生文件系统与语义索引](design/08-fs-ai-index.md) | **DECIDED** | P4.5 + P5 + S4 | 13 |
 
 ---
 
@@ -43,6 +44,7 @@
 1. Doc 06 全文 — 服务层路线图
 2. Doc 06 §13 — 硬件信任根埋点设计
 3. Doc 07 全文 — 显示栈与空间外壳（GUI 选型、混合模式、DynamicUIGenerator）
+4. Doc 08 全文 — AI 原生 FS + vectorfsd（块设备 trait · extent + summary slot · vectorfsd IPC 协议）
 
 ---
 
